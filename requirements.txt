@@ -1,0 +1,39 @@
+# Core framework
+langchain
+langchain-text-splitters
+langchain_community
+
+# LLM provider
+langchain-groq
+langchain-openai
+langchain-anthropic
+langchain-google-genai
+langchain-ollama
+
+
+# Vector store (local)
+chromadb
+
+# UI (testing shell)
+streamlit
+
+# Code parsing (tree-sitter)
+tree-sitter
+tree-sitter-python
+tree-sitter-javascript
+tree-sitter-typescript
+tree-sitter-java
+tree-sitter-go
+tree-sitter-rust
+tree-sitter-ruby
+tree-sitter-c
+tree-sitter-cpp
+tree-sitter-c-sharp
+tree-sitter-php
+tree-sitter-dart @ git+https://github.com/UserNobody14/tree-sitter-dart.git
+tree-sitter-yaml
+
+# Utilities
+pydantic
+pydantic-settings
+python-dotenv

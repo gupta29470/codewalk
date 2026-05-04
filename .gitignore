@@ -1,0 +1,28 @@
+# Secrets
+.env
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# Virtual environment
+.venv/
+.codewalk-env/
+
+# Vector store data
+data/
+
+# IDE
+.vscode/
+.idea/
+
+# Scratch/teaching files
+teach.py
+
+codewalk_plan.md
+
+SESSION_SUMMARY.md
+
+# OS
+.DS_Store
