@@ -1,4 +1,5 @@
 from pathlib import Path
+import hashlib
 
 from langchain_text_splitters import RecursiveCharacterTextSplitter, Language
 
@@ -19,6 +20,10 @@ LANGUAGE_MAP =  {
     "c": Language.C,
     "markdown": Language.MARKDOWN,
 }
+
+def file_hash(content: str) -> str:
+    """Generate an MD5 hash of the file content for change detection."""
+    return hashlib.md5(content.encode()).hexdigest()
 
 def read_file_content(file_path: str) -> str:
     """Read a file's content. Return empty string if it can't be read."""
@@ -74,7 +79,7 @@ def chunk_file_with_parser(file_info: dict, chunk_size: int = 1000, chunk_overla
     """
     language = file_info["language"]
     file_path = file_info["absolute_path"]
-    relative_path = file_info["path"]
+    relative_path = file_info["file_path"]
 
     # Step 1: Parse the file with tree-sitter
     parsed_items = parse_file(file_path, language)
@@ -84,6 +89,9 @@ def chunk_file_with_parser(file_info: dict, chunk_size: int = 1000, chunk_overla
     chunks = []
     chunk_index = 0
     splitter = get_splitter(language, chunk_size, chunk_overlap)
+
+    content = read_file_content(file_path)
+    content_hash = file_hash(content)
 
     # Step 2: Each parsed function/class → one or more chunks
     for item in parsed_items:
@@ -97,6 +105,7 @@ def chunk_file_with_parser(file_info: dict, chunk_size: int = 1000, chunk_overla
                 "language": language,
                 "chunk_index": chunk_index,
                 "source": "parser",
+                "file_hash": content_hash,
                 "symbol_name": item["name"],
                 "symbol_type": item["type"],
                 "start_line": item["start_line"],
@@ -117,11 +126,11 @@ def chunk_file_with_parser(file_info: dict, chunk_size: int = 1000, chunk_overla
                     "symbol_type": item["type"],
                     "start_line": item["start_line"],
                     "end_line": item["end_line"],
+                    "file_hash": content_hash,
                 })
                 chunk_index += 1
 
     # Step 3: Leftover top-level code (imports, constants, etc.)
-    content = read_file_content(file_path)
     leftover = get_leftover_code(content, parsed_items)
 
     if leftover.strip():
@@ -137,6 +146,7 @@ def chunk_file_with_parser(file_info: dict, chunk_size: int = 1000, chunk_overla
                 "symbol_type": None,
                 "start_line": None,
                 "end_line": None,
+                "file_hash": content_hash,
             })
             chunk_index += 1
 
@@ -166,7 +176,7 @@ def chunk_file(file_info: dict, chunk_size: int = 1000, chunk_overlap: int = 200
     return [
         {
             "text": text,
-            "file_path": file_info["path"],
+            "file_path": file_info["file_path"],
             "language": language,
             "chunk_index": index,
             "source": "text_splitter",
@@ -174,6 +184,7 @@ def chunk_file(file_info: dict, chunk_size: int = 1000, chunk_overlap: int = 200
             "symbol_type": None,
             "start_line": None,
             "end_line": None,
+            "file_hash": file_hash(content),
         }
         for index, text in enumerate(texts)
     ]

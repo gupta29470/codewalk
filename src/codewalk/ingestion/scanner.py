@@ -50,7 +50,7 @@ def scan_directory(directory: str) -> list[dict]:
             continue
 
         files.append({
-            "path": relative,
+            "file_path": relative,
             "absolute_path": str(file_path),
             "language": detect_language(file_path),
             "size_bytes": file_path.stat().st_size,

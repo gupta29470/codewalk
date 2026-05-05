@@ -31,6 +31,7 @@ class VectorStore:
                     "symbol_type": chunk.get("symbol_type") or "",
                     "start_line": chunk.get("start_line") or 0,
                     "end_line": chunk.get("end_line") or 0,
+                    "file_hash": chunk.get("file_hash") or "",
                 }
                 for chunk in chunks
             ]
@@ -55,3 +56,31 @@ class VectorStore:
             })
         
         return formatted
+    
+    def delete_by_file(self, file_path: str):
+        """Delete ALL chunks for a specific file from ChromaDB."""
+        self.collection.delete(where={"file_path": file_path})
+
+    def get_indexed_files(self) -> dict[str, str]:
+        """Get all file paths currently in ChromaDB with their content hashes.
+
+        Returns: {"file/path.py": "abc123hash", ...}
+        """
+        result = self.collection.get(include=["metadatas"])
+
+        files = {}
+
+        for metadata in result["metadatas"]:
+            file_path = metadata.get("file_path")
+            file_hash = metadata.get("file_hash", "")
+
+            if file_path not in files:
+                files[file_path] = file_hash
+
+        return files
+    
+    def clear_collection(self):
+        """Delete the entire collection and recreate it."""
+        name = self.collection.name
+        self.client.delete_collection(name)
+        self.create_collection(name)
