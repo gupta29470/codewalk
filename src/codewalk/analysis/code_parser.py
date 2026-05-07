@@ -14,6 +14,8 @@ GRAMMAR_MAP = {
     "cpp":        "tree_sitter_cpp",
     "csharp":     "tree_sitter_c_sharp",
     "php":        "tree_sitter_php",
+    "kotlin": "tree_sitter_kotlin",
+    "swift":  "tree_sitter_swift",
 }
 
 _language_cache = {}
@@ -91,6 +93,18 @@ NODE_TYPES = {
         "name_field": "name",
         "params_field": "formal_parameters",
     },
+    "kotlin": {
+      "function": ["function_declaration"],
+      "class": ["class_declaration", "object_declaration"],
+      "name_field": "name",
+      "params_field": "function_value_parameters",
+    },
+    "swift": {
+      "function": ["function_declaration"],
+      "class": ["class_declaration", "struct_declaration", "enum_declaration"],
+      "name_field": "name",
+      "params_field": "parameter_list",
+  },
 }
 
 
@@ -111,6 +125,8 @@ def get_language(language: str):
         if language == "typescript":
             # TWO grammars (TypeScript + TSX). It exposes language_typescript()
             lang = Language(grammar_module.language_typescript())
+        elif language == "php":
+            lang = Language(grammar_module.language_php())
         else:
             lang = Language(grammar_module.language())
 

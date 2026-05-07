@@ -24,6 +24,8 @@ EXTENSION_MAP = {
     ".yml": "yaml",
     ".toml": "toml",
     ".txt": "text",
+    ".kt": "kotlin",
+    ".swift": "swift",
 }
 
 def detect_language(file_path: Path) -> str:

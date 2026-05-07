@@ -19,6 +19,7 @@ data/
 
 # Scratch/teaching files
 teach.py
+explain.py
 
 codewalk_plan.md
 
