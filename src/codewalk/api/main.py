@@ -8,7 +8,7 @@ from src.codewalk.api.models import (
 )
 from src.codewalk.api import state
 
-from src.codewalk.pipeline import full_index
+from src.codewalk.pipeline import full_index, reindex
 from src.codewalk.ingestion.scanner import scan_directory
 from src.codewalk.ingestion.tech_detect import detect_tech_stack
 from src.codewalk.analysis.dependency_graph import build_dependency_graph
@@ -17,6 +17,8 @@ from src.codewalk.generation.diagram_generator import generate_module_diagram
 from src.codewalk.generation.overview_generator import generate_overview
 from src.codewalk.embeddings.vector_store import VectorStore
 from src.codewalk.agent.graph import create_agent
+from src.codewalk.analysis.reading_order import generate_reading_order
+from src.codewalk.generation.flow_generator import generate_execution_flow
 
 # ─── Create the FastAPI app ─────────────────────────────────────────
 
@@ -37,23 +39,42 @@ app.add_middleware(
 # ─── POST /analyze ───────────────────────────────────────────────────
 @app.post("/analyze", response_model=AnalyzeResponse)
 async def analyze(request: AnalyzeRequest):
-    """Index a codebase: scan → chunk → embed → store → build agent."""
-    try:
-        # Step 1: Index the codebase (scan, chunk, embed, store)
-        index_result = full_index(request.repo_path, request.collection_name)
+    """Index a codebase: scan → chunk → embed → store → build agent.
 
-        # Step 2: Run analysis pipeline
+    Modes:
+        auto    — skip indexing if collection already has data (default)
+        reindex — smart re-index (only changed/new/deleted files)
+        full    — nuke everything and re-embed from scratch
+    """
+    try:
+        store = VectorStore()
+        store.create_collection(request.collection_name)
+        existing_count = store.collection.count()
+
+        # ── Decide whether to index ──────────────────────────────
+        if request.mode == "full" or existing_count == 0:
+            index_result = full_index(request.repo_path, request.collection_name)
+        elif request.mode == "reindex":
+            index_result = reindex(request.repo_path, request.collection_name)
+        else:
+            # Auto mode + data exists → skip indexing entirely
+            index_result = {
+                "repo_path": request.repo_path,
+                "files_scanned": 0,
+                "chunks_created": 0,
+                "skipped": True,
+            }
+            print(f"Skipping indexing — collection already has {existing_count} chunks")
+
+        # ── Always run analysis (fast — no embedding) ────────────
         files = scan_directory(request.repo_path)
-        tech_stack = detect_tech_stack(request.repo_path)
         deps = build_dependency_graph(files)
         modules_result = detect_modules(files, deps)
 
-        # Step 3: Create the agent
-        store = VectorStore()
-        store.create_collection(request.collection_name)
+        # ── Create agent ─────────────────────────────────────────
         agent = create_agent(store, modules_result)
 
-        # Step 4: Save state for other endpoints
+        # ── Save state ───────────────────────────────────────────
         state.initialize(store, agent, modules_result, index_result)
 
         return AnalyzeResponse(
@@ -178,6 +199,39 @@ def list_modules():
         }
     except RuntimeError as e:
         raise HTTPException(status_code=400, detail=str(e))
+    
+# ─── GET /reading-order ────────────────────────────────────────
+@app.get("/reading-order")
+def get_reading_order():
+    """Get the recommended reading order for the codebase."""
+    try:
+       analyze_result = state.get_analyze_result()
+       repo_path = analyze_result.get("repo_path", ".")
+       files = scan_directory(repo_path)
+       deps = build_dependency_graph(files)
+       order = generate_reading_order(files, deps)
+       return order
+    except RuntimeError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    
+# ─── GET /execution-flow ───────────────────────────────────────
+@app.get("/execution-flow")
+def get_execution_flow():
+    """Get the execution flow diagram and narration."""
+    try: 
+        analyze_result = state.get_analyze_result()
+        repo_path = analyze_result.get("repo_path", ".")
+        files = scan_directory(repo_path)
+        deps = build_dependency_graph(files)
+        order = generate_reading_order(files, deps)
+        flow = generate_execution_flow(order, deps)
+        return {"flow": flow}
+    except RuntimeError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
     
 # ─── Health check ───────────────────────────────────────────────────
 

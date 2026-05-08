@@ -10,7 +10,8 @@ from src.codewalk.generation.module_explainer import explain_module
 from src.codewalk.embeddings.vector_store import VectorStore
 from src.codewalk.rag.chain import format_context
 from src.codewalk.pipeline import full_index
-
+from src.codewalk.analysis.reading_order import generate_reading_order
+from src.codewalk.generation.flow_generator import generate_execution_flow
 # ─── Create the MCP server ──────────────────────────────────────────
 mcp = FastMCP(
     name="codewalk",
@@ -39,15 +40,26 @@ def analyze_codebase(repo_path: str) -> str:
     """
     global _store, _modules_result, _repo_path
 
-    indexed_results = full_index(repo_path)
+    _store = VectorStore()
+    _store.create_collection("codebase")
+    existing = _store.collection.count()
+
+    if existing > 0:
+        indexed_results = {
+            "files_scanned": 0,
+            "chunks_created": 0,
+            "skipped": True,
+        }
+        print(f"Skipping indexing — {existing} chunks already in DB")
+    else:
+        indexed_results = full_index(repo_path)
+        _store = VectorStore()
+        _store.create_collection("codebase")
 
     files = scan_directory(repo_path)
     deps = build_dependency_graph(files)
     _modules_result = detect_modules(files, deps)
     _repo_path = repo_path
-
-    _store = VectorStore()
-    _store.create_collection("codebase")
 
     modules = list(_modules_result["modules"].keys())
     return (
@@ -166,6 +178,39 @@ def get_overview() -> str:
         f"**Modules ({len(modules)}):** {', '.join(modules)}\n\n"
         f"### Dependency Diagram\n```mermaid\n{diagram}\n```"
     )
+
+# ─── TOOL 6: get_reading_order ───────────────────────────────────────────
+@mcp.tool()
+def get_reading_order() -> str:
+    """Get the recommended reading order for the codebase."""
+    if _modules_result is None or _repo_path is None:
+        return "Error: No codebase indexed yet."
+    
+    files = scan_directory(_repo_path)
+    deps = build_dependency_graph(files)
+    order = generate_reading_order(files, deps)
+    lines = [f"{item["position"]}. {item["file"].split("/")[-1]} — {item["why"]}"
+             for item in order["order"]]
+    
+    return "## Reading Order\n" + "\n".join(lines)
+
+
+# ─── TOOL 7: get_execution_flow ───────────────────────────────────────────
+@mcp.tool()
+def get_execution_flow() -> str:
+    """Get the execution flow diagram and narration."""
+    if _modules_result is None or _repo_path is None:
+        return "Error: No codebase indexed yet."
+    
+    files = scan_directory(_repo_path)
+    deps = build_dependency_graph(files)
+    order = generate_reading_order(files, deps)
+
+    return generate_execution_flow(order, deps)
+
+
+
+
 
 if __name__ == "__main__":
     mcp.run(transport="stdio")

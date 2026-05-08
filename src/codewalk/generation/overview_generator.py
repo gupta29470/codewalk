@@ -124,7 +124,7 @@ def generate_overview(
     ])
 
     # Step 3: Create the chain (same pattern as chain.py)
-    llm = get_llm(temperature=0)
+    llm = get_llm()
     chain = prompt | llm | StrOutputParser()
 
     # Step 4: Run it — fill all placeholders and send to LLM

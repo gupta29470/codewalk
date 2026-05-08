@@ -6,6 +6,7 @@ class AnalyzeRequest(BaseModel):
     """POST /analyze — request body."""
     repo_path: str
     collection_name: str = "codebase"
+    mode: str = "auto"  # "auto" | "reindex" | "full"
 
 class ChatRequest(BaseModel):
     """POST /chat — request body."""

@@ -186,8 +186,33 @@ def _resolve_java(raw_import: str, all_files: list[str]) -> str:
     for f in all_files:
         if f.endswith(suffix):
             return f
+        
+    match = _suffix_match(as_path, [".java"], all_files)
+    if match:
+        return match
 
     return raw_import
+
+def _suffix_match(as_path: str, extensions: list[str], all_files: list[str]) -> str:
+    """Try progressively shorter suffixes of as_path against all_files.
+
+    Handles the case where repo_path is a sub-directory:
+      import src.codewalk.config → as_path = "src/codewalk/config"
+      But all_files only has "config.py" (relative to src/codewalk/).
+
+    Tries:
+      src/codewalk/config.py → not found
+      codewalk/config.py     → not found
+      config.py              → FOUND ✓
+    """
+    parts = as_path.split("/")
+    for i in range(1, len(parts)):
+        suffix = "/".join(parts[i:])
+        for ext in extensions:
+            candidate = f"{suffix}{ext}"
+            if candidate in all_files:
+                return candidate
+    return ""
 
 def resolve_import_to_file(raw_import: str,language: str, all_files: list[str], source_file: str = "", dart_package: str = "") -> str:
     """Try to resolve a raw import string to an actual file in the repo.
@@ -207,6 +232,9 @@ def resolve_import_to_file(raw_import: str,language: str, all_files: list[str], 
         for candidate in candidates:
             if candidate in all_files:
                 return candidate
+        match = _suffix_match(as_path, [".py", "/__init__.py"], all_files)
+        if match:
+            return match
             
     elif language in ("javascript", "typescript"):
         if raw_import.startswith("."):
@@ -318,6 +346,10 @@ def resolve_import_to_file(raw_import: str,language: str, all_files: list[str], 
         candidate = f"{as_path}.cs"
         if candidate in all_files:
             return candidate
+        
+        match = _suffix_match(as_path, [".cs"], all_files)
+        if match:
+            return match
     
     elif language == "php":
         as_path = raw_import.replace("\\", "/")
@@ -325,6 +357,10 @@ def resolve_import_to_file(raw_import: str,language: str, all_files: list[str], 
         for candidate in candidates:
             if candidate in all_files:
                 return candidate
+        
+        match = _suffix_match(as_path, [".php"], all_files)
+        if match:
+            return match
             
     elif language == "kotlin":
       # Kotlin imports are like Java: "okio.internal.Buffer" → "okio/internal/Buffer.kt"
@@ -332,9 +368,13 @@ def resolve_import_to_file(raw_import: str,language: str, all_files: list[str], 
       suffix = f"{as_path}.kt"
       if suffix in all_files:
           return suffix
-      for f in all_files:
-          if f.endswith(suffix):
-              return f
+      for file in all_files:
+          if file.endswith(suffix):
+              return file
+      # Suffix match for sub-directory repos
+      match = _suffix_match(as_path, [".kt"], all_files)
+      if match:
+          return match
 
     elif language == "swift":
       # Swift imports are module-level (Foundation, UIKit)

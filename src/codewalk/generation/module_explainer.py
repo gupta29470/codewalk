@@ -106,7 +106,7 @@ def explain_module(
         ("human", MODULE_HUMAN_PROMPT),
     ])
 
-    llm = get_llm(temperature=0)
+    llm = get_llm()
     chain = prompt | llm | StrOutputParser()
 
     explanation = chain.invoke({

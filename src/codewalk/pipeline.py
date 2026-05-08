@@ -3,6 +3,7 @@ from src.codewalk.ingestion.tech_detect import detect_tech_stack
 from src.codewalk.embeddings.chunker import chunk_all_files, chunk_file
 from src.codewalk.embeddings.embedder import embed_chunks
 from src.codewalk.embeddings.vector_store import VectorStore
+from src.codewalk.analysis.relevance_filter import filter_files_with_llm
 
 def full_index(repo_path: str, collection_name: str = "codebase") -> dict:
     """Full pipeline: scan → chunk → embed → store. Nukes old data first.
@@ -17,6 +18,7 @@ def full_index(repo_path: str, collection_name: str = "codebase") -> dict:
 
     # Step 2: Scan directory
     files = scan_directory(repo_path)
+    files = filter_files_with_llm(files)
     print(f"Scanned {len(files)} files.")
 
     # Step 3: Chunk all files
