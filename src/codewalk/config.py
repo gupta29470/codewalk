@@ -14,7 +14,7 @@ class Settings(BaseSettings):
     anthropic_api_key: str = ""
     google_api_key: str = ""
 
-    clone_dir: str = "/Users/amadhavl/Development/repos"
+    clone_dir: str = "data/repos"
 
     github_token: str = ""
 

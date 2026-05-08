@@ -2,6 +2,7 @@
 langchain
 langchain-text-splitters
 langchain_community
+langgraph
 
 # LLM provider
 langchain-groq
