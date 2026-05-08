@@ -1,8 +1,7 @@
-from langchain_ollama import ChatOllama
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import StrOutputParser
 
-from src.codewalk.config import settings
+from src.codewalk.config import settings, get_llm
 
 # ─── THE PROMPT ──────────────────────────────────────────────
 
@@ -125,7 +124,7 @@ def generate_overview(
     ])
 
     # Step 3: Create the chain (same pattern as chain.py)
-    llm = ChatOllama(model=settings.llm_model, temperature=0)
+    llm = get_llm(temperature=0)
     chain = prompt | llm | StrOutputParser()
 
     # Step 4: Run it — fill all placeholders and send to LLM

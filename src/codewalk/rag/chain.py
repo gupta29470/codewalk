@@ -1,17 +1,9 @@
-from langchain_ollama import ChatOllama
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import StrOutputParser
 
-from src.codewalk.config import settings
+from src.codewalk.config import settings, get_llm
 from src.codewalk.embeddings.vector_store import VectorStore
 from src.codewalk.rag.prompts import SYSTEM_PROMPT, QUESTION_PROMPT
-
-def get_llm():
-    """Create the LLM client."""
-    return ChatOllama(
-        model=settings.llm_model,
-        temperature=0
-    )
 
 def format_context(results: list[dict]) -> str:
     """Turn search results into a rich context string for the prompt.

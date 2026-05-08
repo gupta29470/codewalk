@@ -5,10 +5,9 @@ from langgraph.graph import StateGraph, START, END
 from langgraph.graph.message import add_messages
 from langgraph.prebuilt import ToolNode
 from langgraph.checkpoint.memory import MemorySaver
-from langchain_ollama import ChatOllama
 from langchain_core.messages import SystemMessage
 
-from src.codewalk.config import settings
+from src.codewalk.config import settings, get_llm
 from src.codewalk.agent.prompts import AGENT_SYSTEM_PROMPT
 from src.codewalk.agent.tools import create_tools
 from src.codewalk.embeddings.vector_store import VectorStore
@@ -38,7 +37,7 @@ def create_agent(store: VectorStore, modules_result: dict):
     tools = create_tools(store, modules_result)
 
     # ── Step 2: Create LLM with tools bound ──────────────────────
-    llm = ChatOllama(model=settings.llm_model, temperature=0, reasoning=False)
+    llm = get_llm(temperature=0, reasoning=False)
     llm_with_tools = llm.bind_tools(tools)
 
     # ── Step 3: Define the agent node ────────────────────────────

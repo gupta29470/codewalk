@@ -3,6 +3,7 @@ langchain
 langchain-text-splitters
 langchain_community
 langgraph
+fastapi
 
 # LLM provider
 langchain-groq

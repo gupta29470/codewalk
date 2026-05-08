@@ -1,8 +1,7 @@
-from langchain_ollama import ChatOllama
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import StrOutputParser
 
-from src.codewalk.config import settings
+from src.codewalk.config import settings, get_llm
 
 MODULE_SYSTEM_PROMPT = """You are a senior software engineer explaining a code module to a new team member.
 
@@ -107,7 +106,7 @@ def explain_module(
         ("human", MODULE_HUMAN_PROMPT),
     ])
 
-    llm = ChatOllama(model=settings.llm_model, temperature=0)
+    llm = get_llm(temperature=0)
     chain = prompt | llm | StrOutputParser()
 
     explanation = chain.invoke({
