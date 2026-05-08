@@ -12,7 +12,11 @@ SKIP_DIRS = {
     "dist",
     "build",
     "venv",
+    ".venv",
+    "env",
+    ".env",
     "egg-info",
+    ".codewalk-env",
 }
 
 # Extensions that aren't code (binary/media files)

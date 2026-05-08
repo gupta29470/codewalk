@@ -41,3 +41,6 @@ tree-sitter-yaml
 pydantic
 pydantic-settings
 python-dotenv
+
+# MCP
+mcp
