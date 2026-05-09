@@ -15,6 +15,9 @@ class Settings(BaseSettings):
     anthropic_api_key: str = ""
     google_api_key: str = ""
 
+    # Relative path for self-analysis: "src/codewalk"
+    # Absolute path for external repos: "/Users/you/Development/django-app/src"
+    # Override via .env: REPO_PATH=/path/to/any/repo/source
     repo_path: str = "src/codewalk"
 
     github_token: str = ""
