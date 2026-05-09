@@ -1,0 +1,140 @@
+from collections import deque
+
+def build_reverse_graph(graph: dict[str, list[str]]) -> dict[str, list[str]]:
+    """Reverse the dependency graph: edges go from 'imported' → 'importer'.
+
+    Forward:  pipeline.py → [scanner.py, chunker.py]  (pipeline imports them)
+    Reversed: scanner.py → [pipeline.py]              (scanner is imported BY pipeline)
+    """
+    internal_files = set(graph.keys())
+    reverse = {file: [] for file in internal_files}
+
+    for file, deps in graph.items():
+        for dep in deps:
+            if dep in internal_files:
+                reverse[dep].append(file)
+
+    return reverse
+
+def get_blast_radius(target_file: str, graph: dict[str, list[str]]) -> dict:
+    """Calculate blast radius for a single file.
+
+    "If I change target_file, which files could break?"
+    BFS through the REVERSED dependency graph.
+
+    Returns:
+        {
+            "file": "config.py",
+            "direct": ["embedder.py", "chain.py"],
+            "transitive": ["pipeline.py", "main.py"],
+            "affected_files": 4,
+            "risk_level": "high",
+            "impact_tree": {"embedder.py": 1, "chain.py": 1, "pipeline.py": 2}
+        }
+    """
+    reverse = build_reverse_graph(graph)
+    internal_files = set(graph.keys())
+
+    if target_file not in internal_files:
+        return {
+            "file": target_file,
+            "direct": [],
+            "transitive": [],
+            "affected_files": 0,
+            "risk_level": "none",
+            "impact_tree": {},
+        }
+    
+    visited = {target_file}
+    queue = deque()
+    impact_tree = {}
+
+    for dependent in reverse.get(target_file, []):
+        if dependent not in visited:
+            queue.append((dependent, 1))
+            visited.add(dependent)
+
+    while queue:
+        current_file, depth = queue.popleft()
+        impact_tree[current_file] = depth
+
+        for dependent in reverse.get(current_file, []):
+            if dependent not in visited:
+                queue.append((dependent, depth + 1))
+                visited.add(dependent)
+
+    direct = [file for file, depth in impact_tree.items() if depth == 1]
+    transitive = [file for file, depth in impact_tree.items() if depth > 1]
+    total_affected = len(impact_tree)
+    total_files = len(internal_files)
+    risk_level = _calculate_risk(total_affected, total_files)
+
+    return {
+        "file": target_file,
+        "direct": sorted(direct),
+        "transitive": sorted(transitive),
+        "affected_files": total_affected,
+        "risk_level": risk_level,
+        "impact_tree": impact_tree,
+    }
+
+def _calculate_risk(affected: int, total: int) -> str:
+    """Risk level based on affected count + ratio to total files.
+
+    critical — >50% OR 20+ files
+    high     — >25% OR 10+ files
+    moderate — >10% OR 4+ files
+    low      — everything else
+    """
+    if total == 0:
+        return "none"
+    ratio = affected / total
+    if ratio > 0.5 or affected >= 20:
+        return "critical"
+    elif ratio > 0.25 or affected >= 10:
+        return "high"
+    elif ratio > 0.10 or affected >= 4:
+        return "moderate"
+    else:
+        return "low"
+    
+def calculate_full_blast_map(graph: dict[str, list[str]]) -> dict:
+    """Blast radius for EVERY file. Ranked by risk (most dangerous first).
+
+    Returns:
+        {
+            "blast_map": [{"file": "config.py", "affected_files": 12, ...}, ...],
+            "stats": {"total_files": 28, "critical_files": 2, ...},
+            "highest_risk": "config.py"
+        }
+    """
+    results = []
+    risk_counts = {"critical": 0, "high": 0, "moderate": 0, "low": 0, "none": 0}
+
+    for file_path in graph:
+        radius = get_blast_radius(file_path, graph)
+        results.append({
+            "file": file_path,
+            "affected_files": radius["affected_files"],
+            "risk_level": radius["risk_level"],
+            "direct_count": len(radius["direct"]),
+            "transitive_count": len(radius["transitive"]),
+        })
+        risk_counts[radius["risk_level"]] = risk_counts.get(radius["risk_level"], 0) + 1
+
+    results.sort(key=lambda x: x["affected_files"], reverse=True)
+    highest_risk = results[0]["file"] if results else ""
+
+    return {
+        "blast_map": results,
+        "stats": {
+            "total_files": len(graph),
+            "critical_files": risk_counts.get("critical", 0),
+            "high_files": risk_counts.get("high", 0),
+            "moderate_files": risk_counts.get("moderate", 0),
+            "low_files": risk_counts.get("low", 0),
+        },
+        "highest_risk": highest_risk,
+    }
+
+

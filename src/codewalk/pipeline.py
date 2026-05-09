@@ -4,12 +4,14 @@ from src.codewalk.embeddings.chunker import chunk_all_files, chunk_file
 from src.codewalk.embeddings.embedder import embed_chunks
 from src.codewalk.embeddings.vector_store import VectorStore
 from src.codewalk.analysis.relevance_filter import filter_files_with_llm
+from src.codewalk.config import settings
 
-def full_index(repo_path: str, collection_name: str = "codebase") -> dict:
+def full_index(repo_path: str = "", collection_name: str = "codebase") -> dict:
     """Full pipeline: scan → chunk → embed → store. Nukes old data first.
 
     Returns a summary dict with stats.
     """
+    repo_path = repo_path or settings.repo_path
     print(f"Full indexing: {repo_path}")
     
     # Step 1: Detect tech stack (just for info)
@@ -44,11 +46,12 @@ def full_index(repo_path: str, collection_name: str = "codebase") -> dict:
         "chunks_embedded": len(embedded),
     }
 
-def reindex(repo_path: str, collection_name: str = "codebase") -> dict:
+def reindex(repo_path: str = "", collection_name: str = "codebase") -> dict:
     """Smart re-index: only re-embed files that changed, add new, remove deleted.
 
     Returns a summary dict with stats.
     """
+    repo_path = repo_path or settings.repo_path
     print(f"Smart re-indexing: {repo_path}")
 
     # Step 1: Scan directory → current files

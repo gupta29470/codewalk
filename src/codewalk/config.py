@@ -15,7 +15,7 @@ class Settings(BaseSettings):
     anthropic_api_key: str = ""
     google_api_key: str = ""
 
-    clone_dir: str = "data/repos"
+    repo_path: str = "src/codewalk"
 
     github_token: str = ""
 

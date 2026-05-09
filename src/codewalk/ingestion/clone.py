@@ -4,7 +4,7 @@ from urllib.parse import urlparse, urlunparse
 
 from src.codewalk.config import settings
 
-CLONE_BASE = Path(settings.clone_dir).resolve()
+CLONE_BASE = Path(settings.repo_path).resolve()
 
 def parse_github_url(url: str) -> tuple[str, str]:
     """
