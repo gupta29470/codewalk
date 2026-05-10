@@ -81,6 +81,9 @@ Example:
 }}"""
 
 
+BATCH_SIZE = 1000  # max files per LLM call to stay under context limits
+
+
 def _format_file_list(files: list[dict]) -> str:
     """Format file paths for the LLM."""
     lines = []
@@ -88,11 +91,45 @@ def _format_file_list(files: list[dict]) -> str:
         lines.append(f"  {f['file_path']}")
     return "\n".join(lines)
 
+
+def _filter_batch(batch: list[dict]) -> dict:
+    """Send one batch of files to the LLM and return yes/no decisions."""
+    prompt = ChatPromptTemplate.from_messages([
+        ("system", FILTER_SYSTEM_PROMPT),
+        ("human", FILTER_HUMAN_PROMPT),
+    ])
+
+    llm = get_llm()
+    chain = prompt | llm | StrOutputParser()
+
+    try:
+        result = chain.invoke({
+            "total_files": len(batch),
+            "file_list": _format_file_list(batch),
+        })
+    except Exception as e:
+        raise RuntimeError(
+            f"{e} — Try reducing BATCH_SIZE in "
+            f"src/codewalk/analysis/relevance_filter.py (currently {BATCH_SIZE})"
+        ) from e
+
+    # Parse JSON response
+    text = result.strip()
+    if text.startswith("```"):
+        lines = text.split("\n")
+        text = "\n".join(lines[1:-1])
+
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        # If LLM returns garbage, keep all files in this batch
+        return {f["file_path"]: "yes" for f in batch}
+
+
 def filter_files_with_llm(files: list[dict]) -> list[dict]:
     """Use LLM to filter which files should be embedded.
 
-    Takes the output of scan_directory() (after basic file_filter)
-    and returns only the files the LLM says "yes" to.
+    Splits files into batches of BATCH_SIZE to stay under LLM context limits.
 
     Args:
         files: from scan_directory() — list of file dicts
@@ -102,33 +139,23 @@ def filter_files_with_llm(files: list[dict]) -> list[dict]:
     """
     if not files:
         return files
-    
-    prompt = ChatPromptTemplate.from_messages([
-        ("system", FILTER_SYSTEM_PROMPT),
-        ("human", FILTER_HUMAN_PROMPT),
-    ])
 
-    llm = get_llm()
-    chain = prompt | llm | StrOutputParser()
+    # Split into batches
+    batches = [files[i:i + BATCH_SIZE] for i in range(0, len(files), BATCH_SIZE)]
+    print(f"Filtering {len(files)} files in {len(batches)} batch(es)...")
 
-    result = chain.invoke({
-        "total_files": len(files),
-        "file_list": _format_file_list(files),
-    })
+    # Collect all decisions across batches
+    all_decisions: dict = {}
+    for i, batch in enumerate(batches, 1):
+        print(f"  Batch {i}/{len(batches)}: {len(batch)} files...")
+        decisions = _filter_batch(batch)
+        all_decisions.update(decisions)
 
-    # Parse JSON response
-    text = result.strip()
-    if text.startswith("```"):  
-        lines = text.split("\n")
-        text = "\n".join(lines[1:-1])
-
-    try:
-        decisions = json.loads(text)
-    except json.JSONDecodeError:
-        return files  # fallback to including all files
-    
     # Keep only files marked "yes"
-    filtered = [file for file in files if decisions.get(file["file_path"], "yes").lower() == "yes"]
+    filtered = [
+        f for f in files
+        if all_decisions.get(f["file_path"], "yes").lower() == "yes"
+    ]
 
     skipped = len(files) - len(filtered)
     if skipped > 0:

@@ -1,26 +1,28 @@
+import os
 from pydantic_settings import BaseSettings
 from langchain_core.language_models.chat_models import BaseChatModel
 
 class Settings(BaseSettings):
     # LLM
-    llm_provider: str = "ollama"
-    llm_model: str = "qwen3.5:27b"
+    llm_provider: str = os.getenv("LLM_PROVIDER", "ollama")
+    llm_model: str = os.getenv("LLM_MODEL", "qwen3.5:27b")
 
     # Embeddings
-    embedding_model: str = "qwen3-embedding:latest"
+    embedding_model: str = os.getenv("EMBEDDING_MODEL", "qwen3-embedding:latest")
 
     # API keys(optional - only needed for cloud providers)
-    groq_api_key: str = ""
-    openai_api_key: str = ""
-    anthropic_api_key: str = ""
-    google_api_key: str = ""
+    groq_api_key: str = os.getenv("GROQ_API_KEY", "")
+    openai_api_key: str = os.getenv("OPENAI_API_KEY", "")
+    anthropic_api_key: str = os.getenv("ANTHROPIC_API_KEY", "")
+    google_api_key: str = os.getenv("GOOGLE_API_KEY", "")
+    openrouter_api_key: str = os.getenv("OPENROUTER_API_KEY", "")
 
     # Relative path for self-analysis: "src/codewalk"
     # Absolute path for external repos: "/Users/you/Development/django-app/src"
     # Override via .env: REPO_PATH=/path/to/any/repo/source
-    repo_path: str = "src/codewalk"
+    repo_path: str = os.getenv("REPO_PATH", "src/codewalk")
 
-    github_token: str = ""
+    github_token: str = os.getenv("GITHUB_TOKEN", "")
 
 
     class Config:
@@ -41,6 +43,10 @@ def get_llm(temperature: float = 0, **kwargs) -> BaseChatModel:
     """
     provider = settings.llm_provider.lower()
 
+    # reasoning=False is Ollama-specific (disables qwen3.5 <think> tags).
+    # Strip it for non-Ollama providers so they don't choke on it.
+    ollama_only_keys = {"reasoning"}
+
     if provider == "ollama":
         from langchain_ollama import ChatOllama
         return ChatOllama(
@@ -49,13 +55,16 @@ def get_llm(temperature: float = 0, **kwargs) -> BaseChatModel:
             **kwargs,
         )
 
-    elif provider == "openai":
+    # Remove Ollama-specific kwargs for all other providers
+    filtered = {k: v for k, v in kwargs.items() if k not in ollama_only_keys}
+
+    if provider == "openai":
         from langchain_openai import ChatOpenAI
         return ChatOpenAI(
             model=settings.llm_model,
             temperature=temperature,
             api_key=settings.openai_api_key,
-            **kwargs,
+            **filtered,
         )
 
     elif provider == "anthropic":
@@ -64,7 +73,7 @@ def get_llm(temperature: float = 0, **kwargs) -> BaseChatModel:
             model=settings.llm_model,
             temperature=temperature,
             api_key=settings.anthropic_api_key,
-            **kwargs,
+            **filtered,
         )
 
     elif provider == "gemini":
@@ -73,7 +82,7 @@ def get_llm(temperature: float = 0, **kwargs) -> BaseChatModel:
             model=settings.llm_model,
             temperature=temperature,
             google_api_key=settings.google_api_key,
-            **kwargs,
+            **filtered,
         )
 
     elif provider == "groq":
@@ -82,11 +91,31 @@ def get_llm(temperature: float = 0, **kwargs) -> BaseChatModel:
             model=settings.llm_model,
             temperature=temperature,
             api_key=settings.groq_api_key,
-            **kwargs,
+            **filtered,
+        )
+
+    elif provider == "openrouter":
+        from langchain_openai import ChatOpenAI
+        return ChatOpenAI(
+            model=settings.llm_model,
+            temperature=temperature,
+            api_key=settings.openrouter_api_key,
+            base_url="https://openrouter.ai/api/v1",
+            **filtered,
+        )
+
+    elif provider == "github_models":
+        from langchain_openai import ChatOpenAI
+        return ChatOpenAI(
+            model=settings.llm_model,
+            temperature=temperature,
+            api_key=settings.github_token,
+            base_url="https://models.inference.ai.github.com",
+            **filtered,
         )
 
     else:
         raise ValueError(
             f"Unknown LLM provider: '{provider}'. "
-            f"Supported: ollama, openai, anthropic, gemini, groq"
+            f"Supported: ollama, openai, anthropic, gemini, groq, openrouter, github_models"
         )

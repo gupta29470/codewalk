@@ -17,6 +17,10 @@ data/
 .vscode/
 .idea/
 
+# Frontend
+frontend/node_modules/
+frontend/.next/
+
 # Scratch/teaching files
 teach.py
 explain.py

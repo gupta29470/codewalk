@@ -88,6 +88,22 @@ SKIP_FILES = {
     "bun.lockb",
 }
 
+# Filename suffixes for generated/auto-generated code
+SKIP_SUFFIXES = (
+    ".g.dart",
+    ".freezed.dart",
+    ".gen.dart",
+    ".generated.dart",
+    ".g.cs",
+    ".designer.cs",
+    ".pb.go",
+    "_pb2.py",
+    ".min.js",
+    ".min.css",
+    ".bundle.js",
+    ".chunk.js",
+)
+
 def should_skip(file_path: str) -> bool:
     """Return True if this file should be skipped."""
 
@@ -114,6 +130,10 @@ def should_skip(file_path: str) -> bool:
     
     # Skip specific filenames
     if path.name in SKIP_FILES:
+        return True
+    
+    # Skip generated file patterns (e.g. foo.g.dart, bar.freezed.dart)
+    if any(path.name.endswith(suffix) for suffix in SKIP_SUFFIXES):
         return True
     
     return False

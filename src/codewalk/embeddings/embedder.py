@@ -25,7 +25,7 @@ def get_embedding_model() -> Embeddings:
             google_api_key=settings.google_api_key,
         )
 
-    elif provider in ("groq", "anthropic"):
+    elif provider in ("groq", "anthropic", "openrouter", "github_models"):
         # No embeddings API — fallback to Ollama
         from langchain_ollama import OllamaEmbeddings
         return OllamaEmbeddings(model=settings.embedding_model)
@@ -33,7 +33,7 @@ def get_embedding_model() -> Embeddings:
     else:
         raise ValueError(
             f"Unknown provider: '{provider}'. "
-            f"Supported: ollama, openai, gemini"
+            f"Supported: ollama, openai, gemini, groq, anthropic, openrouter, github_models"
         )
 
 def _sanitize_text(text: str) -> str:

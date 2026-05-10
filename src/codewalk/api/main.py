@@ -1,6 +1,12 @@
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
 
+import json
+
+from src.codewalk.embeddings.chunker import chunk_all_files
+from src.codewalk.embeddings.embedder import embed_chunks
+from src.codewalk.analysis.relevance_filter import filter_files_with_llm
 from src.codewalk.api.models import (
     AnalyzeRequest, AnalyzeResponse,
     ChatRequest, ChatResponse,
@@ -94,6 +100,97 @@ async def analyze(request: AnalyzeRequest):
         )
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+    
+@app.post("/analyze/stream")
+async def analyze_stream(request: AnalyzeRequest):
+    """Stream analysis progress via Server-Sent Events."""
+
+    def event_stream():
+        """Generator that yields SSE events at each pipeline step."""
+        try:
+            request.repo_path = request.repo_path or settings.repo_path
+
+            # Step 1: Check existing data
+            yield f"data: {json.dumps({'step': 'init', 'message': 'Checking existing index...'})}\n\n"
+            store = VectorStore()
+            store.create_collection(request.collection_name)
+            existing_count = store.collection.count()
+
+            # Step 2: Indexing
+            if request.index_mode == "full" or existing_count == 0:
+                # ── Full index with progress ──
+                yield f"data: {json.dumps({'step': 'scan', 'message': 'Scanning directory...'})}\n\n"
+                files = scan_directory(request.repo_path)
+                scanned_count = len(files)
+                yield f"data: {json.dumps({'step': 'scan', 'message': f'Scanned {scanned_count} files'})}\n\n"
+
+                yield f"data: {json.dumps({'step': 'filter', 'message': f'Smart filtering {scanned_count} files via LLM — wait time depends on number of files...'})}\n\n"
+                files = filter_files_with_llm(files)
+                yield f"data: {json.dumps({'step': 'filter', 'message': f'Kept {len(files)} relevant files (filtered out {scanned_count - len(files)})'})}\n\n"
+
+                yield f"data: {json.dumps({'step': 'chunk', 'message': 'Chunking code by function/class...'})}\n\n"
+                chunks = chunk_all_files(files)
+                yield f"data: {json.dumps({'step': 'chunk', 'message': f'Created {len(chunks)} chunks'})}\n\n"
+
+                yield f"data: {json.dumps({'step': 'embed', 'message': f'Embedding {len(chunks)} chunks — wait time depends on number of chunks...'})}\n\n"
+                embedded = embed_chunks(chunks)
+                yield f"data: {json.dumps({'step': 'embed', 'message': f'Embedded {len(embedded)} chunks'})}\n\n"
+
+                yield f"data: {json.dumps({'step': 'store', 'message': 'Storing in vector database...'})}\n\n"
+                store.clear_collection()
+                store.add_chunks(embedded)
+                yield f"data: {json.dumps({'step': 'store', 'message': f'Stored {len(embedded)} chunks in ChromaDB'})}\n\n"
+
+                index_result = {
+                    "repo_path": request.repo_path,
+                    "files_scanned": len(files),
+                    "chunks_created": len(chunks),
+                }
+
+            elif request.index_mode == "reindex":
+                yield f"data: {json.dumps({'step': 'scan', 'message': 'Scanning for changes...'})}\n\n"
+                index_result = reindex(request.repo_path, request.collection_name)
+                new = index_result['new_files']
+                changed = index_result['changed_files']
+                deleted = index_result['deleted_files']
+                msg = f'New: {new}, Changed: {changed}, Deleted: {deleted}'
+                yield f"data: {json.dumps({'step': 'reindex', 'message': msg})}\n\n"
+
+            else:
+                yield f"data: {json.dumps({'step': 'skip', 'message': f'Index exists ({existing_count} chunks) — skipping'})}\n\n"
+                index_result = {
+                    "repo_path": request.repo_path,
+                    "files_scanned": 0,
+                    "chunks_created": 0,
+                    "skipped": True,
+                }
+
+            # Step 3: Analysis
+            yield f"data: {json.dumps({'step': 'analyze', 'message': 'Building dependency graph...'})}\n\n"
+            files = scan_directory(request.repo_path)
+            deps = build_dependency_graph(files)
+            modules_result = detect_modules(files, deps)
+            num_modules = len(modules_result['modules'])
+            yield f"data: {json.dumps({'step': 'analyze', 'message': f'Detected {num_modules} modules'})}\n\n"
+
+            # Step 4: Create agent
+            yield f"data: {json.dumps({'step': 'agent', 'message': 'Creating AI agent...'})}\n\n"
+            agent = create_agent(store, modules_result)
+
+            # Step 5: Save state
+            state.initialize(store, agent, modules_result, index_result)
+
+            # Final event — includes full result
+            yield f"data: {json.dumps({'step': 'done', 'message': 'Analysis complete!', 'result': {'status': 'complete', 'repo_path': request.repo_path, 'files_scanned': index_result.get('files_scanned', 0), 'chunks_created': index_result.get('chunks_created', 0), 'modules': list(modules_result['modules'].keys())}})}\n\n"
+
+        except Exception as e:
+            yield f"data: {json.dumps({'step': 'error', 'message': str(e)})}\n\n"
+
+    return StreamingResponse(
+        event_stream(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
     
 # ─── POST /chat ──────────────────────────────────────────────────────
 @app.post("/chat", response_model=ChatResponse)
