@@ -1,6 +1,13 @@
+import logging
+import sys
 from pathlib import Path
 
 from src.codewalk.ingestion.file_filter import should_skip
+
+logger = logging.getLogger("codewalk")
+def _log(msg: str):
+    print(msg, file=sys.stderr)
+    logger.info(msg)
 
 # Map file extensions to language names
 EXTENSION_MAP = {
@@ -58,4 +65,5 @@ def scan_directory(directory: str) -> list[dict]:
             "size_bytes": file_path.stat().st_size,
         })
     
+    _log(f"[scanner] Scanned {directory} → {len(files)} files")
     return files

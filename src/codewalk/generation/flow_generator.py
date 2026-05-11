@@ -12,10 +12,10 @@ Given a reading order of files and their dependencies, generate:
 Rules:
 - Use `graph TD` (top-down) for the Mermaid diagram
 - Show only the main execution path, not every file
-- Identify entry points (files with no dependents = nothing imports them)
-- Entry points are typically: main.py, app.py, pipeline.py, server.py, cli.py
+- Entry points are files that nothing else imports (no incoming edges)
 - Keep narration concise — one sentence per step
-- Reference actual file names from the reading order"""
+- Reference actual file names from the reading order
+- Do NOT invent function names or logic not present in the input"""
 
 FLOW_HUMAN_PROMPT = """Here is the reading order for this codebase:
 

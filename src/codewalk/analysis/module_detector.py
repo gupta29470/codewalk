@@ -1,4 +1,11 @@
+import logging
+import sys
 from collections import Counter, defaultdict
+
+logger = logging.getLogger("codewalk")
+def _log(msg: str):
+    print(msg, file=sys.stderr)
+    logger.info(msg)
 
 _WRAPPER_DIRS = {
     "src", "lib", "app", "source", "packages", "pkg",
@@ -144,6 +151,7 @@ def detect_modules(files: list[dict], dep_graph: dict = None) -> dict:
         for module_name in modules:
             module_graph[module_name] = []
 
+    _log(f"[modules] Detected {len(modules)} modules from {len(files)} files (root: {source_root or 'none'})")
     return {
         "source_root": source_root,
         "modules": dict(modules),

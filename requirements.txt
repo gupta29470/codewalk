@@ -11,6 +11,7 @@ langchain-openai
 langchain-anthropic
 langchain-google-genai
 langchain-ollama
+sentence-transformers
 
 
 # Vector store (local)

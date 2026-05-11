@@ -8,7 +8,7 @@ class Settings(BaseSettings):
     llm_model: str = os.getenv("LLM_MODEL", "qwen3.5:27b")
 
     # Embeddings
-    embedding_model: str = os.getenv("EMBEDDING_MODEL", "qwen3-embedding:latest")
+    embedding_model: str = os.getenv("EMBEDDING_MODEL", "jinaai/jina-code-embeddings-1.5b")
 
     # API keys(optional - only needed for cloud providers)
     groq_api_key: str = os.getenv("GROQ_API_KEY", "")

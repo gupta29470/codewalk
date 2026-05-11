@@ -1,3 +1,5 @@
+import logging
+import sys
 from typing import Annotated
 from typing_extensions import TypedDict
 
@@ -8,6 +10,11 @@ from langgraph.checkpoint.memory import MemorySaver
 from langchain_core.messages import SystemMessage
 
 from src.codewalk.config import settings, get_llm
+
+logger = logging.getLogger("codewalk")
+def _log(msg: str):
+    print(msg, file=sys.stderr)
+    logger.info(msg)
 from src.codewalk.agent.prompts import AGENT_SYSTEM_PROMPT
 from src.codewalk.agent.tools import create_tools
 from src.codewalk.embeddings.vector_store import VectorStore
@@ -24,6 +31,7 @@ class AgentState(TypedDict):
 
 # ─── FACTORY FUNCTION ────────────────────────────────────────────────
 def create_agent(store: VectorStore, modules_result: dict):
+    _log("[agent] Creating agent with tools...")
     """Build and compile a LangGraph agent with tools and memory.
 
     Args:

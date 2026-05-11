@@ -1,4 +1,11 @@
+import logging
+import sys
 from pathlib import Path
+
+logger = logging.getLogger("codewalk")
+def _log(msg: str):
+    print(msg, file=sys.stderr)
+    logger.info(msg)
 
 CONFIG_FILE_MAP = {
     "package.json": "javascript/node",
@@ -20,6 +27,7 @@ CONFIG_FILE_MAP = {
 }
 
 def detect_tech_stack(repo_path: str) -> list[str]:
+    _log(f"[tech_detect] Detecting tech stack: {repo_path}")
     """Detect the tech stack of a repo by checking for config files.
 
     Returns a list of detected technologies, e.g. ["python", "typescript"].

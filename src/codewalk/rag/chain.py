@@ -1,9 +1,16 @@
+import logging
+import sys
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import StrOutputParser
 
 from src.codewalk.config import settings, get_llm
 from src.codewalk.embeddings.vector_store import VectorStore
 from src.codewalk.rag.prompts import SYSTEM_PROMPT, QUESTION_PROMPT
+
+logger = logging.getLogger("codewalk")
+def _log(msg: str):
+    print(msg, file=sys.stderr)
+    logger.info(msg)
 
 def format_context(results: list[dict]) -> str:
     """Turn search results into a rich context string for the prompt.
@@ -34,6 +41,7 @@ def format_context(results: list[dict]) -> str:
     return "\n\n".join(parts)
 
 def ask(question: str, store: VectorStore, n_results: int = 5) -> str:
+    _log(f"[rag] Question: {question[:80]}...")
     """Full RAG pipeline: question → retrieve → prompt → LLM → answer."""
     # 1. Retrieve relevant chunks from ChromaDB
     results = store.search(question, n_results=n_results)

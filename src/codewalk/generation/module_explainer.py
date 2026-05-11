@@ -1,7 +1,14 @@
+import logging
+import sys
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import StrOutputParser
 
 from src.codewalk.config import settings, get_llm
+
+logger = logging.getLogger("codewalk")
+def _log(msg: str):
+    print(msg, file=sys.stderr)
+    logger.info(msg)
 
 MODULE_SYSTEM_PROMPT = """You are a senior software engineer explaining a code module to a new team member.
 
@@ -15,15 +22,15 @@ You will receive information about ONE module in a codebase including:
 Write a clear, concise module explanation in Markdown format. Include:
 
 1. **Purpose** (1-2 sentences): What this module does and why it exists.
-2. **Key Files**: List each file with a one-line description of what it likely does (infer from filename).
+2. **Key Files**: List each file with a one-line description of its likely role.
 3. **Dependencies**: What this module needs from other modules, and who needs this module.
 4. **Role in the System**: How this module fits in the overall data flow.
 
 RULES:
 - Be specific — use actual file names and module names.
 - Keep it concise — 1 paragraph per section max.
-- Infer file purpose from the filename (e.g., "scanner.py" likely scans/walks directories).
-- Do NOT invent detailed implementation — only infer from names.
+- Infer file purpose from the filename and module context.
+- Do NOT invent implementation details, class names, or function signatures.
 - Write in second person ("you") to address the reader directly.
 """
 
@@ -132,7 +139,7 @@ def explain_all_modules(module_results: dict) -> dict[str, str]:
     """
     explanations = {}
     for module_name, module_info in sorted(module_results["modules"].items()):
-        print(f"  Explaining module: {module_name}...")
+        _log(f"[explainer] Explaining module: {module_name}...")
         explanations[module_name] = explain_module(
             module_name,
             module_info,

@@ -1,7 +1,14 @@
+import logging
+import sys
 from pathlib import Path
 from platform import node
 
 from tree_sitter_cpp import language
+
+logger = logging.getLogger("codewalk")
+def _log(msg: str):
+    print(msg, file=sys.stderr)
+    logger.info(msg)
 
 from src.codewalk.analysis.code_parser import (
     get_parser_for_language,
@@ -439,6 +446,7 @@ def build_dependency_graph(files: list[dict]) -> dict:
         graph[file_path] = resolved_imports
         total_edges += len(resolved_imports)
 
+    _log(f"[dep_graph] Built graph: {len(files)} files, {total_edges} edges, {unresolved_count} unresolved")
     return {
         "graph": graph,
         "stats": {

@@ -7,16 +7,49 @@ KEEP_DOT_DIRS = {
 
 # Non-dot directories to skip
 SKIP_DIRS = {
+    # JS/TS
     "node_modules",
+    "bower_components",
+    # Python
     "__pycache__",
-    "dist",
-    "build",
     "venv",
     ".venv",
     "env",
     ".env",
     "egg-info",
     ".codewalk-env",
+    # Generic build
+    "dist",
+    "build",
+    "target",
+    "coverage",
+    # iOS / macOS
+    "Pods",
+    "DerivedData",
+    "Carthage",
+    # Flutter / Dart
+    "ephemeral",
+    ".dart_tool",
+    # Go / Ruby / PHP
+    "vendor",
+    "deps",
+    # Swift
+    "Packages",
+    # Elixir
+    "_build",
+    # Testing / fixtures
+    "__tests__",
+    "__snapshots__",
+    "testdata",
+    "fixtures",
+    # Localization
+    "l10n",
+    "locales",
+    "i18n",
+    # Migrations
+    "migrations",
+    # Gradle
+    ".gradle",
 }
 
 # Extensions that aren't code (binary/media files)
@@ -59,8 +92,13 @@ SKIP_EXTENSIONS = {
 
     # Documents (not code)
     ".pdf", ".doc", ".docx", ".xls", ".xlsx", ".ppt", ".pptx",
+    ".md", ".rst", ".txt", ".adoc",
 
-    # Certificates / keys
+    # Translation / localization data
+    ".arb", ".xliff", ".xlf", ".po", ".pot", ".mo",
+    ".strings", ".stringsdict",
+
+    # Certifica / keys
     ".pem", ".crt", ".key", ".p12", ".pfx",
 
     # Maps / generated

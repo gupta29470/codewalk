@@ -1,11 +1,17 @@
+import logging
+import sys
+import json
+
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 
-import json
+logger = logging.getLogger("codewalk")
+def _log(msg: str):
+    print(msg, file=sys.stderr)
+    logger.info(msg)
 
-from src.codewalk.embeddings.chunker import chunk_all_files
-from src.codewalk.embeddings.embedder import embed_chunks
+from src.codewalk.pipeline import full_index_parallel, reindex, chunk_and_embed_parallel
 from src.codewalk.analysis.relevance_filter import filter_files_with_llm
 from src.codewalk.api.models import (
     AnalyzeRequest, AnalyzeResponse,
@@ -14,8 +20,6 @@ from src.codewalk.api.models import (
     BlastRadiusResponse,
 )
 from src.codewalk.api import state
-
-from src.codewalk.pipeline import full_index, reindex
 from src.codewalk.ingestion.scanner import scan_directory
 from src.codewalk.ingestion.tech_detect import detect_tech_stack
 from src.codewalk.analysis.dependency_graph import build_dependency_graph
@@ -67,7 +71,7 @@ async def analyze(request: AnalyzeRequest):
 
         # ── Decide whether to index ──────────────────────────────
         if request.index_mode == "full" or existing_count == 0:
-            index_result = full_index(request.repo_path, request.collection_name)
+            index_result = full_index_parallel(request.repo_path, request.collection_name)
         elif request.index_mode == "reindex":
             index_result = reindex(request.repo_path, request.collection_name)
         else:
@@ -78,7 +82,7 @@ async def analyze(request: AnalyzeRequest):
                 "chunks_created": 0,
                 "skipped": True,
             }
-            print(f"Skipping indexing — collection already has {existing_count} chunks")
+            _log(f"[api] Skipping indexing — collection already has {existing_count} chunks")
 
         # ── Always run analysis (fast — no embedding) ────────────
         files = scan_directory(request.repo_path)
@@ -88,8 +92,9 @@ async def analyze(request: AnalyzeRequest):
         # ── Create agent ─────────────────────────────────────────
         agent = create_agent(store, modules_result)
 
-        # ── Save state ───────────────────────────────────────────
-        state.initialize(store, agent, modules_result, index_result)
+        # ── Save state (including files/deps cache) ─────────────
+        state.initialize(store, agent, modules_result, index_result,
+                         files=files, deps=deps)
 
         return AnalyzeResponse(
             status="complete",
@@ -128,12 +133,11 @@ async def analyze_stream(request: AnalyzeRequest):
                 files = filter_files_with_llm(files)
                 yield f"data: {json.dumps({'step': 'filter', 'message': f'Kept {len(files)} relevant files (filtered out {scanned_count - len(files)})'})}\n\n"
 
-                yield f"data: {json.dumps({'step': 'chunk', 'message': 'Chunking code by function/class...'})}\n\n"
-                chunks = chunk_all_files(files)
-                yield f"data: {json.dumps({'step': 'chunk', 'message': f'Created {len(chunks)} chunks'})}\n\n"
+                yield f"data: {json.dumps({'step': 'chunk', 'message': 'Chunking + embedding in parallel...'})}\n\n"
 
-                yield f"data: {json.dumps({'step': 'embed', 'message': f'Embedding {len(chunks)} chunks — wait time depends on number of chunks...'})}\n\n"
-                embedded = embed_chunks(chunks)
+                embedded, chunks_created = chunk_and_embed_parallel(files)
+
+                yield f"data: {json.dumps({'step': 'chunk', 'message': f'Created {chunks_created} chunks'})}\n\n"
                 yield f"data: {json.dumps({'step': 'embed', 'message': f'Embedded {len(embedded)} chunks'})}\n\n"
 
                 yield f"data: {json.dumps({'step': 'store', 'message': 'Storing in vector database...'})}\n\n"
@@ -144,7 +148,7 @@ async def analyze_stream(request: AnalyzeRequest):
                 index_result = {
                     "repo_path": request.repo_path,
                     "files_scanned": len(files),
-                    "chunks_created": len(chunks),
+                    "chunks_created": chunks_created,
                 }
 
             elif request.index_mode == "reindex":
@@ -177,8 +181,9 @@ async def analyze_stream(request: AnalyzeRequest):
             yield f"data: {json.dumps({'step': 'agent', 'message': 'Creating AI agent...'})}\n\n"
             agent = create_agent(store, modules_result)
 
-            # Step 5: Save state
-            state.initialize(store, agent, modules_result, index_result)
+            # Step 5: Save state (including files/deps cache)
+            state.initialize(store, agent, modules_result, index_result,
+                             files=files, deps=deps)
 
             # Final event — includes full result
             yield f"data: {json.dumps({'step': 'done', 'message': 'Analysis complete!', 'result': {'status': 'complete', 'repo_path': request.repo_path, 'files_scanned': index_result.get('files_scanned', 0), 'chunks_created': index_result.get('chunks_created', 0), 'modules': list(modules_result['modules'].keys())}})}\n\n"
@@ -232,8 +237,7 @@ async def overview():
         # Generate overview (calls LLM)
         overview_text = generate_overview(tech, modules_result, diagram)
 
-        all_files = scan_directory(analyze_result.get("repo_path", settings.repo_path))
-        deps = build_dependency_graph(all_files)
+        deps = state.get_deps()
         blast_map = calculate_full_blast_map(deps["graph"])
         top_risky = []
         for item in blast_map["blast_map"][:3]:
@@ -289,10 +293,7 @@ async def get_module(module_name: str):
             if actual_name in deps
         ]
 
-        analyze_result = state.get_analyze_result()
-        repo_path = analyze_result.get("repo_path", settings.repo_path)
-        all_files = scan_directory(repo_path)
-        deps = build_dependency_graph(all_files)
+        deps = state.get_deps()
         graph = deps["graph"]
 
         file_risks = []
@@ -338,8 +339,7 @@ async def get_blast_radius_for_module(module_name: str = ""):
         modules_result = state.get_modules_result()
         analyze_result = state.get_analyze_result()
         repo_path = analyze_result.get("repo_path", settings.repo_path)
-        all_files = scan_directory(repo_path)
-        deps = build_dependency_graph(all_files)
+        deps = state.get_deps()
         graph = deps["graph"]
 
         # Determine scope
@@ -414,8 +414,8 @@ def get_reading_order():
     try:
        analyze_result = state.get_analyze_result()
        repo_path = analyze_result.get("repo_path", settings.repo_path)
-       files = scan_directory(repo_path)
-       deps = build_dependency_graph(files)
+       files = state.get_files()
+       deps = state.get_deps()
        order = generate_reading_order(files, deps)
        graph = deps["graph"]
        for item in order["order"]:
@@ -438,8 +438,8 @@ def get_execution_flow():
     try: 
         analyze_result = state.get_analyze_result()
         repo_path = analyze_result.get("repo_path", settings.repo_path)
-        files = scan_directory(repo_path)
-        deps = build_dependency_graph(files)
+        files = state.get_files()
+        deps = state.get_deps()
         order = generate_reading_order(files, deps)
         flow = generate_execution_flow(order, deps)
         return {"flow": flow}
@@ -448,6 +448,34 @@ def get_execution_flow():
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
     
+# ─── POST /refresh ─────────────────────────────────────────────────
+@app.post("/refresh")
+async def refresh_analysis():
+    """Re-scan files and rebuild dependency graph + modules.
+
+    Does NOT re-embed or re-index. Use this after code changes
+    to update blast radius, reading order, and module structure.
+    """
+    try:
+        analyze_result = state.get_analyze_result()
+        repo_path = analyze_result.get("repo_path", settings.repo_path)
+
+        files = scan_directory(repo_path)
+        deps = build_dependency_graph(files)
+        modules_result = detect_modules(files, deps)
+
+        state.refresh(files, deps, modules_result)
+
+        return {
+            "status": "refreshed",
+            "files": len(files),
+            "modules": list(modules_result["modules"].keys()),
+        }
+    except RuntimeError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
 # ─── Health check ───────────────────────────────────────────────────
 
 @app.get("/health")

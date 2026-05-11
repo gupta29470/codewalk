@@ -1,9 +1,17 @@
 from pathlib import Path
 import hashlib
+import logging
+import sys
 
 from langchain_text_splitters import RecursiveCharacterTextSplitter, Language
 
 from src.codewalk.analysis.code_parser import parse_file, GRAMMAR_MAP
+
+logger = logging.getLogger("codewalk")
+
+def _log(msg: str):
+    print(msg, file=sys.stderr)
+    logger.info(msg)
 
 # Map our language names to LangChain's Language enum
 LANGUAGE_MAP =  {
@@ -192,9 +200,12 @@ def chunk_file(file_info: dict, chunk_size: int = 1000, chunk_overlap: int = 200
 def chunk_all_files(files: list[dict], chunk_size: int = 1000, chunk_overlap: int = 200) -> list[dict]:
     """Chunk all scanned files. Returns flat list of all chunks."""
     all_chunks = []
+    total = len(files)
 
-    for file_info in files:
+    for i, file_info in enumerate(files, 1):
         chunks = chunk_file(file_info, chunk_size, chunk_overlap)
         all_chunks.extend(chunks)
+        if i % 100 == 0 or i == total:
+            _log(f"  Chunked {i}/{total} files ({len(all_chunks)} chunks so far)")
     
     return all_chunks

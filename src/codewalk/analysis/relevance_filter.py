@@ -1,7 +1,14 @@
 import json
+import logging
+import sys
 from src.codewalk.config import get_llm
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import StrOutputParser
+
+logger = logging.getLogger("codewalk")
+def _log(msg: str):
+    print(msg, file=sys.stderr)
+    logger.info(msg)
 
 FILTER_SYSTEM_PROMPT = """You are a code analysis tool. Given a list of file paths
 from a software project in ANY programming language, decide which files should be
@@ -81,7 +88,7 @@ Example:
 }}"""
 
 
-BATCH_SIZE = 1000  # max files per LLM call to stay under context limits
+BATCH_SIZE = 3000  # max files per LLM call to stay under context limits
 
 
 def _format_file_list(files: list[dict]) -> str:
@@ -142,12 +149,12 @@ def filter_files_with_llm(files: list[dict]) -> list[dict]:
 
     # Split into batches
     batches = [files[i:i + BATCH_SIZE] for i in range(0, len(files), BATCH_SIZE)]
-    print(f"Filtering {len(files)} files in {len(batches)} batch(es)...")
+    _log(f"[filter] Filtering {len(files)} files in {len(batches)} batch(es)...")
 
     # Collect all decisions across batches
     all_decisions: dict = {}
     for i, batch in enumerate(batches, 1):
-        print(f"  Batch {i}/{len(batches)}: {len(batch)} files...")
+        _log(f"[filter] Batch {i}/{len(batches)}: {len(batch)} files...")
         decisions = _filter_batch(batch)
         all_decisions.update(decisions)
 
@@ -159,6 +166,6 @@ def filter_files_with_llm(files: list[dict]) -> list[dict]:
 
     skipped = len(files) - len(filtered)
     if skipped > 0:
-        print(f"LLM filtered out {skipped} files — {len(filtered)} remain for embedding.")
+        _log(f"[filter] LLM filtered out {skipped} files — {len(filtered)} remain")
 
     return filtered

@@ -1,5 +1,12 @@
+import logging
+import sys
 import importlib
 from tree_sitter import Language, Parser
+
+logger = logging.getLogger("codewalk")
+def _log(msg: str):
+    print(msg, file=sys.stderr)
+    logger.info(msg)
 
 GRAMMAR_MAP = {
     "python":     "tree_sitter_python",
