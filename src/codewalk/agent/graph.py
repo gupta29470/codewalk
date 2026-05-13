@@ -1,4 +1,6 @@
+import json
 import logging
+import re
 import sys
 from typing import Annotated
 from typing_extensions import TypedDict
@@ -7,7 +9,7 @@ from langgraph.graph import StateGraph, START, END
 from langgraph.graph.message import add_messages
 from langgraph.prebuilt import ToolNode
 from langgraph.checkpoint.memory import MemorySaver
-from langchain_core.messages import SystemMessage
+from langchain_core.messages import AIMessage, SystemMessage
 
 from src.codewalk.config import settings, get_llm
 
@@ -30,7 +32,7 @@ class AgentState(TypedDict):
 
 
 # ─── FACTORY FUNCTION ────────────────────────────────────────────────
-def create_agent(store: VectorStore, modules_result: dict):
+def create_agent(store: VectorStore, modules_result: dict, files: list[dict] = None, deps: dict = None):
     _log("[agent] Creating agent with tools...")
     """Build and compile a LangGraph agent with tools and memory.
 
@@ -42,17 +44,43 @@ def create_agent(store: VectorStore, modules_result: dict):
         Compiled StateGraph — call it with .invoke() or .stream().
     """
     # ── Step 1: Create tools ─────────────────────────────────────
-    tools = create_tools(store, modules_result)
+    tools = create_tools(store, modules_result, files=files, deps=deps)
 
     # ── Step 2: Create LLM with tools bound ──────────────────────
     llm = get_llm(temperature=0, reasoning=False)
     llm_with_tools = llm.bind_tools(tools)
 
     # ── Step 3: Define the agent node ────────────────────────────
+    # Regex to find {"name": "tool_name", "arguments": {...}} in text
+    _TOOL_CALL_RE = re.compile(
+        r'\{\s*"name"\s*:\s*"(\w+)"\s*,\s*"arguments"\s*:\s*(\{[^{}]*\})\s*\}',
+        re.DOTALL,
+    )
+
     def agent_node(state: AgentState) -> AgentState:
         """Call the LLM with the conversation history + system prompt."""
         messages = [SystemMessage(content=AGENT_SYSTEM_PROMPT)] + state["messages"]
         response = llm_with_tools.invoke(messages)
+
+        # Fallback: some models output tool calls as JSON text
+        # instead of structured tool_calls. Detect and convert.
+        if not response.tool_calls and response.content:
+            match = _TOOL_CALL_RE.search(response.content)
+            if match:
+                tool_name = match.group(1)
+                # Validate it's one of our tools
+                tool_names = {t.name for t in tools}
+                if tool_name in tool_names:
+                    try:
+                        tool_args = json.loads(match.group(2))
+                    except json.JSONDecodeError:
+                        tool_args = {}
+                    _log(f"[agent] Fallback: parsed text tool call → {tool_name}({tool_args})")
+                    response = AIMessage(
+                        content="",
+                        tool_calls=[{"name": tool_name, "args": tool_args, "id": f"call_{tool_name}"}],
+                    )
+
         return {"messages": [response]}
     
     # ── Step 4: Define the routing function ──────────────────────

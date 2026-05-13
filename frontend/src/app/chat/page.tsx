@@ -7,6 +7,7 @@ import { Textarea } from "@/components/ui/textarea";
 import { Card } from "@/components/ui/card";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Loader2, Send, Bot, User } from "lucide-react";
+import ReactMarkdown from "react-markdown";
 
 interface Message {
     role: "user" | "assistant";
@@ -92,9 +93,15 @@ export default function ChatPage() {
                                         : "bg-muted"
                                         }`}
                                 >
-                                    <pre className="whitespace-pre-wrap font-sans">
-                                        {msg.content}
-                                    </pre>
+                                    {msg.role === "assistant" ? (
+                                        <div className="prose prose-sm dark:prose-invert max-w-none">
+                                            <ReactMarkdown>{msg.content}</ReactMarkdown>
+                                        </div>
+                                    ) : (
+                                        <pre className="whitespace-pre-wrap font-sans">
+                                            {msg.content}
+                                        </pre>
+                                    )}
                                 </div>
                                 {msg.role === "user" && (
                                     <div className="h-8 w-8 rounded-full bg-muted flex items-center justify-center flex-shrink-0">

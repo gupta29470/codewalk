@@ -105,7 +105,8 @@ def codewalk_analyze_codebase() -> str:
 
     # Check if there's an existing index for search
     _store = VectorStore()
-    _store.create_collection("codebase")
+    _collection_name = settings.repo_path.rstrip("/").split("/")[-1] or "codebase"
+    _store.create_collection(_collection_name)
     existing = _store.collection.count()
 
     modules = list(_modules_result["modules"].keys())
@@ -134,7 +135,7 @@ def codewalk_search_codebase(query: str) -> str:
 
     Returns up to 5 relevant code snippets with file paths, line numbers,
     and surrounding context. Use this for broad questions like "how does
-    authentication work" or "where is the database connection handled".
+    authentication work" or "where is the database connectio handled".
 
     For a specific function/class by name, prefer codewalk_explain_function.
 

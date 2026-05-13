@@ -419,7 +419,11 @@ def build_dependency_graph(files: list[dict]) -> dict:
     # Step 1 — collect all file paths for resolution lookups
     all_file_paths = [file["file_path"] for file in files]
 
-    # Detect Dart package name for self-referencing package: imports
+    # Dart-specific: detect package name from pubspec.yaml so we can resolve
+    # self-referencing imports like "package:my_app/foo.dart" → "lib/foo.dart".
+    # Without this, those imports stay unresolved (treated as external deps).
+    # Harmless for non-Dart repos — only used inside the dart branch of
+    # resolve_import_to_file(), ignored for all other languages.
     dart_package_name = _detect_dart_package_name(all_file_paths, files)
 
     graph = {}

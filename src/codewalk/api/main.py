@@ -65,6 +65,8 @@ async def analyze(request: AnalyzeRequest):
     """
     try:
         request.repo_path = request.repo_path or settings.repo_path
+        if not request.collection_name:
+            request.collection_name = request.repo_path.rstrip("/").split("/")[-1] or "codebase"
         store = VectorStore()
         store.create_collection(request.collection_name)
         existing_count = store.collection.count()
@@ -90,7 +92,7 @@ async def analyze(request: AnalyzeRequest):
         modules_result = detect_modules(files, deps)
 
         # ── Create agent ─────────────────────────────────────────
-        agent = create_agent(store, modules_result)
+        agent = create_agent(store, modules_result, files=files, deps=deps)
 
         # ── Save state (including files/deps cache) ─────────────
         state.initialize(store, agent, modules_result, index_result,
@@ -114,6 +116,8 @@ async def analyze_stream(request: AnalyzeRequest):
         """Generator that yields SSE events at each pipeline step."""
         try:
             request.repo_path = request.repo_path or settings.repo_path
+            if not request.collection_name:
+                request.collection_name = request.repo_path.rstrip("/").split("/")[-1] or "codebase"
 
             # Step 1: Check existing data
             yield f"data: {json.dumps({'step': 'init', 'message': 'Checking existing index...'})}\n\n"
@@ -179,7 +183,7 @@ async def analyze_stream(request: AnalyzeRequest):
 
             # Step 4: Create agent
             yield f"data: {json.dumps({'step': 'agent', 'message': 'Creating AI agent...'})}\n\n"
-            agent = create_agent(store, modules_result)
+            agent = create_agent(store, modules_result, files=files, deps=deps)
 
             # Step 5: Save state (including files/deps cache)
             state.initialize(store, agent, modules_result, index_result,

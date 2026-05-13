@@ -5,7 +5,7 @@ from pydantic import BaseModel
 class AnalyzeRequest(BaseModel):
     """POST /analyze — request body."""
     repo_path: str = ""
-    collection_name: str = "codebase"
+    collection_name: str = ""
     index_mode: str = "auto"  # "auto" | "reindex" | "full"
 
 class ChatRequest(BaseModel):
