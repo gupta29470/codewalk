@@ -22,8 +22,6 @@ class Settings(BaseSettings):
     # Override via .env: REPO_PATH=/path/to/any/repo/source
     repo_path: str = os.getenv("REPO_PATH", "src/codewalk")
 
-    github_token: str = os.getenv("GITHUB_TOKEN", "")
-
 
     class Config:
         env_file = ".env"
@@ -104,18 +102,8 @@ def get_llm(temperature: float = 0, **kwargs) -> BaseChatModel:
             **filtered,
         )
 
-    elif provider == "github_models":
-        from langchain_openai import ChatOpenAI
-        return ChatOpenAI(
-            model=settings.llm_model,
-            temperature=temperature,
-            api_key=settings.github_token,
-            base_url="https://models.inference.ai.github.com",
-            **filtered,
-        )
-
     else:
         raise ValueError(
             f"Unknown LLM provider: '{provider}'. "
-            f"Supported: ollama, openai, anthropic, gemini, groq, openrouter, github_models"
+            f"Supported: ollama, openai, anthropic, gemini, groq, openrouter"
         )
