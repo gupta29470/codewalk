@@ -9,7 +9,7 @@
             "cwd": "/Users/amadhavl/Development/codewalk",
             "env": {
                 "REPO_PATH": "${workspaceFolder}",
-                "EXCLUDE_PATHS": ""
+                "EXCLUDE_PATHS": "test,docs"
             }
         }
     }
