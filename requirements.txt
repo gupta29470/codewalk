@@ -33,7 +33,11 @@ tree-sitter-c
 tree-sitter-cpp
 tree-sitter-c-sharp
 tree-sitter-php
-tree-sitter-dart @ git+https://github.com/UserNobody14/tree-sitter-dart.git
+# tree-sitter-dart: optional (Dart/Flutter support)
+# Requires git. If you get an SSH error during install, run this first:
+#   git config --global url."https://github.com/".insteadOf "git@github.com:"
+# Then install:
+#   pip install "tree-sitter-dart @ git+https://github.com/UserNobody14/tree-sitter-dart.git"
 tree-sitter-yaml
  tree-sitter-kotlin
  tree-sitter-swift

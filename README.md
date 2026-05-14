@@ -105,6 +105,21 @@ source .codewalk-env/bin/activate    # macOS / Linux
 pip install -r requirements.txt
 ```
 
+<details>
+<summary><strong>Optional: Dart/Flutter support (tree-sitter-dart)</strong></summary>
+
+```bash
+# If you get an SSH error, run this first:
+git config --global url."https://github.com/".insteadOf "git@github.com:"
+
+# Then install:
+pip install "tree-sitter-dart @ git+https://github.com/UserNobody14/tree-sitter-dart.git"
+```
+
+Without this, Codewalk still works — Dart files just won't get tree-sitter parsing (falls back to text splitting).
+
+</details>
+
 ### 3. Frontend setup in codewalk
 
 ```bash
