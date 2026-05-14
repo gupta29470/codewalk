@@ -13,7 +13,8 @@
   <a href="#-usage">Usage</a> •
   <a href="#-mcp-integration">MCP</a> •
   <a href="#-api-reference">API</a> •
-  <a href="#-architecture">Architecture</a>
+  <a href="#-architecture">Architecture</a> •
+  <a href="#-contributing">Contributing</a>
 </p>
 
 ---
@@ -35,6 +36,18 @@ Three ways to use it:
 | **Web UI** (Next.js) | Visual exploration — diagrams, module browser, blast radius viewer |
 | **MCP Server** | VS Code Copilot, Claude Code, Cursor, Codex — AI agents use tools directly |
 | **REST API** | Scripts, CI/CD, custom integrations |
+
+---
+
+## Why Codewalk?
+
+| Scenario | How Codewalk helps |
+|----------|-------------------|
+| **New dev joins the team** | Point Codewalk at the repo → get an overview, module map, and reading order. Self-onboard in hours instead of weeks of "hey, can you explain this?" |
+| **Senior dev switches modules** | You know the auth module but now need to work on payments. Get module info, blast radius, and execution flow without bugging the payments team. |
+| **Before a refactor** | Check blast radius before touching shared code. "If I change `base_model.py`, what breaks?" — get the answer before you break prod. |
+| **PR reviews** | Reviewer doesn't know what `verify_request()` does? Explain any function in seconds with AI-powered line-by-line breakdown. |
+| **Documentation is outdated** | Codewalk analyzes the *actual code*, not stale wiki pages. Always up to date. |
 
 ---
 
@@ -104,6 +117,36 @@ source .codewalk-env/bin/activate    # macOS / Linux
 # Install Python dependencies
 pip install -r requirements.txt
 ```
+
+<details>
+<summary><strong>⚠️ VPN / Corporate Network / Private Network Issues</strong></summary>
+
+If you're behind a **VPN, corporate proxy, or private network**, you may see SSL/certificate errors during:
+- `pip install` (Python packages)
+- First-time model download (HuggingFace embedding model)
+
+**Fix for pip install errors:**
+```bash
+pip install --trusted-host pypi.org --trusted-host files.pythonhosted.org -r requirements.txt
+```
+
+**Fix for HuggingFace model download errors (SSL certificate):**
+```bash
+# Set this before running Codewalk for the first time:
+export HF_HUB_DISABLE_SSL_VERIFY=1
+
+# On Windows:
+set HF_HUB_DISABLE_SSL_VERIFY=1
+```
+> After the model downloads once (~600MB), you can remove this — it's cached locally.
+
+**Fix for git clone / submodule errors:**
+```bash
+git config --global http.sslVerify false
+```
+> Re-enable after cloning: `git config --global http.sslVerify true`
+
+</details>
 
 <details>
 <summary><strong>Optional: Dart/Flutter support (tree-sitter-dart)</strong></summary>
@@ -1017,6 +1060,25 @@ codewalk/
 
 ---
 
+## 🧹 Clearing the Index (Reset ChromaDB)
+
+To wipe all indexed data and start fresh, delete the `data/chroma/` directory:
+
+```bash
+# From the codewalk project root:
+rm -rf data/chroma/
+```
+
+This removes all embedded chunks and collections. Next time you run `codewalk_analyze_codebase` (MCP) or `POST /analyze` (API), it will re-index from scratch.
+
+> **When to do this:**
+> - You switched to a different repo and want a clean index
+> - Embeddings seem stale or corrupted
+> - You changed the embedding model and need to re-embed everything
+> - You want to use `index_mode: "full"` but it's still picking up old data
+
+---
+
 ## 🛠️ Tech Stack
 
 | Layer | Technology |
@@ -1033,12 +1095,28 @@ codewalk/
 
 ---
 
+## 🤝 Contributing
+
+1. **Fork** this repo
+2. **Clone** your fork: `git clone https://github.com/<your-username>/codewalk.git`
+3. **Create a branch**: `git checkout -b feat/my-feature`
+4. **Make your changes** and test them
+5. **Commit**: `git commit -m "feat: add my feature"`
+6. **Push**: `git push origin feat/my-feature`
+7. **Open a Pull Request** against `master`
+
+> All contributions welcome — bug fixes, new language support, UI improvements, docs, anything.
+
+---
+
 ## 📜 License
 
-MIT
+[MIT](LICENSE)
 
 ---
 
 <p align="center">
   Built by <a href="https://github.com/gupta29470">gupta29470</a>
+  <br>
+  <a href="https://www.linkedin.com/in/aakash98gupta/">LinkedIn</a> · <a href="https://x.com/fosla98">Twitter/X</a>
 </p>
