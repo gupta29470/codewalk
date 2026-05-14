@@ -101,11 +101,11 @@ Three ways to use it:
 
 ### Web UI
 
-https://github.com/gupta29470/codewalk/blob/master/codewalk-demo-frontend.mp4
+https://github.com/user-attachments/assets/1bc99516-b3f6-4059-b463-de3c72bc850e
 
 ### MCP with VS Code Copilot
 
-https://github.com/gupta29470/codewalk/blob/master/codewalk-demo-mcp.mp4
+https://github.com/user-attachments/assets/a1dfd347-1135-47d2-b01d-3d995d86208e
 
 ### REST API
 
