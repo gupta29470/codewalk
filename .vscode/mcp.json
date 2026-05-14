@@ -8,7 +8,8 @@
             ],
             "cwd": "/Users/amadhavl/Development/codewalk",
             "env": {
-                "REPO_PATH": "${workspaceFolder}"
+                "REPO_PATH": "${workspaceFolder}",
+                "EXCLUDE_PATHS": ""
             }
         }
     }

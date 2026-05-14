@@ -1,5 +1,6 @@
 import logging
 import sys
+from fnmatch import fnmatch
 
 from mcp.server.fastmcp import FastMCP
 
@@ -96,6 +97,7 @@ def codewalk_analyze_codebase() -> str:
       3) Repeat codewalk_scan_files/codewalk_submit_filtered_files for each batch
       4) Call codewalk_index_filtered_files() to embed and enable search
 
+    ⏩ NEXT STEP: codewalk_scan_files(batch=1)
     Do NOT skip to codewalk_get_overview or other tools until indexing is complete.
     """
     global _store
@@ -121,7 +123,9 @@ def codewalk_analyze_codebase() -> str:
         f"Codebase analyzed successfully.\n"
         f"Files found: {len(_files)}\n"
         f"Modules found: {', '.join(modules)}\n"
-        f"{search_status}"
+        f"{search_status}\n\n"
+        f"⏩ NEXT STEP: Call codewalk_scan_files(batch=1) to start the indexing workflow.\n"
+        f"(If the AI doesn't call it automatically, run it yourself.)"
     )
 
 # ══════════════════════════════════════════════════════════════════════
@@ -587,6 +591,9 @@ def codewalk_scan_files(batch: int = 1) -> str:
 
     When response says LAST BATCH → call codewalk_index_filtered_files.
 
+    ⏩ NEXT STEP: codewalk_submit_filtered_files(paths=[...relevant paths from this batch...])
+    ⏪ PREVIOUS STEP: codewalk_analyze_codebase
+
     Args:
         batch: Batch number (1-indexed). Start with 1, increment each call.
     """
@@ -599,6 +606,21 @@ def codewalk_scan_files(batch: int = 1) -> str:
     if batch == 1:
         _all_scanned_files = scan_directory(repo_path)
         _log(f"[codewalk_scan_files] Scanned {len(_all_scanned_files)} total files")
+
+        # Apply EXCLUDE_PATHS filter
+        exclude_raw = settings.exclude_paths.strip()
+        if exclude_raw:
+            patterns = [p.strip() for p in exclude_raw.split(",") if p.strip()]
+            before = len(_all_scanned_files)
+            _all_scanned_files = [
+                f for f in _all_scanned_files
+                if not any(
+                    fnmatch(f["file_path"], pat) or f["file_path"].startswith(pat.rstrip("/") + "/") or ("/" + pat.rstrip("/") + "/") in ("/" + f["file_path"])
+                    for pat in patterns
+                )
+            ]
+            excluded = before - len(_all_scanned_files)
+            _log(f"[codewalk_scan_files] EXCLUDE_PATHS removed {excluded} files (patterns: {patterns})")
 
     total = len(_all_scanned_files)
     total_batches = (total + MCP_BATCH_SIZE - 1) // MCP_BATCH_SIZE
@@ -615,10 +637,16 @@ def codewalk_scan_files(batch: int = 1) -> str:
     _log(f"[codewalk_scan_files] Returning batch {batch}/{total_batches} ({len(paths)} files) {'LAST' if is_last else ''}")
     status = "LAST BATCH — after submitting, call codewalk_index_filtered_files" if is_last else f"More batches remain — call codewalk_scan_files(batch={batch + 1}) next"
 
+    next_step = (
+        f"\n\n⏩ NEXT STEP: Call codewalk_submit_filtered_files with the relevant paths from this batch.\n"
+        f"(If the AI doesn't call it automatically, run it yourself.)"
+    )
+
     return (
         f"Batch {batch}/{total_batches} ({len(paths)} files, {total} total)\n"
         f"{status}\n\n"
         + "\n".join(paths)
+        + next_step
     )
 
 
@@ -633,6 +661,9 @@ def codewalk_submit_filtered_files(paths: list[str]) -> str:
 
     Do NOT call with an empty list — skip the call if no files are relevant.
 
+    ⏩ NEXT STEP: codewalk_scan_files(batch=<next_batch_number>) OR codewalk_index_filtered_files (if last batch)
+    ⏪ PREVIOUS STEP: codewalk_scan_files
+
     Args:
         paths: File/directory paths from the current batch to index,
                e.g. ["lib/services/auth.dart", "models/"]
@@ -640,7 +671,10 @@ def codewalk_submit_filtered_files(paths: list[str]) -> str:
     global _selected_file_paths
     _selected_file_paths.extend(paths)
     _log(f"[codewalk_submit_filtered_files] Added {len(paths)} paths (total: {len(_selected_file_paths)})")
-    return f"Added {len(paths)} paths. Total selected so far: {len(_selected_file_paths)}"
+    return f"Added {len(paths)} paths. Total selected so far: {len(_selected_file_paths)}\n\n" \
+           f"⏩ NEXT STEP: Call codewalk_scan_files(batch=<next_batch_number>) for the next batch, " \
+           f"or codewalk_index_filtered_files if all batches are done.\n" \
+           f"(If the AI doesn't call it automatically, run it yourself.)"
 
 
 # ─── TOOL 11 [SETUP · user+AI]: codewalk_index_filtered_files ───────
@@ -650,6 +684,9 @@ def codewalk_index_filtered_files() -> str:
 
     Call this after processing all codewalk_scan_files batches.
     Chunks, embeds, and stores the selected files for search.
+
+    ⏩ NEXT STEP: codewalk_get_overview (then any query tool)
+    ⏪ PREVIOUS STEP: codewalk_submit_filtered_files (last batch)
     """
     global _store, _selected_file_paths
 
@@ -675,7 +712,15 @@ def codewalk_index_filtered_files() -> str:
         f"Chunks embedded: {result['chunks_embedded']}\n"
         f"Time: {result.get('total_time', 'N/A')}\n"
         f"Steps: {' | '.join(result.get('steps', []))}\n"
-        f"Modules found: {', '.join(modules)}"
+        f"Modules found: {', '.join(modules)}\n\n"
+        f"Ready! You can now use these tools:\n"
+        f"  - codewalk_get_overview (if LLM didn't call — run manually for project summary)\n"
+        f"  - codewalk_search_codebase (if LLM didn't call — search code by concept)\n"
+        f"  - codewalk_get_module_info (if LLM didn't call — inspect a specific module)\n"
+        f"  - codewalk_explain_function (if LLM didn't call — explain any function/class)\n"
+        f"  - codewalk_get_blast_radius_map (if LLM didn't call — check change risk)\n"
+        f"  - codewalk_get_reading_order (if LLM didn't call — optimal file reading order)\n"
+        f"  - codewalk_get_execution_flow (if LLM didn't call — dependency flow diagram)"
     )
 
 

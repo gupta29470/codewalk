@@ -22,6 +22,10 @@ class Settings(BaseSettings):
     # Override via .env: REPO_PATH=/path/to/any/repo/source
     repo_path: str = os.getenv("REPO_PATH", "src/codewalk")
 
+    # Comma-separated paths to exclude from scanning/indexing
+    # e.g. "tests,docs,scripts/legacy,*.generated.*"
+    exclude_paths: str = os.getenv("EXCLUDE_PATHS", "")
+
 
     class Config:
         env_file = ".env"

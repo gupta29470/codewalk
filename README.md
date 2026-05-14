@@ -301,12 +301,15 @@ Add to `.vscode/mcp.json` in your desired project:
       "args": ["-m", "src.codewalk.mcp.server"],
       "cwd": "/path/to/codewalk",
       "env": {
-        "REPO_PATH": "${workspaceFolder}"
+        "REPO_PATH": "${workspaceFolder}",
+        "EXCLUDE_PATHS": ""
       }
     }
   }
 }
 ```
+
+> **`EXCLUDE_PATHS`** — comma-separated list of paths/patterns to skip during scanning. Example: `"tests,docs,scripts/legacy,*.generated.*"`
 
 Then in Copilot Chat: **`@codewalk`** → follow the scan → filter → index workflow.
 
@@ -324,7 +327,8 @@ Add to `~/.claude/mcp.json`:
       "args": ["-m", "src.codewalk.mcp.server"],
       "cwd": "/path/to/codewalk",
       "env": {
-        "REPO_PATH": "/path/to/target/repo"
+        "REPO_PATH": "/path/to/target/repo",
+        "EXCLUDE_PATHS": ""
       }
     }
   }
@@ -342,7 +346,8 @@ Settings → MCP Servers → Add:
     "args": ["-m", "src.codewalk.mcp.server"],
     "cwd": "/path/to/codewalk",
     "env": {
-      "REPO_PATH": "/path/to/target/repo"
+      "REPO_PATH": "/path/to/target/repo",
+      "EXCLUDE_PATHS": ""
     }
   }
 }
@@ -360,7 +365,8 @@ Add to `~/.codex/mcp.json`:
       "args": ["-m", "src.codewalk.mcp.server"],
       "cwd": "/path/to/codewalk",
       "env": {
-        "REPO_PATH": "/path/to/target/repo"
+        "REPO_PATH": "/path/to/target/repo",
+        "EXCLUDE_PATHS": ""
       }
     }
   }
@@ -371,6 +377,55 @@ Add to `~/.codex/mcp.json`:
 
 The **first time** you use Codewalk on a new codebase, it needs to index the files.  
 You just tell the AI to analyze — **the AI handles the rest automatically**.
+
+### Tool Calling Sequence
+
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│                    SETUP WORKFLOW (run once)                        │
+│                                                                     │
+│  Step 1                                                             │
+│  codewalk_analyze_codebase                                          │
+│       │  scans files, builds dependency graph, detects modules      │
+│       ▼                                                             │
+│  Step 2                                                             │
+│  codewalk_scan_files(batch=1)                                       │
+│       │  returns ~100 file paths for review                         │
+│       ▼                                                             │
+│  Step 3                                                             │
+│  codewalk_submit_filtered_files(paths=[...])                        │
+│       │  submit relevant source files from this batch               │
+│       ▼                                                             │
+│  ┌─── More batches? ───┐                                            │
+│  │ YES                 │ NO                                         │
+│  │ Go to Step 2        │                                            │
+│  │ (batch=2, 3, ...)   ▼                                            │
+│  └─────────────┐  Step 4                                            │
+│                │  codewalk_index_filtered_files                      │
+│                │       │  chunks + embeds all submitted files        │
+│                │       ▼                                             │
+│                │  ✅ READY — all query tools unlocked                │
+│                └────────────────────────────────────────             │
+└─────────────────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────────────┐
+│                   QUERY TOOLS (use after setup)                     │
+│                                                                     │
+│  codewalk_get_overview          → project summary + diagrams        │
+│  codewalk_search_codebase       → semantic code search              │
+│  codewalk_get_module_info       → inspect a specific module         │
+│  codewalk_explain_function      → AI-powered function explanation   │
+│  codewalk_get_blast_radius_map  → change risk analysis              │
+│  codewalk_get_reading_order     → optimal file reading sequence     │
+│  codewalk_get_execution_flow    → dependency flow diagram           │
+└─────────────────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────────────┐
+│                 MAINTENANCE (after code changes)                    │
+│                                                                     │
+│  codewalk_refresh_analysis      → re-scan without re-embedding      │
+└─────────────────────────────────────────────────────────────────────┘
+```
 
 **You type this in Copilot Chat:**
 ```
@@ -394,10 +449,32 @@ or
 ✓ Scanning batch 2 of 2... submitted 34 source files (LAST BATCH)
 ✓ Indexed 121 files → 380 chunks embedded
 
-Ready! You can now ask me anything about this codebase.
+Ready! You can now use these tools:
+  - codewalk_get_overview (if LLM didn't call — run manually for project summary)
+  - codewalk_search_codebase (if LLM didn't call — search code by concept)
+  - codewalk_get_module_info (if LLM didn't call — inspect a specific module)
+  - codewalk_explain_function (if LLM didn't call — explain any function/class)
+  - codewalk_get_blast_radius_map (if LLM didn't call — check change risk)
+  - codewalk_get_reading_order (if LLM didn't call — optimal file reading order)
+  - codewalk_get_execution_flow (if LLM didn't call — dependency flow diagram)
 ```
 
+> **Note:** After indexing, the AI agent should automatically call these tools. If it doesn't, you can invoke them manually — the hints above tell you exactly which tools to run.
+
 > **Note:** This only happens once. Next time you say `@codewalk analyze this codebase`, it detects the existing index and skips straight to "ready."
+
+### ⚠️ If the AI Stops Mid-Workflow
+
+Some LLMs stop after one tool call instead of continuing the full workflow. **Each tool's output tells you exactly what to call next.** If the AI stops, just call the next tool yourself:
+
+| AI stopped after... | You call next |
+|---|---|
+| `codewalk_analyze_codebase` | `codewalk_scan_files(batch=1)` |
+| `codewalk_scan_files` | `codewalk_submit_filtered_files` with the listed paths |
+| `codewalk_submit_filtered_files` | `codewalk_scan_files(batch=<next>)` or `codewalk_index_filtered_files` if last batch |
+| `codewalk_index_filtered_files` | Any query tool — `codewalk_get_overview`, `codewalk_search_codebase`, etc. |
+
+> **Tip:** Look for the **⏩ NEXT STEP** line at the bottom of each tool's output — it tells you exactly what to do.
 
 ---
 
@@ -918,6 +995,7 @@ codewalk/
 | `LLM_MODEL` | `qwen3.5:27b` | Model name (must match provider) |
 | `EMBEDDING_MODEL` | `jinaai/jina-code-embeddings-1.5b` | Sentence-transformer model for code embeddings |
 | `REPO_PATH` | `src/codewalk` | Default repository path to analyze |
+| `EXCLUDE_PATHS` | — | Comma-separated paths to exclude from scanning (e.g. `tests,docs,*.generated.*`) |
 | `GROQ_API_KEY` | — | Groq API key |
 | `OPENAI_API_KEY` | — | OpenAI API key |
 | `ANTHROPIC_API_KEY` | — | Anthropic API key |
