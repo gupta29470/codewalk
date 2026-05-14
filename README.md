@@ -470,6 +470,8 @@ You just tell the AI to analyze — **the AI handles the rest automatically**.
 └─────────────────────────────────────────────────────────────────────┘
 ```
 
+> **💡 Before indexing:** Close unnecessary applications (browsers, Slack, Docker, etc.). Indexing loads the embedding model into memory and processes all files at once — freeing up RAM helps it run faster and avoids slowdowns.
+
 **You type this in Copilot Chat:**
 ```
 @codewalk analyze this codebase [auto(default) | reindex(update index) | full(delete existing index and generate new index)]
