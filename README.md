@@ -149,30 +149,17 @@ pip install -r requirements.txt
 <details>
 <summary><strong>⚠️ VPN / Corporate Network / Private Network Issues</strong></summary>
 
-If you're behind a **VPN, corporate proxy, or private network**, you may see SSL/certificate errors during:
-- `pip install` (Python packages)
-- First-time model download (HuggingFace embedding model)
+If you're behind a **VPN, corporate proxy, or private network**, package installations and model downloads may fail due to blocked connections or SSL certificate errors.
 
-**Fix for pip install errors:**
-```bash
-pip install --trusted-host pypi.org --trusted-host files.pythonhosted.org -r requirements.txt
-```
+**Recommended: Use a normal (non-VPN) network for first-time setup.**
 
-**Fix for HuggingFace model download errors (SSL certificate):**
-```bash
-# Set this before running Codewalk for the first time:
-export HF_HUB_DISABLE_SSL_VERIFY=1
+Codewalk's setup downloads packages from PyPI, npm, and HuggingFace. These are one-time downloads — once installed, everything runs locally. If possible:
 
-# On Windows:
-set HF_HUB_DISABLE_SSL_VERIFY=1
-```
-> After the model downloads once (~600MB), you can remove this — it's cached locally.
+1. **Disconnect from VPN** temporarily
+2. Run the setup steps (`pip install`, `npm install`, start the backend once to download the embedding model)
+3. **Reconnect to VPN** — everything is cached locally, no more downloads needed
 
-**Fix for git clone / submodule errors:**
-```bash
-git config --global http.sslVerify false
-```
-> Re-enable after cloning: `git config --global http.sslVerify true`
+> After the first run, Codewalk works fully offline (with Ollama). The VPN/corporate network won't cause any issues.
 
 </details>
 
@@ -1139,6 +1126,8 @@ This removes all embedded chunks and collections. Next time you run `codewalk_an
 
 > All contributions welcome — bug fixes, new language support, UI improvements, docs, anything.
 
+> **Found a bug?** [Open an issue](https://github.com/gupta29470/codewalk/issues/new) with screenshots, error logs, or references — it helps us fix it faster.
+
 ---
 
 ## 📜 License
@@ -1146,6 +1135,10 @@ This removes all embedded chunks and collections. Next time you run `codewalk_an
 [MIT](LICENSE)
 
 ---
+
+<p align="center">
+  ⭐ If you find Codewalk useful, give it a star — it helps others discover it!
+</p>
 
 <p align="center">
   Built by <a href="https://github.com/gupta29470">gupta29470</a>
