@@ -44,6 +44,7 @@ Three ways to use it:
 | Scenario | How Codewalk helps |
 |----------|-------------------|
 | **New dev joins the team** | Point Codewalk at the repo → get an overview, module map, and reading order. Self-onboard in hours instead of weeks of "hey, can you explain this?" |
+| **LLM token costs are high** | Without RAG, the LLM needs your entire codebase in context — slow and expensive. Codewalk embeds code into a vector DB and retrieves only the relevant chunks per query. Faster answers, fraction of the tokens. |
 | **Senior dev switches modules** | You know the auth module but now need to work on payments. Get module info, blast radius, and execution flow without bugging the payments team. |
 | **Before a refactor** | Check blast radius before touching shared code. "If I change `base_model.py`, what breaks?" — get the answer before you break prod. |
 | **PR reviews** | Reviewer doesn't know what `verify_request()` does? Explain any function in seconds with AI-powered line-by-line breakdown. |
