@@ -101,17 +101,14 @@ Three ways to use it:
 
 ### Web UI
 
-<!-- Replace with your video -->
-> 🎥 **[Video coming soon]**
+https://github.com/gupta29470/codewalk/blob/master/codewalk-demo-frontend.mp4
 
 ### MCP with VS Code Copilot
 
-<!-- Replace with your video -->
-> 🎥 **[Video coming soon]**
+https://github.com/gupta29470/codewalk/blob/master/codewalk-demo-mcp.mp4
 
 ### REST API
 
-<!-- Replace with your video -->
 > 🎥 **[Video coming soon]**
 
 ---
