@@ -270,10 +270,21 @@ Codewalk runs as an MCP (Model Context Protocol) server, so any AI agent that sp
 1. Open VS Code in the codewalk project
 2. Press **`Cmd+Shift+P`** (macOS) or **`Ctrl+Shift+P`** (Windows/Linux)
 3. Type **`MCP: List Servers`** and select it
+
+   ![MCP: List Servers](assets/mcp-list-servers.png)
+
 4. You'll see **`codewalk`** in the list
+
+   ![Select codewalk server](assets/mcp-select-server.png)
+
 5. Click **Start Server** next to codewalk
+
+   ![Start Server](assets/mcp-start-server.png)
+
 6. The server starts in the background (stdio transport)
-7. Open Copilot Chat → type **`@codewalk`** → start using the tools
+7. Open Copilot Chat → type **`@codewalk`** → all 12 tools are available
+
+   ![MCP tools list](assets/mcp-tools-list.png)
 
 
 ### VS Code Copilot
