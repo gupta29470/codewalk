@@ -68,6 +68,33 @@ Three ways to use it:
 | 🏗️ **Multi-Provider LLM** | Ollama (local), OpenAI, Anthropic, Groq, Gemini, OpenRouter |
 | 🌐 **15+ Languages** | Python, JS, TS, Java, Go, Rust, Ruby, PHP, C#, C++, C, Dart, Kotlin, Swift, YAML |
 
+### Supported Languages
+
+| Language | Extensions | Tree-sitter Parsing | Import Extraction |
+|----------|-----------|---------------------|-------------------|
+| Python | `.py` | ✅ | ✅ |
+| JavaScript | `.js`, `.jsx` | ✅ | ✅ |
+| TypeScript | `.ts`, `.tsx` | ✅ | ✅ |
+| Java | `.java` | ✅ | ✅ |
+| Go | `.go` | ✅ | ✅ |
+| Rust | `.rs` | ✅ | ✅ |
+| Ruby | `.rb` | ✅ | ✅ |
+| PHP | `.php` | ✅ | ✅ |
+| C# | `.cs` | ✅ | ✅ |
+| C++ | `.cpp` | ✅ | ✅ |
+| C | `.c` | ✅ | ✅ |
+| Kotlin | `.kt` | ✅ | ✅ |
+| Swift | `.swift` | ✅ | ✅ |
+| Dart | `.dart` | ✅ *(optional install)* | ✅ |
+| YAML | `.yaml`, `.yml` | — | — |
+| JSON | `.json` | — | — |
+| TOML | `.toml` | — | — |
+| Markdown | `.md` | — | — |
+
+> **Tree-sitter parsing** = extracts functions, classes, and methods for accurate chunking and function explanations.  
+> **Import extraction** = builds the dependency graph, blast radius, and reading order.  
+> Languages without tree-sitter support still get indexed via text splitting — they work with semantic search and AI chat, just without function-level granularity.
+
 ---
 
 ## 🎬 Demo
@@ -354,6 +381,8 @@ Add to `.vscode/mcp.json` in your desired project:
 ```
 
 > **`EXCLUDE_PATHS`** — comma-separated list of paths/patterns to skip during scanning. Example: `"tests,docs,scripts/legacy,*.generated.*"`
+
+> **Customizing file filters:** Codewalk ships with a built-in skip list (binary files, lock files, `node_modules/`, etc.). If you want to **remove** a predefined skip rule (e.g., to index `.md` or `.css` files), edit [`src/codewalk/ingestion/file_filter.py`](src/codewalk/ingestion/file_filter.py).
 
 Then in Copilot Chat: **`@codewalk`** → follow the scan → filter → index workflow.
 

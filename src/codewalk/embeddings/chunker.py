@@ -26,6 +26,9 @@ LANGUAGE_MAP =  {
     "csharp": Language.CSHARP,
     "cpp": Language.CPP,
     "c": Language.C,
+    "kotlin": Language.KOTLIN,
+    "swift": Language.SWIFT,
+    "html": Language.HTML,
     "markdown": Language.MARKDOWN,
 }
 

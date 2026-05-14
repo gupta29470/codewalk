@@ -50,6 +50,48 @@ SKIP_DIRS = {
     "migrations",
     # Gradle
     ".gradle",
+    # Framework build caches
+    ".next",
+    ".nuxt",
+    ".svelte-kit",
+    ".turbo",
+    ".nx",
+    ".terraform",
+    # Python tooling caches
+    ".mypy_cache",
+    ".pytest_cache",
+    ".ruff_cache",
+    ".tox",
+    "htmlcov",
+    ".eggs",
+    "__pypackages__",
+    ".hypothesis",
+    # JS build / deploy
+    ".cache",
+    ".parcel-cache",
+    "storybook-static",
+    ".vercel",
+    ".netlify",
+    # Output / generated
+    "out",
+    "obj",
+    "gen",
+    "generated",
+    "__generated__",
+    "intermediates",
+    # Xcode / Android NDK
+    "xcuserdata",
+    ".cxx",
+    # Test / CI artifacts
+    ".nyc_output",
+    "test-results",
+    "test-reports",
+    # Docs build output
+    "site",
+    # Generic
+    "tmp", "temp",
+    "logs",
+    "reports",
 }
 
 # Extensions that aren't code (binary/media files)
@@ -62,11 +104,26 @@ SKIP_EXTENSIONS = {
     ".so", ".dylib", ".dll",
     ".exe", ".bin",
     ".wasm",
+    ".dex",
+    ".beam",              # Erlang/Elixir
+    ".hi",                # Haskell interface
+    ".elc",               # Emacs Lisp
+    ".rbc",               # Ruby compiled
+    ".fasl",              # Common Lisp
+
+    # App bundles / archives
+    ".apk", ".ipa", ".aab",
+    ".jar", ".aar",
+    ".ear", ".war",
 
     # Images
     ".ico", ".png", ".jpg", ".jpeg", ".gif", ".svg",
     ".bmp", ".tiff", ".webp", ".heic", ".heif",
     ".psd", ".ai", ".sketch", ".fig",
+
+    # 3D / game assets
+    ".fbx", ".glb", ".gltf", ".blend",
+    ".unity", ".prefab",
 
     # Fonts
     ".woff", ".woff2", ".ttf", ".eot", ".otf",
@@ -92,17 +149,88 @@ SKIP_EXTENSIONS = {
 
     # Documents (not code)
     ".pdf", ".doc", ".docx", ".xls", ".xlsx", ".ppt", ".pptx",
-    ".md", ".rst", ".txt", ".adoc",
+    ".rst", ".txt", ".adoc",
 
     # Translation / localization data
     ".arb", ".xliff", ".xlf", ".po", ".pot", ".mo",
     ".strings", ".stringsdict",
 
-    # Certifica / keys
+    # Certificates / keys / secrets
     ".pem", ".crt", ".key", ".p12", ".pfx",
+    ".secret", ".secrets", ".age",
+    ".env.local", ".env.production",
+    ".jks", ".keystore",  # Android signing
+    ".cer", ".der", ".p8",
+    ".mobileprovision",   # iOS provisioning
+
+    # Terraform (state + vars may contain secrets)
+    ".tfstate", ".tfvars",
 
     # Maps / generated
     ".map",
+    ".ipynb",             # Jupyter — JSON blobs, can't chunk by function
+
+    # Xcode / iOS generated
+    ".pbxproj",           # Xcode project — huge auto-generated XML
+    ".xcscheme",
+    ".storyboard", ".xib",
+
+    # GPU shaders
+    ".glsl", ".hlsl", ".vert", ".frag",
+    ".spv",               # SPIR-V compiled
+    ".metal",             # Apple Metal
+
+    # Debug symbols
+    ".pdb",               # Windows debug
+    ".res",               # Windows resource
+
+    # Patch / diff
+    ".patch", ".diff",
+
+    # Temp / scratch / logs
+    ".tmp", ".temp",
+    ".bak", ".orig",
+    ".log",
+    ".cache",
+
+    # Editor swap files
+    ".swp", ".swo", ".swn",
+    ".iml",
+
+    # Profiling / dumps / coverage
+    ".prof", ".cpuprofile",
+    ".dmp", ".hprof",
+    ".profdata", ".profraw",  # LLVM profiling
+    ".lcov",                  # Coverage data
+    ".gcda", ".gcno",         # GCC coverage instrumentation
+
+    # Compiler-generated artifacts
+    ".d",                     # GCC/Clang dependency files
+    ".pch", ".gch",           # Precompiled headers
+    ".rlib",                  # Rust compiled library
+    ".jmod",                  # Java module format
+
+    # Unity-specific
+    ".meta",                  # Auto-generated for every asset
+    ".anim",                  # Animation clip
+    ".controller",            # Animator controller
+    ".lighting",              # Baked lighting
+    ".shadergraph",           # Shader graph asset
+
+    # Visual Studio binary
+    ".suo",                   # Solution user options
+    ".sdf",                   # IntelliSense DB
+    ".ncb",                   # Old VS IntelliSense DB
+    ".user",                  # Per-user project settings
+
+    # R / MATLAB data
+    ".rda", ".rds", ".rdata",
+    ".mat",                   # MATLAB data
+
+    # Ops / infra
+    ".tfplan",                # Terraform plan output
+    ".retry",                 # Ansible retry files
+    ".webmanifest",           # Web app manifest
 
     # Misc binary
     ".dat", ".data", ".npy", ".npz",
@@ -124,6 +252,18 @@ SKIP_FILES = {
     "go.sum",
     "flake.lock",
     "bun.lockb",
+    "poetry.lock",
+    "uv.lock",
+    "mix.lock",
+    "stack.yaml.lock",
+    "deno.lock",
+    "npm-shrinkwrap.json",
+    ".terraform.lock.hcl",
+    # OS junk
+    "Thumbs.db",
+    "desktop.ini",
+    # Python distribution
+    "MANIFEST",
 }
 
 # Filename suffixes for generated/auto-generated code
@@ -140,6 +280,22 @@ SKIP_SUFFIXES = (
     ".min.css",
     ".bundle.js",
     ".chunk.js",
+    # Protobuf / gRPC generated
+    ".pb.swift",
+    ".pb.dart",
+    "_pb2_grpc.py",
+    ".grpc.swift",
+    # GraphQL codegen
+    ".graphql.ts",
+    ".gql.ts",
+    # Go generated
+    "_generated.go",
+    "_mock.go",
+    ".mock.go",
+    # JS/TS generated
+    ".generated.ts",
+    ".generated.js",
+    ".chunk.css",
 )
 
 def should_skip(file_path: str) -> bool:
