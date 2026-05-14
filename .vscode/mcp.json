@@ -1,0 +1,15 @@
+{
+    "servers": {
+        "codewalk": {
+            "command": "/Users/amadhavl/Development/codewalk/.codewalk-env/bin/python",
+            "args": [
+                "-m",
+                "src.codewalk.mcp.server"
+            ],
+            "cwd": "/Users/amadhavl/Development/codewalk",
+            "env": {
+                "REPO_PATH": "${workspaceFolder}"
+            }
+        }
+    }
+}
