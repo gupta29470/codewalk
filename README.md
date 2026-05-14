@@ -280,6 +280,8 @@ Codewalk runs as an MCP (Model Context Protocol) server, so any AI agent that sp
 
 Add to `.vscode/mcp.json` in your desired project:
 
+> ⚠️ **Replace `/path/to/codewalk`** with the actual absolute path where you cloned codewalk.
+
 ```json
 {
   "servers": {
@@ -296,6 +298,8 @@ Add to `.vscode/mcp.json` in your desired project:
 ```
 
 Then in Copilot Chat: **`@codewalk`** → follow the scan → filter → index workflow.
+
+> **Note:** After adding or modifying `.vscode/mcp.json`, reload the VS Code window: **`Cmd+Shift+P`** → **`Developer: Reload Window`**.
 
 ### Claude Code
 
