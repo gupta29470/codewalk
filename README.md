@@ -29,6 +29,8 @@ Codewalk analyzes any codebase and gives you:
 - **Reading order** — optimal file reading sequence (dependencies first)
 - **Execution flow** — entry points, module-to-module and file-to-file dependency flow
 - **AI chat** — ask anything about the code, powered by RAG + tool-calling agent
+- **Code review** — review git diffs for bugs, security issues, and style (LLM + pre-checks)
+- **Incremental reindex** — re-embed only changed files using content hash comparison
 
 Three ways to use it:
 | Interface | Best for |
@@ -47,7 +49,7 @@ Three ways to use it:
 | **LLM token costs are high** | Without RAG, the LLM needs your entire codebase in context — slow and expensive. Codewalk embeds code into a vector DB and retrieves only the relevant chunks per query. Faster answers, fraction of the tokens. |
 | **Senior dev switches modules** | You know the auth module but now need to work on payments. Get module info, blast radius, and execution flow without bugging the payments team. |
 | **Before a refactor** | Check blast radius before touching shared code. "If I change `base_model.py`, what breaks?" — get the answer before you break prod. |
-| **PR reviews** | Reviewer doesn't know what `verify_request()` does? Explain any function in seconds with AI-powered line-by-line breakdown. |
+| **PR reviews** | Run `codewalk_review_diff` or `POST /review` — automated multi-stage review with OWASP security checks, test coverage detection, blast radius warnings, team guidelines matching, and LLM deep scan. |
 | **Documentation is outdated** | Codewalk analyzes the *actual code*, not stale wiki pages. Always up to date. |
 
 ---
@@ -63,7 +65,9 @@ Three ways to use it:
 | 🔄 **Execution Flow** | Entry points, module/file dependency chains, Mermaid diagrams |
 | 🤖 **AI Chat** | LangGraph agent with 7 tools, multi-turn conversation with memory |
 | 🔎 **Semantic Search** | ChromaDB vector search on embedded code chunks (RAG) |
-| 🧩 **MCP Server** | 12 tools for VS Code Copilot / Claude Code / Cursor / Codex |
+| 🔬 **Code Review** | Multi-stage review pipeline: test coverage, blast radius, guidelines RAG, LLM deep scan |
+| 🔄 **Incremental Reindex** | Content hash comparison — only re-embeds changed files, skips unchanged |
+| 🧩 **MCP Server** | 16 tools for VS Code Copilot / Claude Code / Cursor / Codex |
 | ⚡ **Parallel Embedding** | Producer-consumer pipeline — CPU chunking overlaps with GPU embedding |
 | 🏗️ **Multi-Provider LLM** | Ollama (local), OpenAI, Anthropic, Groq, Gemini, OpenRouter |
 | 🌐 **15+ Languages** | Python, JS, TS, Java, Go, Rust, Ruby, PHP, C#, C++, C, Dart, Kotlin, Swift, YAML |
@@ -255,6 +259,8 @@ Then explore:
 - **Reading Order** — optimal file reading sequence with risk levels
 - **Execution Flow** — Mermaid diagram of module/file dependencies
 - **Chat** — ask any question ("explain the authentication flow", "what does scanner.py do?")
+- **Code Review** — review git diffs, review single files, load team guidelines
+- **Smart Reindex** — incremental re-embed with stats (skipped, changed, deleted)
 
 ### Option 2: MCP Server (VS Code Copilot / Claude Code / Cursor)
 
@@ -310,6 +316,14 @@ curl -X POST http://localhost:8000/chat \
 
 # After code changes — refresh analysis without re-embedding
 curl -X POST http://localhost:8000/refresh
+
+# Incremental reindex — only re-embed changed files
+curl -X POST http://localhost:8000/incremental-reindex
+
+# Review current git diff for bugs, security, style
+curl -X POST http://localhost:8000/review \
+  -H "Content-Type: application/json" \
+  -d '{"staged": false, "target_branch": "main"}'
 ```
 
 See [API Reference](#-api-reference) for full request/response details on every endpoint.
@@ -337,7 +351,7 @@ Codewalk runs as an MCP (Model Context Protocol) server, so any AI agent that sp
    ![Start Server](assets/mcp-start-server.png)
 
 6. The server starts in the background (stdio transport)
-7. Open Copilot Chat → type **`@codewalk`** → all 12 tools are available
+7. Open Copilot Chat → type **`@codewalk`** → all 16 tools are available
 
    ![MCP tools list](assets/mcp-tools-list.png)
 
@@ -480,7 +494,11 @@ You just tell the AI to analyze — **the AI handles the rest automatically**.
 ┌─────────────────────────────────────────────────────────────────────┐
 │                 MAINTENANCE (after code changes)                    │
 │                                                                     │
+│  codewalk_incremental_reindex   → re-embed only changed files       │
 │  codewalk_refresh_analysis      → re-scan without re-embedding      │
+│  codewalk_review_diff           → review git diff (LLM + checks)    │
+│  codewalk_review_file           → review file vs codebase patterns  │
+│  codewalk_load_guidelines       → load team coding standards        │
 └─────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -672,6 +690,71 @@ or
 
 ---
 
+#### "Some files changed, update the embeddings"
+
+**Tool:** `codewalk_incremental_reindex` — no parameters needed
+
+You changed a few files but don't want to re-embed the entire codebase.
+
+```
+@codewalk reindex changed files
+or
+@codewalk_incremental_reindex
+```
+
+**When to use:** After code changes when you want the vector search to reflect the latest code without a full re-index. Uses content hashes — only re-embeds what actually changed.
+
+---
+
+#### "Review my changes for bugs"
+
+**Tool:** `codewalk_review_diff` — optional: `staged=true`, `target_branch="main"`
+
+You're about to push a PR and want an automated code review.
+
+```
+@codewalk review my changes
+or
+@codewalk_review_diff
+@codewalk_review_diff staged=true target_branch="main"
+```
+
+**When to use:** Before pushing a PR. Catches security vulnerabilities (OWASP), bugs, missing test coverage, and style issues.
+
+---
+
+#### "Review this specific file"
+
+**Tool:** `codewalk_review_file(file_path)` — pass the file path
+
+You want to check if a file follows the project's conventions.
+
+```
+@codewalk review src/codewalk/pipeline.py
+or
+@codewalk_review_file src/codewalk/pipeline.py
+```
+
+**When to use:** When you want to compare a specific file against patterns found elsewhere in the codebase.
+
+---
+
+#### "Load our team's coding guidelines"
+
+**Tool:** `codewalk_load_guidelines(docs_path)` — pass path to guidelines directory
+
+Your team has coding standards in markdown files.
+
+```
+@codewalk load guidelines from docs/standards
+or
+@codewalk_load_guidelines docs/standards
+```
+
+**When to use:** Once per project. After loading, `codewalk_review_diff` automatically checks code against your team's standards.
+
+---
+
 ### Quick Reference — What To Ask
 
 | You want to... | Just say... |
@@ -686,6 +769,10 @@ or
 | Best reading order | `@codewalk what order should I read the agent module?` or `@codewalk_get_reading_order agent module` |
 | See dependency flow | `@codewalk show me the execution flow` or `@codewalk_get_execution_flow` |
 | After code changes | `@codewalk refresh the analysis` or `@codewalk_refresh_analysis` |
+| Update embeddings | `@codewalk reindex changed files` or `@codewalk_incremental_reindex` |
+| Review git diff | `@codewalk review my changes` or `@codewalk_review_diff` |
+| Review a file | `@codewalk review src/auth.py` or `@codewalk_review_file src/auth.py` |
+| Load guidelines | `@codewalk load guidelines from docs/` or `@codewalk_load_guidelines docs/` |
 
 ---
 
@@ -929,6 +1016,101 @@ curl http://localhost:8000/execution-flow
 }
 ```
 
+---
+
+### Maintenance Endpoints
+
+#### `POST /incremental-reindex` — Re-embed only changed files
+
+```bash
+curl -X POST http://localhost:8000/incremental-reindex
+```
+
+**Response:**
+```json
+{
+  "repo_path": "/Users/you/projects/my-app",
+  "files_on_disk": 142,
+  "files_skipped": 138,
+  "files_reindexed": 3,
+  "files_deleted": 1,
+  "chunks_embedded": 12,
+  "total_time": "2.3s"
+}
+```
+
+---
+
+### Review Endpoints
+
+#### `POST /review` — Review git diff
+
+```bash
+curl -X POST http://localhost:8000/review \
+  -H "Content-Type: application/json" \
+  -d '{"staged": false, "target_branch": "main"}'
+```
+
+**Response:**
+```json
+{
+  "issues": [
+    {
+      "severity": "critical",
+      "category": "security",
+      "file_path": "src/auth/jwt.py",
+      "line_number": 42,
+      "title": "JWT secret hardcoded",
+      "explanation": "The JWT signing secret is hardcoded in the source file.",
+      "suggestion": "Move the secret to an environment variable.",
+      "code_snippet": "SECRET = 'my-secret-key'"
+    }
+  ],
+  "summary": "Found 1 critical issue in 3 files (+45 / -12 lines)",
+  "files_reviewed": 3,
+  "lines_added": 45,
+  "lines_removed": 12
+}
+```
+
+- `staged`: If `true`, review only staged changes (`--staged`). Default: `false`.
+- `target_branch`: Diff against a branch (e.g. `"main"` for full PR review). Default: `null` (unstaged changes).
+
+#### `POST /review/file` — Review a single file
+
+```bash
+curl -X POST http://localhost:8000/review/file \
+  -H "Content-Type: application/json" \
+  -d '{"file_path": "src/codewalk/pipeline.py"}'
+```
+
+**Response:**
+```json
+{
+  "review": "## File Review: pipeline.py\n\n### Consistency...\n",
+  "file_path": "src/codewalk/pipeline.py"
+}
+```
+
+#### `POST /review/guidelines` — Load coding guidelines
+
+```bash
+curl -X POST http://localhost:8000/review/guidelines \
+  -H "Content-Type: application/json" \
+  -d '{"docs_path": "/path/to/guidelines"}'
+```
+
+**Response:**
+```json
+{
+  "status": "loaded",
+  "chunks": 24,
+  "path": "/path/to/guidelines"
+}
+```
+
+---
+
 #### `GET /health` — Health check
 
 ```bash
@@ -956,6 +1138,8 @@ curl http://localhost:8000/health
 │   ├── Blast Radius             │             │          │
 │   ├── Reading Order            │             │          │
 │   ├── Execution Flow           │             │          │
+│   ├── Code Review              │             │          │
+│   ├── Smart Reindex            │             │          │
 │   └── Chat ──────────────────┐ │             │          │
 │                              ▼ ▼             ▼          │
 ├──────────────────────────────────────────────────────────┤
@@ -979,6 +1163,16 @@ curl http://localhost:8000/health
 │   blast_radius.py   reading_order.py   code_parser.py    │
 │   (BFS reverse       (topological      (tree-sitter      │
 │    graph)             sort)              15+ langs)       │
+├──────────────────────────────────────────────────────────┤
+│                    REVIEW LAYER                          │
+│                                                          │
+│   diff_parser.py → test_coverage.py → reviewer.py        │
+│   (git diff         (11-lang test       (8-step          │
+│    parsing)          detection)          pipeline)        │
+│                                                          │
+│   guidelines_loader.py → review_prompts.py               │
+│   (team standards       (OWASP security                  │
+│    RAG search)           checklist)                       │
 ├──────────────────────────────────────────────────────────┤
 │                   EMBEDDING LAYER                        │
 │                                                          │
@@ -1018,12 +1212,19 @@ codewalk/
 │   │   ├── graph.py               #   StateGraph + fallback parser
 │   │   ├── tools.py               #   7 tool functions
 │   │   └── prompts.py             #   System prompt
+│   ├── review/                    # Code review pipeline
+│   │   ├── models.py              #   Issue, ReviewResult, Severity, Category
+│   │   ├── diff_parser.py         #   git diff → parsed DiffFile objects
+│   │   ├── test_coverage.py       #   Missing test detection (11 languages)
+│   │   ├── guidelines_loader.py   #   Load team coding standards (RAG)
+│   │   ├── review_prompts.py      #   System + user prompts (OWASP checklist)
+│   │   └── reviewer.py            #   8-step review pipeline orchestrator
 │   ├── api/                       # FastAPI REST
-│   │   ├── main.py                #   12 endpoints
+│   │   ├── main.py                #   16 endpoints
 │   │   ├── models.py              #   Pydantic schemas
 │   │   └── state.py               #   Singleton app state
 │   └── mcp/                       # Model Context Protocol
-│       └── server.py              #   12 MCP tools (stdio)
+│       └── server.py              #   16 MCP tools (stdio)
 │
 ├── frontend/                      # Next.js 14 web UI
 │   └── src/app/
@@ -1034,7 +1235,10 @@ codewalk/
 │       ├── module/page.tsx        #   Single module detail
 │       ├── blast-radius/page.tsx  #   Change impact viewer
 │       ├── reading-order/page.tsx #   Reading order viewer
-│       └── execution-flow/page.tsx#   Flow diagram viewer
+│       ├── execution-flow/page.tsx#   Flow diagram viewer
+│       ├── review/page.tsx        #   Code review (diff/file/guidelines)
+│       └── incremental-reindex/   #   Smart reindex page
+│           └── page.tsx
 │
 ├── data/
 │   └── chroma/                    # ChromaDB persistent storage
@@ -1060,6 +1264,7 @@ codewalk/
 | `ANTHROPIC_API_KEY` | — | Anthropic API key |
 | `GOOGLE_API_KEY` | — | Google Gemini API key |
 | `OPENROUTER_API_KEY` | — | OpenRouter API key |
+| `REVIEW_GUIDELINES_PATH` | — | Path to directory with team coding guidelines (.md, .txt, .rst) |
 
 ---
 
