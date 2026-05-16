@@ -268,14 +268,14 @@ def index_from_paths(paths: list[str], repo_path: str = "",
 
     path_set = set(paths)
     files = []
-    for f in all_files:
-        fp = f["file_path"]
-        if fp in path_set:
-            files.append(f)
+    for file in all_files:
+        file_path = file["file_path"]
+        if file_path in path_set:
+            files.append(file)
             continue
-        for p in path_set:
-            if fp.startswith(p + "/") or fp.startswith(p.rstrip("/") + "/"):
-                files.append(f)
+        for path in path_set:
+            if file_path.startswith(path + "/") or file_path.startswith(path.rstrip("/") + "/"):
+                files.append(file)
                 break
 
     elapsed = time.time() - t0
@@ -324,77 +324,32 @@ def index_from_paths(paths: list[str], repo_path: str = "",
 def reindex(repo_path: str = "", collection_name: str = "codebase") -> dict:
     """Smart re-index: only re-embed files that changed, add new, remove deleted.
 
-    Returns a summary dict with stats.
+    Thin wrapper around incremental_reindex() that processes ALL indexed files.
     """
     repo_path = repo_path or settings.repo_path
-    _log(f"[reindex] Smart re-indexing: {repo_path}")
 
-    # Step 1: Scan directory → current files
-    files = scan_directory(repo_path)
-    current_files = {file["file_path"]: file for file in files}
-    _log(f"[reindex] Scanned: {len(files)} files")
-
-    # Step 2: Get already-indexed files from ChromaDB
     store = VectorStore()
     store.create_collection(collection_name)
-    indexed_files = store.get_indexed_files()
-    _log(f"[reindex] Indexed files in DB: {len(indexed_files)}")
+    indexed_files = list(store.get_all_indexed_files())
 
-    # Step 3: Chunk current files to get hashes
-    chunks_by_file = {}
-    for file in files:
-        file_chunk = chunk_file(file)
-        if file_chunk:
-            chunks_by_file[file["file_path"]] = file_chunk
+    # If nothing indexed yet, scan disk for all files
+    if not indexed_files:
+        all_files = scan_directory(repo_path)
+        indexed_files = [f["file_path"] for f in all_files]
 
-    # Step 4: Compare — find new, changed, deleted, unchanged
-    current_paths = set(current_files.keys())
-    indexed_paths = set(indexed_files.keys())
+    result = incremental_reindex(indexed_files, repo_path, collection_name)
 
-    new_files = current_paths - indexed_paths
-    deleted_files = indexed_paths - current_paths
-    maybe_changed_files = current_paths & indexed_paths
-
-    changed_files = set()
-    unchanged_files = set()
-
-    for file_path in maybe_changed_files:
-        file_chunks = chunks_by_file.get(file_path, [])
-        new_hash = file_chunks[0]["file_hash"] if file_chunks else ""
-        old_hash = indexed_files.get(file_path, "")
-
-        if new_hash != old_hash:
-            changed_files.add(file_path)
-        else:
-            unchanged_files.add(file_path)
-
-    _log(f"[reindex] New: {len(new_files)}, Changed: {len(changed_files)}, "
-          f"Deleted: {len(deleted_files)}, Unchanged: {len(unchanged_files)}")
-    
-    # Step 5: Delete chunks for removed & changed files
-    for file_path in deleted_files | changed_files:
-        store.delete_by_file(file_path)
-
-    # Step 6: Embed & add chunks for new & changed files
-    to_embed = []
-    
-    for file_path in new_files | changed_files:
-        to_embed.extend(chunks_by_file.get(file_path, []))
-
-    if to_embed:
-        embedded = embed_chunks(to_embed)
-        store.add_chunks(embedded)
-        _log(f"[reindex] Embedded & stored {len(embedded)} new/changed chunks")
-    else :
-        _log("[reindex] Nothing to embed — all files unchanged")
-
+    # Map to legacy return format for /analyze callers
     return {
-        "repo_path": repo_path,
-        "new_files": len(new_files),
-        "changed_files": len(changed_files),
-        "deleted_files": len(deleted_files),
-        "unchanged_files": len(unchanged_files),
-        "chunks_embedded": len(to_embed),
+        "repo_path": result["repo_path"],
+        "new_files": result["files_reindexed"],
+        "changed_files": result["files_reindexed"],
+        "deleted_files": result["files_deleted"],
+        "unchanged_files": result["files_skipped"],
+        "files_scanned": result["files_on_disk"],
+        "chunks_created": result["chunks_embedded"],
+        "chunks_embedded": result["chunks_embedded"],
+        "total_time": result["total_time"],
     }
 
 def incremental_reindex(

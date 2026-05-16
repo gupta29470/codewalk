@@ -26,7 +26,7 @@ from src.codewalk.generation.diagram_generator import generate_module_diagram
 from src.codewalk.generation.module_explainer import explain_module
 from src.codewalk.embeddings.vector_store import VectorStore
 from src.codewalk.rag.chain import format_context
-from src.codewalk.pipeline import full_index_parallel, reindex, index_from_paths_parallel, incremental_reindex
+from src.codewalk.pipeline import full_index_parallel, index_from_paths_parallel, incremental_reindex
 from src.codewalk.config import settings, get_llm
 from src.codewalk.analysis.blast_radius import (
     get_blast_radius,
