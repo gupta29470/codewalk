@@ -46,6 +46,7 @@ tree-sitter-yaml
 pydantic
 pydantic-settings
 python-dotenv
+unidiff
 
 # MCP
 mcp

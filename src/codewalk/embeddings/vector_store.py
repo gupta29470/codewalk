@@ -73,6 +73,27 @@ class VectorStore:
         
         return formatted
     
+    def get_file_hash(self, file_path: str) -> str | None:
+        """Get the stored content hash for a file. Returns None if not indexed."""
+        results = self.collection.get(
+            where={"file_path": file_path},
+            limit=1,
+            include=["metadatas"],
+        )
+
+        if results["metadatas"]:
+            return results["metadatas"][0].get("file_hash")
+        return None
+    
+    def get_all_indexed_files(self) -> set[str]:
+        """Get all unique file paths currently in the index."""
+        results = self.collection.get(include=["metadatas"])
+        return {
+            meta["file_path"]
+            for meta in results["metadatas"]
+            if "file_path" in meta
+        }
+    
     def delete_by_file(self, file_path: str):
         """Delete ALL chunks for a specific file from ChromaDB."""
         self.collection.delete(where={"file_path": file_path})
@@ -130,3 +151,6 @@ class VectorStore:
         name = self.collection.name
         self.client.delete_collection(name)
         self.create_collection(name)
+
+
+    

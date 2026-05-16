@@ -12,6 +12,8 @@ import {
     MessageCircle,
     Home,
     Lock,
+    ShieldCheck,
+    RefreshCw,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useAnalyze } from "@/lib/analyze-context";
@@ -25,6 +27,8 @@ const NAV_ITEMS = [
     { href: "/reading-order", label: "Reading Order", icon: BookOpen, locked: true },
     { href: "/execution-flow", label: "Execution Flow", icon: GitBranch, locked: true },
     { href: "/chat", label: "Chat", icon: MessageCircle, locked: true },
+    { href: "/review", label: "Code Review", icon: ShieldCheck, locked: false },
+    { href: "/incremental-reindex", label: "Smart Reindex", icon: RefreshCw, locked: true },
 ];
 
 export function Sidebar() {
