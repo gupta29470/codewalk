@@ -11,13 +11,14 @@ def _log(msg: str):
     print(msg, file=sys.stderr)
     logger.info(msg)
 
-from src.codewalk.pipeline import full_index_parallel, reindex, chunk_and_embed_parallel
+from src.codewalk.pipeline import full_index_parallel, reindex, chunk_and_embed_parallel, incremental_reindex
 from src.codewalk.analysis.relevance_filter import filter_files_with_llm
 from src.codewalk.api.models import (
     AnalyzeRequest, AnalyzeResponse,
     ChatRequest, ChatResponse,
     ModuleResponse, OverviewResponse,
     BlastRadiusResponse,
+    ReviewRequest, ReviewFileRequest, GuidelinesRequest,
 )
 from src.codewalk.api import state
 from src.codewalk.ingestion.scanner import scan_directory
@@ -477,6 +478,147 @@ async def refresh_analysis():
         }
     except RuntimeError as e:
         raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+# ─── POST /incremental-reindex ───────────────────────────────────────
+@app.post("/incremental-reindex")
+async def incremental_reindex_endpoint():
+    """Re-embed only files that changed since last indexing."""
+    try:
+        store = state.get_store()
+        repo_path = state.get_analyze_result().get("repo_path", settings.repo_path)
+        indexed_files = list(store.get_all_indexed_files())
+        if not indexed_files:
+            raise HTTPException(status_code=400, detail="No files indexed yet. Run /analyze first.")
+
+        result = incremental_reindex(indexed_files, repo_path)
+
+        # Refresh analysis cache after reindex
+        files = scan_directory(repo_path)
+        deps = build_dependency_graph(files)
+        modules_result = detect_modules(files, deps)
+        state.refresh(files, deps, modules_result)
+
+        return result
+    except RuntimeError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+# ─── POST /review ────────────────────────────────────────────────────
+@app.post("/review")
+async def review_endpoint(request: ReviewRequest):
+    """Review current git diff for bugs, security issues, and style."""
+    try:
+        from src.codewalk.review.reviewer import review_diff
+
+        store = None
+        deps = None
+        try:
+            store = state.get_store()
+            deps = state.get_deps()
+        except RuntimeError:
+            pass  # works without indexing, just less context
+
+        result = review_diff(
+            staged=request.staged,
+            target_branch=request.target_branch,
+            use_llm=True,
+            store=store,
+            deps=deps,
+        )
+
+        issues = [
+            {
+                "severity": issue.severity.value,
+                "category": issue.category.value,
+                "file_path": issue.file_path,
+                "line_number": issue.line_number,
+                "title": issue.title,
+                "explanation": issue.explanation,
+                "suggestion": issue.suggestion,
+                "code_snippet": issue.code_snippet,
+            }
+            for issue in result.issues
+        ]
+
+        return {
+            "issues": issues,
+            "summary": result.summary,
+            "files_reviewed": result.files_reviewed,
+            "lines_added": result.lines_added,
+            "lines_removed": result.lines_removed,
+        }
+    except RuntimeError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+# ─── POST /review/file ───────────────────────────────────────────────
+@app.post("/review/file")
+async def review_file_endpoint(request: ReviewFileRequest):
+    """Review a single file against codebase conventions."""
+    try:
+        from src.codewalk.rag.chain import format_context
+        from src.codewalk.config import get_llm
+
+        store = state.get_store()
+
+        with open(request.file_path, "r") as f:
+            content = f.read()
+
+        results = store.search(f"code in {request.file_path}", n_results=5)
+        patterns = format_context(results) if results else "No indexed context."
+
+        llm = get_llm(temperature=0)
+        response = llm.invoke([
+            {"role": "system", "content": (
+                "You review a file against its codebase conventions. "
+                "Compare to patterns elsewhere. Focus on: consistency, "
+                "error handling, naming, potential bugs. Be specific with lines."
+            )},
+            {"role": "user", "content": (
+                f"## File:\n```\n{content[:10000]}\n```\n\n"
+                f"## Patterns elsewhere:\n{patterns}"
+            )},
+        ])
+
+        return {"review": response.content, "file_path": request.file_path}
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail=f"File not found: {request.file_path}")
+    except RuntimeError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+# ─── POST /review/guidelines ─────────────────────────────────────────
+@app.post("/review/guidelines")
+async def load_guidelines_endpoint(request: GuidelinesRequest):
+    """Load team coding guidelines for use in reviews."""
+    try:
+        from src.codewalk.review.guidelines_loader import get_guidelines_store
+        import os
+
+        path = request.docs_path or settings.review_guidelines_path
+        if not path:
+            raise HTTPException(
+                status_code=400,
+                detail="No path provided. Pass docs_path or set REVIEW_GUIDELINES_PATH.",
+            )
+        if not os.path.isdir(path):
+            raise HTTPException(status_code=404, detail=f"Directory not found: {path}")
+
+        store = get_guidelines_store()
+        if not store:
+            raise HTTPException(status_code=400, detail=f"No guideline files found in {path}")
+
+        count = store.collection.count()
+        return {"status": "loaded", "chunks": count, "path": path}
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 

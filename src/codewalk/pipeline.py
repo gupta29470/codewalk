@@ -4,7 +4,10 @@ import sys
 from pathlib import Path
 import threading
 import queue
+import os
+import time
 
+from src.codewalk.embeddings.chunker import file_hash, read_file_content
 from src.codewalk.ingestion.scanner import scan_directory
 from src.codewalk.ingestion.tech_detect import detect_tech_stack
 from src.codewalk.embeddings.chunker import chunk_all_files, chunk_file
@@ -393,6 +396,107 @@ def reindex(repo_path: str = "", collection_name: str = "codebase") -> dict:
         "unchanged_files": len(unchanged_files),
         "chunks_embedded": len(to_embed),
     }
+
+def incremental_reindex(
+    paths: list[str],
+    repo_path: str = "",
+    collection_name: str = "codebase",
+) -> dict:
+    """Incremental reindex — only re-embeds files whose content changed.
+
+    Uses MD5 content hashing stored in ChromaDB chunk metadata to detect
+    changes. For each file: hash on disk vs stored hash → skip if equal,
+    delete old chunks + re-embed if different, remove if deleted from disk.
+
+    Based on the "ChromaDB metadata as document registry" pattern from
+    Arpit Bhayani's "What Matters in Production RAG".
+
+    Args:
+        paths: File or directory paths to consider for reindexing.
+        repo_path: Root of the repository (defaults to settings.repo_path).
+        collection_name: ChromaDB collection name (default "codebase").
+
+    Returns:
+        dict with keys: repo_path, files_on_disk, files_skipped,
+        files_reindexed, files_deleted, chunks_embedded, total_time.
+    """
+    pipeline_start = time.time()
+    repo_path = repo_path or settings.repo_path
+
+    # Step 1: Scan disk → match against selected paths
+    all_files = scan_directory(repo_path)
+    path_set = set(paths)
+    disk_files = []
+
+    for file in all_files:
+        file_path = file["file_path"]
+        if file_path in path_set:
+            disk_files.append(file)
+            continue
+        for path in path_set:
+            if file_path.startswith(path.rstrip("/") + "/"):
+                disk_files.append(file)
+                break
+    
+    # Step 2: Open existing collection (DON'T recreate — that wipes it)
+    store = VectorStore()
+    store.create_collection(collection_name)  # get_or_create — safe
+
+    # Step 3: Get all indexed files + their hashes
+    indexed_files = store.get_all_indexed_files()
+
+    # Step 4: Classify each disk file
+    to_embed = []    # new or changed
+    skipped = 0
+    disk_paths = set()
+
+    for file_info in disk_files:
+        file_path = file_info["file_path"]
+        disk_paths.add(file_path)
+
+        content = read_file_content(file_info["absolute_path"])
+        if not content.strip():
+            skipped += 1
+            continue
+
+        current_hash = file_hash(content)
+        stored_hash = store.get_file_hash(file_path)
+
+        if current_hash == stored_hash:
+            skipped += 1
+        else:
+            # Changed or new → delete old chunks first, then re-embed
+            if file_path in indexed_files:
+                store.delete_by_file(file_path)
+            to_embed.append(file_info)
+    
+    # Step 5: Delete chunks for files removed from disk
+    deleted = 0
+    for indexed_file_path in indexed_files:
+        if indexed_file_path not in disk_paths:
+            store.delete_by_file(indexed_file_path)
+            deleted += 1
+    
+    # Step 6: Chunk + embed only the changed/new files
+    embedded_count = 0
+    if to_embed:
+        all_embedded, total_chunks = chunk_and_embed_parallel(to_embed)
+        store.add_chunks(all_embedded)
+        embedded_count = len(all_embedded)
+    
+    total_time = time.time() - pipeline_start
+
+    return {
+        "repo_path": repo_path,
+        "files_on_disk": len(disk_files),
+        "files_skipped": skipped,
+        "files_reindexed": len(to_embed),
+        "files_deleted": deleted,
+        "chunks_embedded": embedded_count,
+        "total_time": f"{total_time:.1f}s",
+    }
+
+
 
 
 

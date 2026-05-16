@@ -1,0 +1,68 @@
+from dataclasses import dataclass, field
+from enum import Enum
+from pathlib import Path
+
+
+class Severity(Enum):
+    CRITICAL = "critical"       # 🔴 Bugs, security vulnerabilities, data loss
+    WARNING = "warning"         # 🟡 Logic errors, missing edge cases
+    SUGGESTION = "suggestion"   # 🟢 Nice-to-have improvements
+
+class Category(Enum):
+    BUG = "bug"
+    SECURITY = "security"
+    STYLE = "style"
+    TEST = "test"
+    BLAST_RADIUS = "blast_radius"
+
+@dataclass
+class Issue:
+    """A single review finding."""
+    severity: Severity
+    category: Category
+    file_path: str
+    line_number: int | None
+    title: str
+    explanation: str
+    suggestion: str | None = None
+    code_snippet: str | None = None
+
+@dataclass
+class ReviewResult:
+    """Final output of a code review."""
+    issues: list[Issue] = field(default_factory=list)
+    summary: str = ""
+    files_reviewed: int = 0
+    lines_added: int = 0
+    lines_removed: int = 0
+
+@dataclass
+class ChangedLine:
+    """A single line from a unified diff.
+
+    Attributes:
+        line_number: Line number in the new version of the file.
+        content: The actual text of the line.
+        change_type: One of "added", "removed", or "context".
+    """
+    line_number: int
+    content: str
+    change_type: str
+
+@dataclass
+class DiffHunk:
+    """One @@...@@ block — a contiguous section of changes within a file."""
+    start_line: int
+    end_line: int
+    lines: list[ChangedLine] = field(default_factory=list)
+
+@dataclass
+class DiffFile:
+    """One changed file in the diff."""
+    file_path: str
+    language: str      
+    hunks: list[DiffHunk] = field(default_factory=list)
+    is_new_file: bool = False
+    is_deleted: bool = False
+    added_lines: int = 0
+    removed_lines: int = 0

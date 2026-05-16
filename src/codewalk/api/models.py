@@ -56,6 +56,19 @@ class BlastRadiusResponse(BaseModel):
     total_files: int
     files: list[dict]
 
+class ReviewRequest(BaseModel):
+    """POST /review — request body."""
+    staged: bool = False
+    target_branch: str | None = None
+
+class ReviewFileRequest(BaseModel):
+    """POST /review/file — request body."""
+    file_path: str
+
+class GuidelinesRequest(BaseModel):
+    """POST /review/guidelines — request body."""
+    docs_path: str | None = None
+
 class ErrorResponse(BaseModel):
     """Error response for any endpoint."""
     error: str

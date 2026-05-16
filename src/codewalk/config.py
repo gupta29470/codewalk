@@ -26,6 +26,8 @@ class Settings(BaseSettings):
     # e.g. "tests,docs,scripts/legacy,*.generated.*"
     exclude_paths: str = os.getenv("EXCLUDE_PATHS", "")
 
+    review_guidelines_path: str = os.getenv("REVIEW_GUIDELINES_PATH", "review_guidelines")
+
 
     class Config:
         env_file = ".env"

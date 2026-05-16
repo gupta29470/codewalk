@@ -75,6 +75,35 @@ export interface ExecutionFlowResponse {
     flow: string;
 }
 
+export interface ReviewIssue {
+    severity: string;
+    category: string;
+    file_path: string;
+    line_number: number | null;
+    title: string;
+    explanation: string;
+    suggestion: string | null;
+    code_snippet: string | null;
+}
+
+export interface ReviewResponse {
+    issues: ReviewIssue[];
+    summary: string;
+    files_reviewed: number;
+    lines_added: number;
+    lines_removed: number;
+}
+
+export interface IncrementalReindexResponse {
+    repo_path: string;
+    files_on_disk: number;
+    files_skipped: number;
+    files_reindexed: number;
+    files_deleted: number;
+    chunks_embedded: number;
+    total_time: string;
+}
+
 export interface ProgressEvent {
     step: string;
     message: string;
@@ -176,5 +205,31 @@ export const api = {
         apiFetch<ChatResponse>("/chat", {
             method: "POST",
             body: JSON.stringify({ message, thread_id: threadId }),
+        }),
+
+    reviewDiff: (staged: boolean = false, targetBranch?: string) =>
+        apiFetch<ReviewResponse>("/review", {
+            method: "POST",
+            body: JSON.stringify({
+                staged,
+                target_branch: targetBranch || null,
+            }),
+        }),
+
+    reviewFile: (filePath: string) =>
+        apiFetch<{ review: string; file_path: string }>("/review/file", {
+            method: "POST",
+            body: JSON.stringify({ file_path: filePath }),
+        }),
+
+    loadGuidelines: (docsPath?: string) =>
+        apiFetch<{ status: string; chunks: number; path: string }>("/review/guidelines", {
+            method: "POST",
+            body: JSON.stringify({ docs_path: docsPath || null }),
+        }),
+
+    incrementalReindex: () =>
+        apiFetch<IncrementalReindexResponse>("/incremental-reindex", {
+            method: "POST",
         }),
 };

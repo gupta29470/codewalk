@@ -1,3 +1,11 @@
+"""Codewalk MCP server — 16 tools for codebase onboarding, search, and review.
+
+Tool categories:
+  SETUP  (1, 9-11): Analyze repo, scan/filter files, index embeddings.
+  QUERY  (2-8):     Search code, explain functions, blast radius, reading order, execution flow.
+  MAINT  (12-16):   Incremental reindex, refresh analysis, review diff/file, load guidelines.
+"""
+
 import logging
 import sys
 from fnmatch import fnmatch
@@ -18,13 +26,15 @@ from src.codewalk.generation.diagram_generator import generate_module_diagram
 from src.codewalk.generation.module_explainer import explain_module
 from src.codewalk.embeddings.vector_store import VectorStore
 from src.codewalk.rag.chain import format_context
-from src.codewalk.pipeline import full_index_parallel, reindex, index_from_paths_parallel
+from src.codewalk.pipeline import full_index_parallel, reindex, index_from_paths_parallel, incremental_reindex
 from src.codewalk.config import settings, get_llm
 from src.codewalk.analysis.blast_radius import (
     get_blast_radius,
     calculate_full_blast_map,
 )
 from src.codewalk.analysis.reading_order import generate_reading_order_raw
+from src.codewalk.review.reviewer import review_diff
+from src.codewalk.review.guidelines_loader import get_guidelines_store
 
 
 # ─── Create the MCP server ──────────────────────────────────────────
@@ -54,6 +64,15 @@ mcp = FastMCP(
         "- 'Where should I start reading?' → codewalk_get_reading_order — returns ALL files\n"
         "- 'Show me the dependency flow' → codewalk_get_execution_flow — "
         "no arg = module-to-module flow, with module_name = file-to-file flow\n"
+        "\n"
+        "## MAINTENANCE (after code changes)\n"
+        "- codewalk_incremental_reindex — re-embed only changed files (hash-based skip)\n"
+        "- codewalk_refresh_analysis — rebuild deps/modules without re-embedding\n"
+        "\n"
+        "## CODE REVIEW\n"
+        "- codewalk_review_diff — review git diff for bugs, security, style (LLM + pre-checks)\n"
+        "- codewalk_review_file(path) — review one file against codebase patterns\n"
+        "- codewalk_load_guidelines(path) — load team coding standards for reviews\n"
     ),
 )
 
@@ -723,12 +742,56 @@ def codewalk_index_filtered_files() -> str:
         f"  - codewalk_get_execution_flow (if LLM didn't call — dependency flow diagram)"
     )
 
+# ─── TOOL 12 [MAINT · user+AI]: codewalk_incremental_reindex ────────
+@mcp.tool()
+def codewalk_incremental_reindex() -> str:
+    """Re-index only files that changed since last indexing.
+
+    Compares content hashes stored in ChromaDB metadata against current
+    file content on disk. Skips unchanged files, re-embeds changed ones,
+    and removes chunks for deleted files. Much faster than full re-index.
+
+    Requires: codebase must be indexed at least once via the full setup
+    workflow (scan → filter → index). After that, call this tool whenever
+    code changes to keep embeddings in sync.
+
+    Returns a summary showing how many files were skipped, re-indexed,
+    or deleted, plus the number of new chunks embedded.
+
+    ⏪ PREVIOUS STEP: codewalk_index_filtered_files (first-time setup)
+    ⏩ NEXT STEP: any query tool (search, explain, blast radius, etc.)
+    """
+    if not _store or not _store.collection:
+        return "❌ No index exists. Run the full setup workflow first (scan → filter → index)."
+    
+    repo_path = settings.repo_path
+    if not repo_path:
+        return "❌ No repo path set. Run codewalk_analyze_codebase first."
+    
+    # Use previously selected paths if available, else get all indexed files
+    paths = list(_selected_file_paths) if _selected_file_paths else list(_store.get_all_indexed_files())
+    if not paths:
+        return "❌ No files to reindex. Run the full setup workflow first."
+    
+    result = incremental_reindex(paths, repo_path)
+
+    _rebuild_analysis_cache()
+
+    return (
+        f"Incremental reindex complete ({result['total_time']})\n\n"
+        f"  Files on disk:   {result['files_on_disk']}\n"
+        f"  Skipped (same):  {result['files_skipped']}\n"
+        f"  Re-indexed:      {result['files_reindexed']}\n"
+        f"  Deleted:         {result['files_deleted']}\n"
+        f"  Chunks embedded: {result['chunks_embedded']}\n\n"
+        f"Analysis cache refreshed."
+    )
 
 # ══════════════════════════════════════════════════════════════════════
 #  MAINTENANCE TOOLS — user or AI can call after code changes
 # ══════════════════════════════════════════════════════════════════════
 
-# ─── TOOL 12 [MAINT · user+AI]: codewalk_refresh_analysis ────────────
+# ─── TOOL 13 [MAINT · user+AI]: codewalk_refresh_analysis ────────────
 @mcp.tool()
 def codewalk_refresh_analysis() -> str:
     """Refresh the cached analysis without re-embedding.
@@ -751,6 +814,167 @@ def codewalk_refresh_analysis() -> str:
         f"Dependency graph: {len(_deps['graph'])} files\n"
         f"Modules: {', '.join(modules)}"
     )
+
+
+# ─── TOOL 14 [MAINT · user+AI]: codewalk_review_diff ────────────
+@mcp.tool()
+def codewalk_review_diff(
+    staged: bool = False,
+    target_branch: str | None = None,
+) -> str:
+    """Review current git diff for bugs, security issues, and style problems.
+
+    Runs a multi-stage review pipeline:
+      1. Test coverage check (no LLM) — flags source files missing test updates
+      2. Blast radius analysis — warns about high-risk files with many dependents
+      3. Codebase pattern matching — finds similar code for consistency checks
+      4. Team guidelines RAG — injects coding standards into the prompt
+      5. LLM deep review — scans for security vulnerabilities (OWASP),
+         bugs, logic errors, and style issues across ALL languages
+
+    Output is a formatted markdown report with issues sorted by severity:
+    🔴 CRITICAL → 🟡 WARNING → 🟢 SUGGESTION.
+
+    Works without indexing (skips blast radius + patterns), but produces
+    richer reviews when the codebase is indexed.
+
+    Args:
+        staged: If True, review only staged changes (--staged). Default: all unstaged.
+        target_branch: Diff against a branch (e.g. "main" for full PR review).
+    """
+    result = review_diff(
+        staged=staged,
+        target_branch=target_branch,
+        use_llm=True,
+        store=_store,    # cached vector store (if indexed)
+        deps=_deps, 
+    )
+
+    if not result.issues:
+        return (
+            f"✅ No issues found.\n"
+            f"Reviewed {result.files_reviewed} files "
+            f"(+{result.lines_added} / -{result.lines_removed})\n\n"
+            f"{result.summary}"
+        )
+    
+    lines = [
+        f"## Code Review — {result.files_reviewed} files "
+        f"(+{result.lines_added} / -{result.lines_removed})\n"
+    ]
+
+    severity_icons = {"critical": "🔴", "warning": "🟡", "suggestion": "🟢"}
+
+    for issue in sorted(result.issues, key=lambda issue: issue.severity.value):
+        icon = severity_icons.get(issue.severity.value, "⚪")
+        loc = f"{issue.file_path}:{issue.line_number}" if issue.line_number else issue.file_path
+        lines.append(f"{icon} **{issue.title}**")
+        lines.append(f"   {loc}")
+        lines.append(f"   {issue.explanation}")
+        if issue.suggestion:
+            lines.append(f"   💡 {issue.suggestion}")
+        if issue.code_snippet:
+            lines.append(f"   ```\n   {issue.code_snippet}\n   ```")
+        lines.append("")
+
+    lines.append(f"\n**Summary:** {result.summary}")
+    return "\n".join(lines)
+
+# ─── TOOL 15 [MAINT · user+AI]: codewalk_review_file ────────────
+@mcp.tool()
+def codewalk_review_file(file_path: str) -> str:
+    """Review a single file against codebase conventions and patterns.
+
+    Uses vector search to find how similar code is written elsewhere in the
+    project, then asks the LLM to compare and suggest improvements for
+    consistency, error handling, naming, and potential bugs.
+
+    Requires: codebase must be indexed first via codewalk_index_filtered_files.
+
+    Args:
+        file_path: Path to the file to review (relative to repo root).
+
+    Returns:
+        LLM-generated review comparing the file against codebase patterns.
+    """
+    if not _store:
+        return "❌ Codebase not indexed. Run codewalk_index_filtered_files first."
+    
+    from src.codewalk.rag.chain import format_context
+    from src.codewalk.config import get_llm
+
+    try:
+        with open(file_path, "r") as file:
+            content = file.read()
+    except FileNotFoundError:
+        return f"❌ File '{file_path}' not found."
+    
+    results = _store.search(f"code in {file_path}", n_results=5)
+    patterns = format_context(results) if results else "No indexed context."
+
+    llm = get_llm(temperature=0)
+    response = llm.invoke([
+        {"role": "system", "content": (
+            "You review a file against its codebase conventions. "
+            "Compare to patterns elsewhere. Focus on: consistency, "
+            "error handling, naming, potential bugs. Be specific with lines."
+        )},
+        {"role": "user", "content": (
+            f"## File:\n```\n{content[:10000]}\n```\n\n"
+            f"## Patterns elsewhere:\n{patterns}"
+        )},
+    ])
+
+    return response.content
+
+# ─── TOOL 16 [MAINT · user+AI]: codewalk_load_guidelines ────────────
+@mcp.tool()
+def codewalk_load_guidelines(docs_path: str | None = None) -> str:
+    """Load team coding guidelines/standards for use in code reviews.
+
+    Reads guideline documents (.md, .txt, .rst) from the given directory,
+    splits them into chunks, embeds them into a dedicated ChromaDB collection,
+    and makes them available to codewalk_review_diff automatically.
+
+    Run this once per project. Guidelines persist across reviews in ChromaDB.
+    Subsequent calls skip re-embedding if the collection already has data.
+
+    Args:
+        docs_path: Path to directory containing guideline files.
+                   Falls back to REVIEW_GUIDELINES_PATH env var
+                   or settings.review_guidelines_path.
+
+    Returns:
+        Success message with count of embedded chunks, or error message.
+    """
+
+    from src.codewalk.config import settings
+    import os
+
+    path = docs_path or settings.review_guidelines_path
+    if not path:
+        return (
+            "❌ No path provided. Either pass docs_path or set "
+            "REVIEW_GUIDELINES_PATH in your .env file."
+        )
+    
+    if not os.path.isdir(path):
+        return f"❌ Directory not found: {path}"
+    
+    store = get_guidelines_store()
+    if not store:
+        return f"❌ No guideline files found in {path}"
+    
+    count = store.collection.count()
+
+    return (
+        f"✅ Loaded {count} guideline chunks from {path}\n"
+        f"These will be used automatically in codewalk_review_diff."
+    )
+
+
+
+
 
 
 if __name__ == "__main__":
