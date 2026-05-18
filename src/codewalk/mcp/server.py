@@ -25,13 +25,11 @@ logger = logging.getLogger("codewalk")
 from src.codewalk.analysis.dependency_graph import build_dependency_graph
 from src.codewalk.analysis.module_detector import detect_modules
 from src.codewalk.generation.diagram_generator import generate_module_diagram
-from src.codewalk.generation.module_explainer import explain_module
-from src.codewalk.generation.overview_generator import generate_overview
 from src.codewalk.embeddings.vector_store import VectorStore
 from src.codewalk.rag.chain import format_context
 from src.codewalk.pipeline import full_index_parallel, index_from_paths_parallel, incremental_reindex
 from src.codewalk.ingestion.file_filter import should_skip
-from src.codewalk.config import settings, get_llm
+from src.codewalk.config import settings
 from src.codewalk.analysis.blast_radius import (
     get_blast_radius,
     calculate_full_blast_map,
@@ -84,7 +82,7 @@ mcp = FastMCP(
         "- codewalk_refresh_analysis — rebuild deps/modules without re-embedding\n"
         "\n"
         "## CODE REVIEW\n"
-        "- codewalk_review_diff — review git diff for bugs, security, style (LLM + pre-checks)\n"
+        "- codewalk_review_diff — review git diff for bugs, security, style\n"
         "- codewalk_review_file(path) — review one file against codebase patterns\n"
         "- codewalk_load_guidelines(path) — load team coding standards for reviews\n"
         "\n"
@@ -339,14 +337,7 @@ def codewalk_get_module_info(module_name: str) -> str:
             sub_features_section = f"\n\n### Sub-folders ({len(sorted_subs)})\n" + ", ".join(sorted_subs)
             sub_features_section += f"\n\n*Tip: Call `codewalk_get_module_info(\"{sorted_subs[0]}\")` to drill into a specific sub-folder.*"
 
-    # LLM description for top-level modules (not sub-folder features)
     description_section = ""
-    if not matched_as_feature and state._modules_result:
-        try:
-            description = explain_module(actual_name, info, module_graph)
-            description_section = f"\n### Description\n{description}\n"
-        except Exception as e:
-            _log(f"[codewalk_get_module_info] explain_module failed: {e}")
 
     return (
         f"{header}"
@@ -366,8 +357,7 @@ def codewalk_explain_function(function_name: str) -> str:
 
     Uses ChromaDB symbol search + the dependency graph to return:
     1. Source code from the indexed embeddings
-    2. LLM-generated line-by-line explanation
-    3. Blast radius — which files break if this symbol changes
+    2. Blast radius — which files break if this symbol changes
 
     Args:
         function_name: Exact name of the function, method, or class,
@@ -390,28 +380,7 @@ def codewalk_explain_function(function_name: str) -> str:
 
     context = format_context(to_show)
 
-    # LLM explanation
-    source_code = to_show[0]["text"]
-    symbol = to_show[0]["metadata"].get("symbol_name", function_name)
-    language = to_show[0]["metadata"].get("language", "")
-    try:
-        from langchain_core.prompts import ChatPromptTemplate
-        from langchain_core.output_parsers import StrOutputParser
-        llm = get_llm(temperature=0)
-        prompt = ChatPromptTemplate.from_messages([
-            ("system", (
-                "You are a senior engineer explaining code to a new team member. "
-                "Given a code snippet, explain what each important section does in plain English. "
-                "Be concise — one sentence per logical block. "
-                "Do NOT repeat the code, just explain it."
-            )),
-            ("human", "Explain this {language} code for `{symbol}`:\n\n```{language}\n{code}\n```"),
-        ])
-        chain = prompt | llm | StrOutputParser()
-        explanation = chain.invoke({"symbol": symbol, "code": source_code, "language": language})
-        context += f"\n\n### Explanation\n{explanation}"
-    except Exception as e:
-        _log(f"[codewalk_explain_function] LLM explanation failed: {e}")
+
 
     # Blast radius (uses cached graph)
     file_path = to_show[0]["metadata"].get("file_path", "")
@@ -469,12 +438,21 @@ def codewalk_get_overview() -> str:
 
     risky_section = "\n".join(risky_lines) if risky_lines else "  No high-risk files"
 
-    # Generate rich overview via LLM (same as API endpoint)
-    overview_text = generate_overview(tech, state._modules_result, diagram)
+    # Build structured overview for the host to interpret
+    modules_info = state._modules_result["modules"]
+    module_lines = []
+    for name, info in sorted(modules_info.items()):
+        lang_str = ", ".join(f"{l}({c})" for l, c in sorted(info["languages"].items()))
+        module_lines.append(f"  - {name} ({info['file_count']} files): {lang_str}")
+    modules_section = "\n".join(module_lines)
 
     return (
-        f"{overview_text}\n\n"
-        f"---\n\n"
+        f"## Project Overview\n\n"
+        f"**Tech Stack:** {', '.join(tech) if tech else 'Not detected'}\n"
+        f"**Total Files:** {state._modules_result['stats']['total_files']}\n"
+        f"**Total Modules:** {state._modules_result['stats']['total_modules']}\n\n"
+        f"### Modules\n{modules_section}\n\n"
+        f"### Architecture (Mermaid)\n```mermaid\n{diagram}\n```\n\n"
         f"### Riskiest Files (blast radius)\n{risky_section}"
     )
 
@@ -883,13 +861,13 @@ def codewalk_index_filtered_files() -> str:
             f"Steps: {' | '.join(result.get('steps', []))}\n"
             f"Modules found: {', '.join(modules)}\n\n"
             f"Ready! You can now use these tools:\n"
-            f"  - codewalk_get_overview (if LLM didn't call — run manually for project summary)\n"
-            f"  - codewalk_search_codebase (if LLM didn't call — search code by concept)\n"
-            f"  - codewalk_get_module_info (if LLM didn't call — inspect a specific module)\n"
-            f"  - codewalk_explain_function (if LLM didn't call — explain any function/class)\n"
-            f"  - codewalk_get_blast_radius_map (if LLM didn't call — check change risk)\n"
-            f"  - codewalk_get_reading_order (if LLM didn't call — optimal file reading order)\n"
-            f"  - codewalk_get_execution_flow (if LLM didn't call — dependency flow diagram)"
+            f"  - codewalk_get_overview — project summary\n"
+            f"  - codewalk_search_codebase — search code by concept\n"
+            f"  - codewalk_get_module_info — inspect a specific module\n"
+            f"  - codewalk_explain_function — explain any function/class\n"
+            f"  - codewalk_get_blast_radius_map — check change risk\n"
+            f"  - codewalk_get_reading_order — optimal file reading order\n"
+            f"  - codewalk_get_execution_flow — dependency flow diagram"
         )
 
 # ─── TOOL 12 [MAINT · user+AI]: codewalk_incremental_reindex ────────
