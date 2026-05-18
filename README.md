@@ -31,13 +31,16 @@ Codewalk analyzes any codebase and gives you:
 - **AI chat** — ask anything about the code, powered by RAG + tool-calling agent
 - **Code review** — review git diffs for bugs, security issues, and style (LLM + pre-checks)
 - **Incremental reindex** — re-embed only changed files using content hash comparison
+- **Voice interface** — talk to your codebase hands-free: mic → transcribe → Copilot routes → speak answer
 
-Three ways to use it:
+Four ways to use it:
 | Interface | Best for |
 |-----------|----------|
 | **Web UI** (Next.js) | Visual exploration — diagrams, module browser, blast radius viewer |
 | **MCP Server** | VS Code Copilot, Claude Code, Cursor, Codex — AI agents use tools directly |
 | **REST API** | Scripts, CI/CD, custom integrations |
+
+> **🎙️ Voice** is available via both **MCP** (`codewalk_voice_ask` + `codewalk_speak`) and **REST API** (`POST /voice/ask`) — ask questions by speaking, hear answers read aloud.
 
 ---
 
@@ -67,7 +70,8 @@ Three ways to use it:
 | 🔎 **Semantic Search** | ChromaDB vector search on embedded code chunks (RAG) |
 | 🔬 **Code Review** | Multi-stage review pipeline: test coverage, blast radius, guidelines RAG, LLM deep scan |
 | 🔄 **Incremental Reindex** | Content hash comparison — only re-embeds changed files, skips unchanged |
-| 🧩 **MCP Server** | 16 tools for VS Code Copilot / Claude Code / Cursor / Codex |
+| 🧩 **MCP Server** | 18 tools for VS Code Copilot / Claude Code / Cursor / Codex |
+| 🎙️ **Voice Interface** | Talk to your codebase — mic recording, local STT (faster-whisper), Copilot-driven routing (MCP) / Ollama routing (API), TTS response |
 | ⚡ **Parallel Embedding** | Producer-consumer pipeline — CPU chunking overlaps with GPU embedding |
 | 🏗️ **Multi-Provider LLM** | Ollama (local), OpenAI, Anthropic, Groq, Gemini, OpenRouter |
 | 🌐 **15+ Languages** | Python, JS, TS, Java, Go, Rust, Ruby, PHP, C#, C++, C, Dart, Kotlin, Swift, YAML |
@@ -112,6 +116,10 @@ https://github.com/user-attachments/assets/1bc99516-b3f6-4059-b463-de3c72bc850e
 https://github.com/user-attachments/assets/a1dfd347-1135-47d2-b01d-3d995d86208e
 
 ### REST API
+
+> 🎥 **[Video coming soon]**
+
+### Voice Interface
 
 > 🎥 **[Video coming soon]**
 
@@ -260,6 +268,7 @@ Then explore:
 - **Execution Flow** — Mermaid diagram of module/file dependencies
 - **Chat** — ask any question ("explain the authentication flow", "what does scanner.py do?")
 - **Code Review** — review git diffs, review single files, load team guidelines
+- **Voice** — click the mic, ask a question by speaking, hear the answer read aloud
 - **Smart Reindex** — incremental re-embed with stats (skipped, changed, deleted)
 
 ### Option 2: MCP Server (VS Code Copilot / Claude Code / Cursor)
@@ -351,7 +360,7 @@ Codewalk runs as an MCP (Model Context Protocol) server, so any AI agent that sp
    ![Start Server](assets/mcp-start-server.png)
 
 6. The server starts in the background (stdio transport)
-7. Open Copilot Chat → type **`@codewalk`** → all 16 tools are available
+7. Open Copilot Chat → type **`@codewalk`** → all 18 tools are available
 
    ![MCP tools list](assets/mcp-tools-list.png)
 
@@ -499,6 +508,16 @@ You just tell the AI to analyze — **the AI handles the rest automatically**.
 │  codewalk_review_diff           → review git diff (LLM + checks)    │
 │  codewalk_review_file           → review file vs codebase patterns  │
 │  codewalk_load_guidelines       → load team coding standards        │
+└─────────────────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────────────┐
+│                      VOICE (hands-free)                            │
+│                                                                     │
+│  MCP:  codewalk_voice_ask  → mic → transcribe                       │
+│        Copilot picks tool  → calls it → codewalk_speak(summary)     │
+│                                                                     │
+│  API:  POST /voice/ask     → mic → transcribe → Ollama route        │
+│        execute_direct()    → format_voice_response() → MP3          │
 └─────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -755,6 +774,30 @@ or
 
 ---
 
+#### "Talk to the codebase hands-free"
+
+**Tools:** `codewalk_voice_ask` + `codewalk_speak` — no parameters needed
+
+You want to ask a question by speaking instead of typing.
+
+```
+@codewalk_voice_ask
+```
+
+**What happens:**
+1. 🔔 Beep — signals "start talking"
+2. 🎙️ Records your voice (up to 30s, stops after 5s of silence)
+3. 📝 Transcribes locally via faster-whisper
+4. 🧠 Copilot reads the transcript and picks the right codewalk tool
+5. ⚙️ Copilot calls the tool and gets the result
+6. 🔊 Copilot calls `codewalk_speak(summary)` — speaks a 2-4 sentence summary aloud
+
+**When to use:** Hands-free coding. You're reading code and want to ask "what does this function do?" without switching to the keyboard.
+
+> **Note:** Routing is done by Copilot (full LLM), not a separate model — no Ollama required for MCP voice. The REST API (`POST /voice/ask`) uses Ollama routing for the web UI where Copilot isn't available.
+
+---
+
 ### Quick Reference — What To Ask
 
 | You want to... | Just say... |
@@ -773,6 +816,7 @@ or
 | Review git diff | `@codewalk review my changes` or `@codewalk_review_diff` |
 | Review a file | `@codewalk review src/auth.py` or `@codewalk_review_file src/auth.py` |
 | Load guidelines | `@codewalk load guidelines from docs/` or `@codewalk_load_guidelines docs/` |
+| Ask by speaking (hands-free) | `@codewalk_voice_ask` → Copilot calls tool → `@codewalk_speak` |
 
 ---
 
@@ -1111,6 +1155,37 @@ curl -X POST http://localhost:8000/review/guidelines \
 
 ---
 
+### Voice Endpoint
+
+#### `POST /voice/ask` — Voice-in, voice-out Q&A
+
+Upload an audio file (webm/mp3/wav from browser mic). Codewalk transcribes it, routes to the right tool, executes it, and returns both the text answer and a spoken MP3 response.
+
+```bash
+curl -X POST http://localhost:8000/voice/ask \
+  -F "audio=@question.webm" \
+  -F "thread_id=voice"
+```
+
+**Response:**
+```json
+{
+  "question": "what does the auth module do?",
+  "tool": "codewalk_get_module_info",
+  "answer": "The auth module contains 5 files handling JWT validation...",
+  "speech": "The auth module handles JWT validation and permissions.",
+  "audio_base64": "SUQzBAAAAAAAI1RTU0UAAAA..."
+}
+```
+
+- `audio` *(required)*: Audio file upload (webm, mp3, wav)
+- `thread_id` *(optional)*: Conversation thread ID. Default: `"voice"`
+- `audio_base64`: Base64-encoded MP3 of the spoken answer — decode and play in the browser
+
+**Pipeline:** audio upload → faster-whisper STT → LLM router → tool execution → summarize → edge-tts → MP3 response
+
+---
+
 #### `GET /health` — Health check
 
 ```bash
@@ -1136,8 +1211,8 @@ curl http://localhost:8000/health
 │   ├── Overview              (stdio)       (:8000)       │
 │   ├── Modules                  │             │          │
 │   ├── Blast Radius             │             │          │
-│   ├── Reading Order            │             │          │
-│   ├── Execution Flow           │             │          │
+│   ├── Reading Order        Voice Interface   │          │
+│   ├── Execution Flow       (mic → speak)     │          │
 │   ├── Code Review              │             │          │
 │   ├── Smart Reindex            │             │          │
 │   └── Chat ──────────────────┐ │             │          │
@@ -1180,6 +1255,30 @@ curl http://localhost:8000/health
 │   (smart code     (Jina 1.5B     (ChromaDB               │
 │    chunks)         MPS/CUDA)      persistent)             │
 ├──────────────────────────────────────────────────────────┤
+│                     VOICE LAYER                          │
+│                                                          │
+│   ┌── mic ──► stt.py ──► router.py ──► tool exec ──┐    │
+│   │  sounddevice   faster-whisper   qwen2.5:1.5b     │    │
+│   │  (record)      (transcribe)     (route to tool) │    │
+│   │                                                 │    │
+│   │            ┌─ content tool? ─┐                   │    │
+│   │            │  YES            │ NO (admin)        │    │
+│   │            ▼                 ▼                   │    │
+│   │   main LLM (get_llm())   return text only       │    │
+│   │   raw result → speech    (no TTS)               │    │
+│   │         │                                       │    │
+│   │   tts.py ◄── speech                             │    │
+│   │   edge-tts (speak answer)                       │    │
+│   └──────────────────────────────────────────────    │
+│                                                          │
+│   Voice Flow:                                            │
+│   🔔 beep → 🎙️ record (30s max, 5s silence stop)        │
+│   → 📝 transcribe (faster-whisper, local)                │
+│   → 🧠 route (qwen2.5:1.5b picks the right tool + args) │
+│   → ⚙️ execute tool                                      │
+│   → 🔇 admin tool? → text result only (silent)           │
+│   → 🔊 content tool? → main LLM → speech → edge-tts     │
+├──────────────────────────────────────────────────────────┤
 │                     LLM LAYER                            │
 │                                                          │
 │   config.py ──► get_llm() factory                        │
@@ -1220,11 +1319,17 @@ codewalk/
 │   │   ├── review_prompts.py      #   System + user prompts (OWASP checklist)
 │   │   └── reviewer.py            #   8-step review pipeline orchestrator
 │   ├── api/                       # FastAPI REST
-│   │   ├── main.py                #   16 endpoints
+│   │   ├── main.py                #   18 endpoints
 │   │   ├── models.py              #   Pydantic schemas
 │   │   └── state.py               #   Singleton app state
+│   ├── voice/                     # Voice interface
+│   │   ├── stt.py                 #   Mic recording + faster-whisper transcription
+│   │   ├── tts.py                 #   edge-tts speech synthesis (thread-safe)
+│   │   ├── router.py              #   LLM-based tool routing (qwen2.5:1.5b)
+│   │   ├── backends.py            #   Tool execution bridge
+│   │   └── companion.py           #   Standalone voice loop
 │   └── mcp/                       # Model Context Protocol
-│       └── server.py              #   16 MCP tools (stdio)
+│       └── server.py              #   18 MCP tools (stdio)
 │
 ├── frontend/                      # Next.js 14 web UI
 │   └── src/app/
@@ -1237,11 +1342,12 @@ codewalk/
 │       ├── reading-order/page.tsx #   Reading order viewer
 │       ├── execution-flow/page.tsx#   Flow diagram viewer
 │       ├── review/page.tsx        #   Code review (diff/file/guidelines)
+│       ├── voice/page.tsx         #   Voice assistant (mic → transcribe → speak)
 │       └── incremental-reindex/   #   Smart reindex page
 │           └── page.tsx
 │
-├── data/
-│   └── chroma/                    # ChromaDB persistent storage
+├── <target-repo>/.codewalk/
+│   └── chroma/                    # ChromaDB persistent storage (per repo)
 │
 ├── requirements.txt               # Python dependencies
 ├── .env                           # Configuration (gitignored)
@@ -1259,6 +1365,7 @@ codewalk/
 | `EMBEDDING_MODEL` | `jinaai/jina-code-embeddings-1.5b` | Sentence-transformer model for code embeddings |
 | `REPO_PATH` | `src/codewalk` | Default repository path to analyze |
 | `EXCLUDE_PATHS` | — | Comma-separated paths to exclude from scanning (e.g. `tests,docs,*.generated.*`) |
+| `USE_LLM_FILTER` | `true` | `true` = LLM decides which files to embed (smarter, slower). `false` = pattern matching only (faster) |
 | `GROQ_API_KEY` | — | Groq API key |
 | `OPENAI_API_KEY` | — | OpenAI API key |
 | `ANTHROPIC_API_KEY` | — | Anthropic API key |
@@ -1283,11 +1390,11 @@ codewalk/
 
 ## 🧹 Clearing the Index (Reset ChromaDB)
 
-To wipe all indexed data and start fresh, delete the `data/chroma/` directory:
+To wipe all indexed data and start fresh, delete the `.codewalk/chroma/` directory inside the target repo:
 
 ```bash
-# From the codewalk project root:
-rm -rf data/chroma/
+# From the target repo root:
+rm -rf .codewalk/chroma/
 ```
 
 This removes all embedded chunks and collections. Next time you run `codewalk_analyze_codebase` (MCP) or `POST /analyze` (API), it will re-index from scratch.
@@ -1298,6 +1405,19 @@ This removes all embedded chunks and collections. Next time you run `codewalk_an
 > - You changed the embedding model and need to re-embed everything
 > - You want to use `index_mode: "full"` but it's still picking up old data
 
+### Adding `.codewalk/` to `.gitignore`
+
+Codewalk stores its ChromaDB index inside each target repo at `.codewalk/chroma/`. This directory should **not** be committed to version control.
+
+Add this to each target repo's `.gitignore`:
+
+```gitignore
+# Codewalk index (auto-generated)
+.codewalk/
+```
+
+> This is only needed in the **target repo** you're analyzing, not in the codewalk repo itself.
+
 ---
 
 ## 🛠️ Tech Stack
@@ -1306,13 +1426,34 @@ This removes all embedded chunks and collections. Next time you run `codewalk_an
 |-------|-----------|
 | **Backend** | Python 3.10+, FastAPI, Uvicorn |
 | **Agent** | LangGraph, LangChain |
-| **Vector DB** | ChromaDB (persistent, local) |
+| **Vector DB** | ChromaDB (persistent, per-repo at `.codewalk/chroma/`) |
+| **Voice STT** | faster-whisper (local, small model, int8) |
+| **Voice TTS** | edge-tts (free, en-US-AriaNeural) |
+| **Voice Router** | Ollama qwen2.5:1.5b  (local, ~300MB) |
 | **Embeddings** | Jina Code Embeddings 1.5B (1536-dim, MPS/CUDA) |
 | **Code Parsing** | Tree-sitter (15+ language grammars) |
 | **Frontend** | Next.js 14, React 18, TypeScript 5 |
 | **Styling** | Tailwind CSS, shadcn/ui |
 | **Diagrams** | Mermaid.js |
 | **MCP** | Model Context Protocol (stdio transport) |
+
+---
+
+## ⚠️ Known Limitations
+
+### Single-repo state (no concurrent multi-repo)
+
+Codewalk holds **one repo's state in memory at a time** (vector store, dependency graph, module map, repo path). This means:
+
+| Interface | Multi-repo behavior |
+|-----------|-------------------|
+| **MCP (stdio)** | ✅ **Safe.** Each MCP connection spawns a separate Python process. Two repos = two processes = completely isolated memory. No conflicts. |
+| **FastAPI (REST)** | ⚠️ **Not safe.** Two concurrent `/analyze` calls for different repos will race — whoever finishes last overwrites the shared globals. Only one repo at a time. |
+| **Web UI** | ⚠️ **Same as REST.** The browser hits the FastAPI backend. Analyze one repo, explore it, then analyze another. Don't run two analyses in parallel from different browser tabs. |
+
+**This is by design, not a bug.** Codewalk is optimized for the common case: one developer, one repo at a time. If you need concurrent multi-repo support on the API side, it would require a `dict[repo_path, SessionState]` architecture — contributions welcome.
+
+> **MCP users:** You're already safe. Each VS Code window / Claude Code session / Cursor instance gets its own MCP server process via stdio transport. Analyze as many repos as you want across different windows — they never share state.
 
 ---
 
