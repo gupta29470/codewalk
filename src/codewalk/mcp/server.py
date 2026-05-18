@@ -1072,60 +1072,108 @@ def codewalk_review_diff(
 # ─── TOOL 15 [MAINT · user+AI]: codewalk_review_file ────────────
 @mcp.tool()
 def codewalk_review_file(file_path: str) -> str:
-    """Review a file against codebase patterns found via ChromaDB embeddings.
+    """Review a single file for bugs, security vulnerabilities, and logic errors.
 
-    Uses the vector index to find how similar code is written elsewhere in
-    the project, then compares for consistency.
+    Reads the file, enriches it with codebase context (who imports it,
+    security patterns from the vector index, team guidelines), and returns
+    everything for deep analysis.
 
-    Checks: consistency with codebase conventions, error handling patterns,
-    naming conventions, and potential bugs.
+    Does NOT require the file to be in git diff — works on any file in the repo.
 
-    Requires: codebase must be indexed first via codewalk_index_filtered_files.
+    Requires: codebase must be indexed first via codewalk_analyze_codebase.
 
     Args:
         file_path: Path to the file to review (relative to repo root).
     """
-    state.ensure_initialized()
-    if not state._store:
-        return "❌ Codebase not indexed. Run codewalk_index_filtered_files first."
-    
+    import os
+    from src.codewalk.review.reviewer import (
+        _get_caller_context, _get_security_context_for_file,
+    )
+    from src.codewalk.review.models import DiffFile, DiffHunk, ChangedLine
+    from src.codewalk.review.guidelines_loader import get_guidelines_store, search_guidelines
     from src.codewalk.rag.chain import format_context
-    from src.codewalk.config import get_llm
+
+    repo_path = settings.repo_path
+    full_path = os.path.join(repo_path, file_path) if not os.path.isabs(file_path) else file_path
+
+    if not os.path.exists(full_path):
+        return f"❌ File '{file_path}' not found."
 
     try:
-        with open(file_path, "r") as file:
-            content = file.read()
-    except FileNotFoundError:
-        return f"❌ File '{file_path}' not found."
-    
-    results = state._store.search(f"code in {file_path}", n_results=5)
-    patterns = format_context(results) if results else "No indexed context."
+        content = open(full_path, "r", errors="replace").read()
+    except OSError as e:
+        return f"❌ Cannot read file: {e}"
 
-    llm = get_llm(temperature=0)
-    response = llm.invoke([
-        {"role": "system", "content": (
-            "You are a senior engineer reviewing a file against codebase conventions.\n\n"
-            "Given: the file's source code + patterns found elsewhere in the codebase.\n\n"
-            "SEVERITY LEVELS:\n"
-            "- 🔴 CRITICAL: Bugs, security vulnerabilities\n"
-            "- 🟡 WARNING: Logic errors, inconsistency with codebase patterns\n"
-            "- 🟢 SUGGESTION: Readability, naming improvements\n\n"
-            "RULES:\n"
-            "- Only reference line numbers you can see in the provided code\n"
-            "- Compare against the 'Patterns elsewhere' section for consistency\n"
-            "- If the file follows conventions well, say so (don't invent issues)\n"
-            "- If the file was truncated, only review what you can see\n\n"
-            "Format: One issue per line as '🔴/🟡/🟢 Line X: [issue] — [suggestion]'\n"
-            "End with a one-line summary."
-        )},
-        {"role": "user", "content": (
-            f"## File: {file_path}\n```\n{content[:10000]}\n```"
-            f"{chr(10) + '(File truncated at 10000 chars)' if len(content) > 10000 else ''}\n\n"
-            f"## Patterns elsewhere:\n{patterns}"
-        )},
-    ])
+    # Build a synthetic DiffFile so we can reuse context helpers
+    lines = content.splitlines()
+    changed_lines = [
+        ChangedLine(line_number=i + 1, content=line, change_type="added")
+        for i, line in enumerate(lines)
+    ]
+    synthetic_diff = DiffFile(
+        file_path=file_path,
+        language="",
+        hunks=[DiffHunk(start_line=1, end_line=len(lines), lines=changed_lines)],
+        is_new_file=True,
+        added_lines=len(lines),
+        removed_lines=0,
+    )
 
-    return response.content
+    # ── Build context ──
+    output_parts = []
+    output_parts.append(f"## File Review: {file_path} ({len(lines)} lines)\n")
+
+    # Caller context (who imports this file)
+    caller_ctx = _get_caller_context(synthetic_diff, state._deps)
+    if caller_ctx:
+        output_parts.append(caller_ctx)
+        output_parts.append("")
+
+    # Security patterns from vector store
+    if state._store:
+        sec_ctx = _get_security_context_for_file(synthetic_diff, state._store)
+        if sec_ctx:
+            output_parts.append(sec_ctx)
+            output_parts.append("")
+
+    # Codebase patterns (similar code elsewhere)
+    if state._store:
+        results = state._store.search(f"code in {file_path}", n_results=5)
+        if results:
+            output_parts.append("## Similar patterns elsewhere in the codebase")
+            output_parts.append(format_context(results))
+            output_parts.append("")
+
+    # Guidelines
+    guidelines_store = get_guidelines_store()
+    if guidelines_store:
+        gl = search_guidelines(guidelines_store, [synthetic_diff], n_results=3)
+        if gl:
+            output_parts.append(gl)
+            output_parts.append("")
+
+    # The file content itself
+    truncated = content[:15000]
+    if len(content) > 15000:
+        truncated += "\n... (truncated at 15000 chars)"
+    output_parts.append(f"<file>\n{truncated}\n</file>\n")
+
+    # Review instructions
+    output_parts.append(
+        "---\n"
+        "## YOUR TASK\n"
+        "Review the file above for bugs, security issues, and code quality.\n"
+        "For each issue found, report:\n"
+        "- Severity: 🔴 CRITICAL / 🟡 WARNING / 🟢 SUGGESTION\n"
+        "- Line number\n"
+        "- What's wrong and why\n"
+        "- Suggested fix\n\n"
+        "Compare against the codebase patterns shown above for consistency.\n"
+        "Focus on: OWASP top 10, race conditions, resource leaks, null safety, "
+        "async gaps, unbounded growth, hardcoded secrets, SQL injection, path traversal."
+    )
+
+    return "\n".join(output_parts)
 
 # ─── TOOL 16 [MAINT · user+AI]: codewalk_load_guidelines ────────────
 @mcp.tool()
