@@ -50,3 +50,9 @@ unidiff
 
 # MCP
 mcp
+
+# Voice 
+faster-whisper
+edge-tts
+sounddevice
+numpy

@@ -20,11 +20,16 @@ class Settings(BaseSettings):
     # Relative path for self-analysis: "src/codewalk"
     # Absolute path for external repos: "/Users/you/Development/django-app/src"
     # Override via .env: REPO_PATH=/path/to/any/repo/source
-    repo_path: str = os.getenv("REPO_PATH", "src/codewalk")
+    repo_path: str = os.getenv("REPO_PATH", ".")
 
     # Comma-separated paths to exclude from scanning/indexing
     # e.g. "tests,docs,scripts/legacy,*.generated.*"
     exclude_paths: str = os.getenv("EXCLUDE_PATHS", "")
+
+    # LLM-based file filtering during indexing
+    # True = LLM decides which files to embed (smarter, slower)
+    # False = pattern matching only (faster, keeps all source files)
+    use_llm_filter: bool = os.getenv("USE_LLM_FILTER", "true").lower() in ("true", "1", "yes")
 
     review_guidelines_path: str = os.getenv("REVIEW_GUIDELINES_PATH", "review_guidelines")
 

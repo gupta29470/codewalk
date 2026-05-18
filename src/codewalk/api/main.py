@@ -1,15 +1,13 @@
 import logging
 import sys
 import json
+import base64
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
-
-logger = logging.getLogger("codewalk")
-def _log(msg: str):
-    print(msg, file=sys.stderr)
-    logger.info(msg)
+from fastapi import UploadFile, File, Form
+from fastapi.responses import JSONResponse
 
 from src.codewalk.pipeline import full_index_parallel, reindex, chunk_and_embed_parallel, incremental_reindex
 from src.codewalk.analysis.relevance_filter import filter_files_with_llm
@@ -36,6 +34,16 @@ from src.codewalk.analysis.blast_radius import (
     get_blast_radius,
     calculate_full_blast_map,
 )
+from src.codewalk.voice.stt import transcribe_bytes
+from src.codewalk.voice.tts import synthesize
+from src.codewalk.voice.router import route
+from src.codewalk.voice.backends import execute_direct
+
+
+logger = logging.getLogger("codewalk")
+def _log(msg: str):
+    print(msg, file=sys.stderr)
+    logger.info(msg)
 
 
 # ─── Create the FastAPI app ─────────────────────────────────────────
@@ -68,15 +76,16 @@ async def analyze(request: AnalyzeRequest):
         request.repo_path = request.repo_path or settings.repo_path
         if not request.collection_name:
             request.collection_name = request.repo_path.rstrip("/").split("/")[-1] or "codebase"
-        store = VectorStore()
+        persist_dir = f"{request.repo_path.rstrip('/')}/.codewalk/chroma"
+        store = VectorStore(persist_dir=persist_dir)
         store.create_collection(request.collection_name)
         existing_count = store.collection.count()
 
         # ── Decide whether to index ──────────────────────────────
         if request.index_mode == "full" or existing_count == 0:
-            index_result = full_index_parallel(request.repo_path, request.collection_name)
+            index_result = full_index_parallel(request.repo_path, request.collection_name, use_llm_filter=settings.use_llm_filter, persist_dir=persist_dir)
         elif request.index_mode == "reindex":
-            index_result = reindex(request.repo_path, request.collection_name)
+            index_result = reindex(request.repo_path, request.collection_name, persist_dir=persist_dir)
         else:
             # Auto mode + data exists → skip indexing entirely
             index_result = {
@@ -97,7 +106,7 @@ async def analyze(request: AnalyzeRequest):
 
         # ── Save state (including files/deps cache) ─────────────
         state.initialize(store, agent, modules_result, index_result,
-                         files=files, deps=deps)
+                         files=files, deps=deps, repo_path=request.repo_path)
 
         return AnalyzeResponse(
             status="complete",
@@ -122,7 +131,8 @@ async def analyze_stream(request: AnalyzeRequest):
 
             # Step 1: Check existing data
             yield f"data: {json.dumps({'step': 'init', 'message': 'Checking existing index...'})}\n\n"
-            store = VectorStore()
+            persist_dir = f"{request.repo_path.rstrip('/')}/.codewalk/chroma"
+            store = VectorStore(persist_dir=persist_dir)
             store.create_collection(request.collection_name)
             existing_count = store.collection.count()
 
@@ -134,9 +144,12 @@ async def analyze_stream(request: AnalyzeRequest):
                 scanned_count = len(files)
                 yield f"data: {json.dumps({'step': 'scan', 'message': f'Scanned {scanned_count} files'})}\n\n"
 
-                yield f"data: {json.dumps({'step': 'filter', 'message': f'Smart filtering {scanned_count} files via LLM — wait time depends on number of files...'})}\n\n"
-                files = filter_files_with_llm(files)
-                yield f"data: {json.dumps({'step': 'filter', 'message': f'Kept {len(files)} relevant files (filtered out {scanned_count - len(files)})'})}\n\n"
+                if settings.use_llm_filter:
+                    yield f"data: {json.dumps({'step': 'filter', 'message': f'Smart filtering {scanned_count} files via LLM — wait time depends on number of files...'})}\n\n"
+                    files = filter_files_with_llm(files)
+                    yield f"data: {json.dumps({'step': 'filter', 'message': f'Kept {len(files)} relevant files (filtered out {scanned_count - len(files)})'})}\n\n"
+                else:
+                    yield f"data: {json.dumps({'step': 'filter', 'message': 'LLM filter disabled — using all scanned files'})}\n\n"
 
                 yield f"data: {json.dumps({'step': 'chunk', 'message': 'Chunking + embedding in parallel...'})}\n\n"
 
@@ -158,7 +171,7 @@ async def analyze_stream(request: AnalyzeRequest):
 
             elif request.index_mode == "reindex":
                 yield f"data: {json.dumps({'step': 'scan', 'message': 'Scanning for changes...'})}\n\n"
-                index_result = reindex(request.repo_path, request.collection_name)
+                index_result = reindex(request.repo_path, request.collection_name, persist_dir=persist_dir)
                 new = index_result['new_files']
                 changed = index_result['changed_files']
                 deleted = index_result['deleted_files']
@@ -188,7 +201,7 @@ async def analyze_stream(request: AnalyzeRequest):
 
             # Step 5: Save state (including files/deps cache)
             state.initialize(store, agent, modules_result, index_result,
-                             files=files, deps=deps)
+                             files=files, deps=deps, repo_path=request.repo_path)
 
             # Final event — includes full result
             yield f"data: {json.dumps({'step': 'done', 'message': 'Analysis complete!', 'result': {'status': 'complete', 'repo_path': request.repo_path, 'files_scanned': index_result.get('files_scanned', 0), 'chunks_created': index_result.get('chunks_created', 0), 'modules': list(modules_result['modules'].keys())}})}\n\n"
@@ -207,6 +220,7 @@ async def analyze_stream(request: AnalyzeRequest):
 async def chat(request: ChatRequest):
     """Ask the agent a question about the codebase."""
     try:
+        state.ensure_initialized()
         agent = state.get_agent()
         config = {
             "configurable": {
@@ -229,6 +243,7 @@ async def chat(request: ChatRequest):
 async def overview():
     """Get the project overview (tech stack, modules, diagram, LLM summary)."""
     try:
+        state.ensure_initialized()
         modules_result = state.get_modules_result()
         store = state.get_store()
 
@@ -273,6 +288,7 @@ async def overview():
 async def get_module(module_name: str):
     """Get details about a specific module."""
     try:
+        state.ensure_initialized()
         module_result = state.get_modules_result()
         modules = module_result["modules"]
         module_graph = module_result["module_graph"]
@@ -284,6 +300,30 @@ async def get_module(module_name: str):
                 actual_name = name
                 break
         
+        # Fallback: search for sub-folder inside modules (e.g. "users" → features/users)
+        matched_as_feature = False
+        if not actual_name:
+            source_root = module_result.get("source_root", "")
+            for mod_name, mod_info in modules.items():
+                prefix = f"{source_root}/{mod_name}/{module_name.lower()}/" if source_root else f"{mod_name}/{module_name.lower()}/"
+                matching_files = [f for f in mod_info["files"] if f.lower().startswith(prefix.lower())]
+                if matching_files:
+                    actual_name = mod_name
+                    matched_as_feature = True
+                    from collections import Counter
+                    lang_counter = Counter()
+                    all_files = state.get_files()
+                    matching_set = set(matching_files)
+                    for f in all_files:
+                        if f["file_path"] in matching_set:
+                            lang_counter[f["language"]] += 1
+                    info = {
+                        "files": matching_files,
+                        "file_count": len(matching_files),
+                        "languages": dict(lang_counter),
+                    }
+                    break
+
         if not actual_name:
             available = ", ".join(sorted(modules.keys()))
             raise HTTPException(
@@ -291,7 +331,8 @@ async def get_module(module_name: str):
                 detail=f"Module '{module_name}' not found. Available: {available}",
             )
         
-        info = modules[actual_name]
+        if not matched_as_feature:
+            info = modules[actual_name]
         depends_on = module_graph.get(actual_name, [])
         depended_by = [
             other for other, deps in module_graph.items()
@@ -318,7 +359,7 @@ async def get_module(module_name: str):
                 max_risk = radius["risk_level"]
 
         return ModuleResponse(
-            name=actual_name,
+            name=f"{module_name} (inside '{actual_name}')" if matched_as_feature else actual_name,
             file_count=info["file_count"],
             files=sorted(info["files"]),
             languages=info["languages"],
@@ -341,6 +382,7 @@ async def get_module(module_name: str):
 async def get_blast_radius_for_module(module_name: str = ""):
     """Get blast radius for files. Optionally scope to a module."""
     try:
+        state.ensure_initialized()
         modules_result = state.get_modules_result()
         analyze_result = state.get_analyze_result()
         repo_path = analyze_result.get("repo_path", settings.repo_path)
@@ -404,6 +446,7 @@ async def get_blast_radius_for_module(module_name: str = ""):
 def list_modules():
     """List all available modules."""
     try:
+        state.ensure_initialized()
         modules_result = state.get_modules_result()
         return {
             "modules": list(modules_result["modules"].keys()),
@@ -417,6 +460,7 @@ def list_modules():
 def get_reading_order():
     """Get the recommended reading order for the codebase."""
     try:
+       state.ensure_initialized()
        analyze_result = state.get_analyze_result()
        repo_path = analyze_result.get("repo_path", settings.repo_path)
        files = state.get_files()
@@ -441,6 +485,7 @@ def get_reading_order():
 def get_execution_flow():
     """Get the execution flow diagram and narration."""
     try: 
+        state.ensure_initialized()
         analyze_result = state.get_analyze_result()
         repo_path = analyze_result.get("repo_path", settings.repo_path)
         files = state.get_files()
@@ -462,6 +507,7 @@ async def refresh_analysis():
     to update blast radius, reading order, and module structure.
     """
     try:
+        state.ensure_initialized()
         analyze_result = state.get_analyze_result()
         repo_path = analyze_result.get("repo_path", settings.repo_path)
 
@@ -488,11 +534,13 @@ async def incremental_reindex_endpoint():
     try:
         store = state.get_store()
         repo_path = state.get_analyze_result().get("repo_path", settings.repo_path)
+        collection_name = store.collection.name
+        persist_dir = f"{repo_path.rstrip('/')}/.codewalk/chroma"
         indexed_files = list(store.get_all_indexed_files())
         if not indexed_files:
             raise HTTPException(status_code=400, detail="No files indexed yet. Run /analyze first.")
 
-        result = incremental_reindex(indexed_files, repo_path)
+        result = incremental_reindex(indexed_files, repo_path, collection_name, persist_dir=persist_dir)
 
         # Refresh analysis cache after reindex
         files = scan_directory(repo_path)
@@ -621,6 +669,75 @@ async def load_guidelines_endpoint(request: GuidelinesRequest):
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+    
+
+# ─── POST /voice/ask ─────────────────────────────────────────
+@app.post("/voice/ask")
+async def voice_ask_endpoint(
+    audio: UploadFile = File(...),
+    thread_id: str = Form("voice"),
+):
+    """Voice-in, voice-out codebase Q&A.
+
+    Accepts audio file (webm/mp3/wav from browser mic).
+    Routes to the right Codewalk tool, executes it, speaks the result.
+
+    Returns JSON:
+      question: transcribed text
+      tool: which tool was called
+      answer: tool result (full text)
+      speech: summarized text for TTS
+      audio_base64: MP3 audio as base64
+    """
+    # 1. STT
+    audio_bytes = await audio.read()
+    question = transcribe_bytes(audio_bytes, file_name=audio.filename or "audio.webm")
+
+    if not question.strip():
+        fallback = "I didn't catch that. Could you try again?"
+        return JSONResponse({
+            "question": "",
+            "tool": None,
+            "answer": fallback,
+            "speech": fallback,
+            "audio_base64": base64.b64encode(synthesize(fallback)).decode(),
+        })
+    
+    # 2. Route
+    route_result = route(question)
+    tool_name = route_result.get("tool")
+    arguments = route_result.get("arguments", {})
+
+    if not tool_name:
+        fallback = "Sorry, I couldn't match that to a Codewalk tool."
+        return JSONResponse({
+            "question": question,
+            "tool": None,
+            "answer": fallback,
+            "speech": fallback,
+            "audio_base64": base64.b64encode(synthesize(fallback)).decode(),
+        })
+    
+    # 3. Auto-load index if server restarted
+    state.ensure_initialized()
+
+    # 4. Execute tool
+    result = execute_direct(tool_name, arguments)
+
+    # 5. Generate technical + speech versions via main LLM
+    from src.codewalk.voice.companion import format_voice_response
+    voice = format_voice_response(result)
+
+    # 5. TTS on the speech version
+    audio_response = synthesize(voice["speech"])
+
+    return JSONResponse({
+        "question": question,
+        "tool": tool_name,
+        "answer": voice["technical"],
+        "speech": voice["speech"],
+        "audio_base64": base64.b64encode(audio_response).decode(),
+    })
 
 # ─── Health check ───────────────────────────────────────────────────
 

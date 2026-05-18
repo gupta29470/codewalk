@@ -232,4 +232,28 @@ export const api = {
         apiFetch<IncrementalReindexResponse>("/incremental-reindex", {
             method: "POST",
         }),
+
+    voiceAsk: async (audioBlob: Blob, threadId: string = "voice") => {
+        const form = new FormData();
+        form.append("audio", audioBlob, "recording.webm");
+        form.append("thread_id", threadId);
+
+        const res = await fetch(`${API_BASE}/voice/ask`, {
+            method: "POST",
+            body: form,
+        });
+
+        if (!res.ok) {
+            const error = await res.json().catch(() => ({ detail: res.statusText }));
+            throw new Error(error.detail || `API error: ${res.status}`);
+        }
+
+        return res.json() as Promise<{
+            question: string;
+            tool: string | null;
+            answer: string;
+            speech: string;
+            audio_base64: string;
+        }>;
+    },
 };

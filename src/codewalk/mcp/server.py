@@ -1,14 +1,18 @@
-"""Codewalk MCP server — 16 tools for codebase onboarding, search, and review.
+"""Codewalk MCP server — 18 tools for codebase onboarding, search, review, and voice.
 
 Tool categories:
   SETUP  (1, 9-11): Analyze repo, scan/filter files, index embeddings.
   QUERY  (2-8):     Search code, explain functions, blast radius, reading order, execution flow.
   MAINT  (12-16):   Incremental reindex, refresh analysis, review diff/file, load guidelines.
+  VOICE  (17-18):   Mic record+transcribe (Copilot routes), TTS speak.
 """
 
+import inspect
 import logging
+import subprocess
 import sys
 from fnmatch import fnmatch
+import asyncio
 
 from mcp.server.fastmcp import FastMCP
 
@@ -24,6 +28,7 @@ from src.codewalk.analysis.dependency_graph import build_dependency_graph
 from src.codewalk.analysis.module_detector import detect_modules
 from src.codewalk.generation.diagram_generator import generate_module_diagram
 from src.codewalk.generation.module_explainer import explain_module
+from src.codewalk.generation.overview_generator import generate_overview
 from src.codewalk.embeddings.vector_store import VectorStore
 from src.codewalk.rag.chain import format_context
 from src.codewalk.pipeline import full_index_parallel, index_from_paths_parallel, incremental_reindex
@@ -35,6 +40,9 @@ from src.codewalk.analysis.blast_radius import (
 from src.codewalk.analysis.reading_order import generate_reading_order_raw
 from src.codewalk.review.reviewer import review_diff
 from src.codewalk.review.guidelines_loader import get_guidelines_store
+from src.codewalk.voice.stt import record_audio, transcribe
+from src.codewalk.voice.tts import speak, stop_speaking
+from src.codewalk.api import state
 
 
 # ─── Create the MCP server ──────────────────────────────────────────
@@ -43,8 +51,16 @@ mcp = FastMCP(
     instructions=(
         "Codewalk is an AI-powered codebase onboarding tool. "
         "\n\n"
-        "## SETUP WORKFLOW (must complete before answering questions)\n"
+        "## IMPORTANT: ALWAYS USE CODEWALK TOOLS\n"
+        "When a Codewalk tool exists for the task, you MUST call it instead of\n"
+        "searching, reading, or analyzing files yourself. Codewalk tools use\n"
+        "pre-computed dependency graphs, ChromaDB embeddings, and blast radius\n"
+        "analysis that you cannot replicate by reading files.\n"
+        "\n"
+        "## SETUP WORKFLOW\n"
         "1) codewalk_analyze_codebase — detect modules and structure.\n"
+        "   → If the response says 'INDEX READY', SKIP steps 2-6 and go straight to answering questions.\n"
+        "   → If the response says 'INDEX EMPTY', continue with steps 2-6.\n"
         "2) codewalk_scan_files(batch=1) — get file paths for filtering.\n"
         "3) Review paths. KEEP: source code, business logic, services, models, "
         "controllers, UI, entry points, config with logic. "
@@ -73,32 +89,20 @@ mcp = FastMCP(
         "- codewalk_review_diff — review git diff for bugs, security, style (LLM + pre-checks)\n"
         "- codewalk_review_file(path) — review one file against codebase patterns\n"
         "- codewalk_load_guidelines(path) — load team coding standards for reviews\n"
+        "\n"
+        "## VOICE COMPANION\n"
+        "- codewalk_voice_ask — record mic + transcribe, then YOU:\n"
+        "    1. Call the right codewalk tool\n"
+        "    2. Show the FULL result as text in the chat (same detail as typed)\n"
+        "    3. Call codewalk_speak() with a 2-4 sentence spoken summary\n"
+        "- codewalk_speak(text) — speak a plain-English summary aloud via TTS\n"
     ),
 )
 
-# ─── Cached state (computed once, reused by all tools) ───────────────
-_store: VectorStore | None = None
-_modules_result: dict | None = None
-_repo_path: str | None = None
-_files: list[dict] | None = None       # scan_directory() result
-_deps: dict | None = None              # build_dependency_graph() result
-
-# Batch filtering state (internal workflow)
+# ─── MCP-only batch filtering state ──────────────────────────────────
 _all_scanned_files: list[dict] = []
 _selected_file_paths: list[str] = []
 MCP_BATCH_SIZE = 100  # files per batch for Copilot filtering
-
-
-def _rebuild_analysis_cache():
-    """Re-scan files and rebuild dependency graph + modules. No re-embedding."""
-    global _files, _deps, _modules_result, _repo_path
-    repo_path = _repo_path or settings.repo_path
-    _repo_path = repo_path
-    _files = scan_directory(repo_path)
-    _deps = build_dependency_graph(_files)
-    _modules_result = detect_modules(_files, _deps)
-    _log(f"[cache] Rebuilt: {len(_files)} files, {len(_deps['graph'])} in graph, "
-         f"{len(_modules_result['modules'])} modules")
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -119,30 +123,33 @@ def codewalk_analyze_codebase() -> str:
     ⏩ NEXT STEP: codewalk_scan_files(batch=1)
     Do NOT skip to codewalk_get_overview or other tools until indexing is complete.
     """
-    global _store
-
     _log(f"[codewalk_analyze_codebase] Starting analysis: {settings.repo_path}")
-    _rebuild_analysis_cache()
+    state.rebuild_analysis_cache()
 
-    # Check if there's an existing index for search
-    _store = VectorStore()
-    _collection_name = settings.repo_path.rstrip("/").split("/")[-1] or "codebase"
-    _store.create_collection(_collection_name)
-    existing = _store.collection.count()
+    # Check if there's an existing index for search.
+    # Use repo-derived collection name from repo path — consistent with
+    # codewalk_index_filtered_files and codewalk_incremental_reindex.
+    state._store = VectorStore(persist_dir=state.chroma_path())
+    state._store.create_collection(state.get_collection_name())
+    existing = state._store.collection.count()
 
-    modules = list(_modules_result["modules"].keys())
+    modules = list(state._modules_result["modules"].keys())
     _log(f"[codewalk_analyze_codebase] Modules: {modules} | Index: {existing} chunks")
-    search_status = (
-        f"Search index: {existing} chunks available"
-        if existing > 0
-        else "Search index: empty — use codewalk_scan_files + codewalk_index_filtered_files to enable search"
-    )
+    if existing > 0:
+        return (
+            f"Codebase analyzed successfully.\n"
+            f"Files found: {len(state._files)}\n"
+            f"Modules found: {', '.join(modules)}\n"
+            f"Search index: INDEX READY — {existing} chunks available.\n\n"
+            f"✅ Index already exists. SKIP scan/filter/index steps.\n"
+            f"Ready to answer questions — use query tools directly."
+        )
 
     return (
         f"Codebase analyzed successfully.\n"
-        f"Files found: {len(_files)}\n"
+        f"Files found: {len(state._files)}\n"
         f"Modules found: {', '.join(modules)}\n"
-        f"{search_status}\n\n"
+        f"Search index: INDEX EMPTY — no embeddings found.\n\n"
         f"⏩ NEXT STEP: Call codewalk_scan_files(batch=1) to start the indexing workflow.\n"
         f"(If the AI doesn't call it automatically, run it yourself.)"
     )
@@ -154,11 +161,14 @@ def codewalk_analyze_codebase() -> str:
 # ─── TOOL 2 [QUERY · user+AI]: codewalk_search_codebase ──────────────
 @mcp.tool()
 def codewalk_search_codebase(query: str) -> str:
-    """Search the indexed codebase using semantic similarity.
+    """Search the codebase using ChromaDB semantic embeddings — NOT a text search.
+
+    This uses vector similarity on pre-computed embeddings to find code by
+    meaning, not keywords. You MUST call this tool instead of searching or
+    grepping files yourself — it finds results that keyword search would miss.
 
     Returns up to 5 relevant code snippets with file paths, line numbers,
-    and surrounding context. Use this for broad questions like "how does
-    authentication work" or "where is the database connectio handled".
+    and surrounding context.
 
     For a specific function/class by name, prefer codewalk_explain_function.
 
@@ -166,11 +176,12 @@ def codewalk_search_codebase(query: str) -> str:
         query: Natural language search query, e.g. "authentication logic",
                "error handling in API routes", "how files get chunked"
     """
-    if _store is None:
+    state.ensure_initialized()
+    if state._store is None:
         return "Error: No codebase indexed yet. Call codewalk_analyze_codebase first."
 
     _log(f"[codewalk_search_codebase] Query: {query}")
-    results = _store.search(query, n_results=5)
+    results = state._store.search(query, n_results=5)
     _log(f"[codewalk_search_codebase] Found {len(results)} results")
     if not results:
         return "No relevant code found for that query."
@@ -179,21 +190,31 @@ def codewalk_search_codebase(query: str) -> str:
 # ─── TOOL 3 [QUERY · user+AI]: codewalk_get_module_info ──────────────
 @mcp.tool()
 def codewalk_get_module_info(module_name: str) -> str:
-    """Get detailed information about a specific module.
+    """Get module or feature details from Codewalk's indexed analysis — files, symbols, dependencies, blast radius.
 
-    Shows every file in the module with its functions/classes extracted
-    from the index, plus dependency and blast radius info.
+    This tool returns data from Codewalk's ChromaDB index and dependency graph
+    that is NOT available by reading files directly. You MUST call this tool
+    instead of searching files yourself.
+
+    Returns: file list with extracted function/class symbols (name, type, line range),
+    module dependencies, and which other modules depend on this one.
+
+    If the name isn't a top-level module, automatically searches for it as a
+    sub-folder (feature) inside modules. For example, "users" resolves to
+    "features/users" if it exists.
+
     Requires codewalk_analyze_codebase + indexing workflow first.
 
     Args:
-        module_name: Name of the module, e.g. "analysis", "embeddings", "api"
+        module_name: Name of the module or feature — any top-level module or sub-folder name
     """
-    if _modules_result is None:
+    state.ensure_initialized()
+    if state._modules_result is None:
         return "Error: No codebase indexed yet. Call codewalk_analyze_codebase first."
 
     _log(f"[codewalk_get_module_info] Module: {module_name}")
-    modules = _modules_result["modules"]
-    module_graph = _modules_result.get("module_graph", {})
+    modules = state._modules_result["modules"]
+    module_graph = state._modules_result.get("module_graph", {})
 
     # Case-insensitive lookup
     actual_name = None
@@ -202,24 +223,57 @@ def codewalk_get_module_info(module_name: str) -> str:
             actual_name = name
             break
 
+    # Fallback: search for sub-folder inside modules (e.g. "users" → "features/users")
+    matched_as_feature = False
+    if actual_name is None:
+        source_root = state._modules_result.get("source_root", "")
+        for mod_name, mod_info in modules.items():
+            # Look through files in each module for a sub-folder matching the query
+            prefix = f"{source_root}/{mod_name}/{module_name.lower()}/" if source_root else f"{mod_name}/{module_name.lower()}/"
+            matching_files = [f for f in mod_info["files"] if f.lower().startswith(prefix.lower())]
+            if matching_files:
+                # Found as a sub-folder — synthesize a feature-level view
+                actual_name = mod_name
+                matched_as_feature = True
+                # Override info with just this sub-folder's files
+                info_override = {
+                    "files": matching_files,
+                    "file_count": len(matching_files),
+                    "languages": {},
+                }
+                from collections import Counter
+                lang_counter = Counter()
+                matching_set = set(matching_files)
+                for f in state._files or []:
+                    if f["file_path"] in matching_set:
+                        lang_counter[f["language"]] += 1
+                info_override["languages"] = dict(lang_counter)
+                break
+
     if actual_name is None:
         available = ", ".join(sorted(modules.keys()))
-        return f"Module '{module_name}' not found. Available modules: {available}"
+        return f"Module '{module_name}' not found. Available modules: {available}\n\nTip: Try the parent module name (e.g. 'features' instead of a specific feature)."
 
-    info = modules[actual_name]
+    # Use overridden info if matched as a feature sub-folder
+    if matched_as_feature:
+        info = info_override
+    else:
+        info = modules[actual_name]
+
     depends_on = module_graph.get(actual_name, [])
     depended_by = [n for n, deps in module_graph.items() if actual_name in deps]
     lang_str = ", ".join(f"{l} ({c})" for l, c in sorted(info["languages"].items()))
 
-    # Get symbols from ChromaDB for each file
+    # Get symbols from ChromaDB for each file (skip for large modules — ChromaDB has query limits)
     file_list = sorted(info["files"])
     symbols_by_file = {}
-    if _store is not None:
-        symbols_by_file = _store.get_symbols_by_files(file_list)
+    if state._store is not None and hasattr(state._store, 'get_symbols_by_files') and len(file_list) <= 100:
+        symbols_by_file = state._store.get_symbols_by_files(file_list)
 
-    # Build per-file detail lines
+    # Build per-file detail lines (cap at 50 files to keep output readable)
     file_lines = []
-    for file_path in file_list:
+    display_files = file_list[:50]
+    for file_path in display_files:
         name = file_path.split("/")[-1]
         symbols = symbols_by_file.get(file_path, [])
         if symbols:
@@ -230,37 +284,78 @@ def codewalk_get_module_info(module_name: str) -> str:
         else:
             file_lines.append(f"- **{name}**: *(not indexed or no named symbols)*")
 
+    if len(file_list) > 50:
+        file_lines.append(f"\n*... and {len(file_list) - 50} more files. Use a sub-folder name to drill deeper.*")
+
     files_section = "\n".join(file_lines)
 
+    # Header differs for feature vs module
+    if matched_as_feature:
+        header = f"## Feature: {module_name} (inside '{actual_name}' module)\n"
+    else:
+        header = f"## Module: {actual_name}\n"
+
+    # List sub-folders (features) when showing a large module
+    sub_features_section = ""
+    if not matched_as_feature and info["file_count"] > 30:
+        source_root = state._modules_result.get("source_root", "")
+        prefix = f"{source_root}/{actual_name}/" if source_root else f"{actual_name}/"
+        sub_folders = set()
+        for f in info["files"]:
+            if f.startswith(prefix):
+                relative = f[len(prefix):]
+                parts = relative.split("/")
+                if len(parts) > 1:
+                    sub_folders.add(parts[0])
+        if len(sub_folders) >= 3:
+            sorted_subs = sorted(sub_folders)
+            sub_features_section = f"\n\n### Sub-folders ({len(sorted_subs)})\n" + ", ".join(sorted_subs)
+            sub_features_section += f"\n\n*Tip: Call `codewalk_get_module_info(\"{sorted_subs[0]}\")` to drill into a specific sub-folder.*"
+
+    # LLM description for top-level modules (not sub-folder features)
+    description_section = ""
+    if not matched_as_feature and state._modules_result:
+        try:
+            description = explain_module(actual_name, info, module_graph)
+            description_section = f"\n### Description\n{description}\n"
+        except Exception as e:
+            _log(f"[codewalk_get_module_info] explain_module failed: {e}")
+
     return (
-        f"## Module: {actual_name}\n"
+        f"{header}"
         f"**Files:** {info['file_count']}\n"
         f"**Languages:** {lang_str}\n"
         f"**Depends on:** {', '.join(depends_on) or 'None (standalone)'}\n"
-        f"**Depended on by:** {', '.join(depended_by) or 'None'}\n\n"
+        f"**Depended on by:** {', '.join(depended_by) or 'None'}"
+        f"{description_section}\n"
         f"### Files & Symbols\n{files_section}"
+        f"{sub_features_section}"
     )
 
 # ─── TOOL 4 [QUERY · user+AI]: codewalk_explain_function ─────────────
 @mcp.tool()
 def codewalk_explain_function(function_name: str) -> str:
-    """Find a function or class by name and explain its code line by line.
+    """Look up a function/class in Codewalk's index and explain it with blast radius.
 
-    Returns the source code with an LLM-generated explanation of what
-    each section does, plus file location and blast radius.
+    This tool uses ChromaDB symbol search + the dependency graph to return:
+    1. Source code from the indexed embeddings
+    2. LLM-generated line-by-line explanation
+    3. Blast radius — which files break if this symbol changes
 
-    Use this when the user asks about a specific named symbol.
-    For broader concept searches, prefer codewalk_search_codebase.
+    You MUST call this tool instead of finding and reading the function
+    yourself. The blast radius and cross-reference data are pre-computed
+    and not available by reading files.
 
     Args:
         function_name: Exact name of the function, method, or class,
                        e.g. "scan_directory", "VectorStore", "embed_chunks"
     """
-    if _store is None:
+    state.ensure_initialized()
+    if state._store is None:
         return "Error: No codebase indexed yet. Call codewalk_analyze_codebase first."
 
     _log(f"[codewalk_explain_function] Looking up: {function_name}")
-    results = _store.search(function_name, n_results=10)
+    results = state._store.search(function_name, n_results=10)
     matches = [
         r for r in results
         if function_name.lower() in r["metadata"].get("symbol_name", "").lower()
@@ -296,8 +391,8 @@ def codewalk_explain_function(function_name: str) -> str:
 
     # Blast radius (uses cached graph)
     file_path = to_show[0]["metadata"].get("file_path", "")
-    if file_path and _deps:
-        radius = get_blast_radius(file_path, _deps["graph"])
+    if file_path and state._deps:
+        radius = get_blast_radius(file_path, state._deps["graph"])
         risk = radius["risk_level"].upper()
         affected = radius["affected_files"]
         direct_names = [f.split("/")[-1] for f in radius["direct"]]
@@ -316,31 +411,36 @@ def codewalk_explain_function(function_name: str) -> str:
 # ─── TOOL 5 [QUERY · user+AI]: codewalk_get_overview ─────────────────
 @mcp.tool()
 def codewalk_get_overview() -> str:
-    """Get a high-level overview of the analyzed codebase.
+    """Get the project overview from Codewalk's computed analysis.
 
-    Returns tech stack, module list, dependency diagram, and
-    file/module counts. Requires codewalk_analyze_codebase first.
-    For full results, complete the indexing workflow first
-    (codewalk_scan_files → codewalk_submit_filtered_files → codewalk_index_filtered_files).
+    Returns data you cannot get by reading files yourself:
+    - Tech stack detection results
+    - Module list with file counts
+    - Mermaid dependency diagram (auto-generated from dependency graph)
+    - Top 3 riskiest files by blast radius with break chains
+
+    You MUST call this tool for overview/summary requests instead of
+    reading files and summarizing yourself.
     """
-    if _modules_result is None or _repo_path is None or _deps is None:
+    state.ensure_initialized()
+    if state._modules_result is None or state._repo_path is None or state._deps is None:
         return "Error: No codebase indexed yet. Call codewalk_analyze_codebase first."
 
     _log("[codewalk_get_overview] Generating overview...")
-    tech = detect_tech_stack(_repo_path)
-    diagram = generate_module_diagram(_modules_result["module_graph"])
-    modules = list(_modules_result["modules"].keys())
+    tech = detect_tech_stack(state._repo_path)
+    diagram = generate_module_diagram(state._modules_result["module_graph"])
+    modules = list(state._modules_result["modules"].keys())
 
-    blast_map = calculate_full_blast_map(_deps["graph"])
-    top3 = blast_map["blast_map"][:3]
+    blast_map = calculate_full_blast_map(state._deps["graph"])
+    top10 = blast_map["blast_map"][:10]
 
     risky_lines = []
-    for item in top3:
+    for item in top10:
         file_path = item["file"]
         name = file_path.split("/")[-1]
         risk = item["risk_level"].upper()
         affected = item["affected_files"]
-        radius = get_blast_radius(file_path, _deps["graph"])
+        radius = get_blast_radius(file_path, state._deps["graph"])
         direct = [f.split("/")[-1] for f in radius["direct"]]
         risky_lines.append(
             f"  [{risk}] {name} — {affected} affected | breaks: {', '.join(direct)}"
@@ -348,12 +448,12 @@ def codewalk_get_overview() -> str:
 
     risky_section = "\n".join(risky_lines) if risky_lines else "  No high-risk files"
 
+    # Generate rich overview via LLM (same as API endpoint)
+    overview_text = generate_overview(tech, state._modules_result, diagram)
+
     return (
-        f"## Project Overview\n"
-        f"**Tech stack:** {', '.join(tech) if tech else 'Not detected'}\n"
-        f"**Files:** {_modules_result['stats']['total_files']}\n"
-        f"**Modules ({len(modules)}):** {', '.join(modules)}\n\n"
-        f"### Dependency Diagram\n```mermaid\n{diagram}\n```\n\n"
+        f"{overview_text}\n\n"
+        f"---\n\n"
         f"### Riskiest Files (blast radius)\n{risky_section}"
     )
 
@@ -369,16 +469,17 @@ def codewalk_get_blast_radius_map(target: str = "") -> str:
         target: A module name (e.g. "analysis"), a file name (e.g. "scanner.py"),
                 or empty for the top 15 riskiest files across the whole repo.
     """
-    if _modules_result is None or _repo_path is None or _deps is None:
+    state.ensure_initialized()
+    if state._modules_result is None or state._repo_path is None or state._deps is None:
         return "Error: No codebase indexed yet. Call codewalk_analyze_codebase first."
 
     _log(f"[codewalk_get_blast_radius_map] Target: {target or 'top 15'}")
-    graph = _deps["graph"]
+    graph = state._deps["graph"]
 
     # Determine which files to analyze based on target
     if target:
         # Try module match first
-        modules = _modules_result.get("modules", {})
+        modules = state._modules_result.get("modules", {})
         actual_module = None
         for name in modules:
             if name.lower() == target.lower():
@@ -425,15 +526,16 @@ def codewalk_get_blast_radius_map(target: str = "") -> str:
     for file_path, radius in results:
         risk = radius["risk_level"].upper()
         affected = radius["affected_files"]
+        short_path = "/".join(file_path.split("/")[-2:])
         if affected > 0:
             direct = [f.split("/")[-1] for f in radius["direct"]]
             transitive = [f.split("/")[-1] for f in radius["transitive"]]
             breaks = f"breaks: {', '.join(direct)}"
             if transitive:
                 breaks += f" → then: {', '.join(transitive)}"
-            lines.append(f"  [{risk}] {file_path} — {affected} affected | {breaks}")
+            lines.append(f"  [{risk}] {short_path} — {affected} affected | {breaks}")
         else:
-            lines.append(f"  [SAFE] {file_path} — no dependents")
+            lines.append(f"  [SAFE] {short_path} — no dependents")
 
     header = (
         f"## Blast Radius — {scope}\n"
@@ -456,19 +558,20 @@ def codewalk_get_reading_order(module_name: str = "") -> str:
         module_name: Optional. Scope to a specific module, e.g. "analysis".
                      If empty, returns order for the entire repo.
     """
-    if _modules_result is None or _files is None or _deps is None:
+    state.ensure_initialized()
+    if state._modules_result is None or state._files is None or state._deps is None:
         return "Error: No codebase indexed yet."
 
     _log(f"[codewalk_get_reading_order] module={module_name or 'all'}")
-    order = generate_reading_order_raw(_files, _deps)
-    graph = _deps["graph"]
+    order = generate_reading_order_raw(state._files, state._deps)
+    graph = state._deps["graph"]
 
     all_items = order["order"]
 
     # Filter by module if specified
     scope = "entire repo"
     if module_name:
-        modules = _modules_result.get("modules", {})
+        modules = state._modules_result.get("modules", {})
         actual_name = None
         for name in modules:
             if name.lower() == module_name.lower():
@@ -509,17 +612,17 @@ def codewalk_get_execution_flow(module_name: str = "") -> str:
         module_name: Optional. Show file-level flow inside this module.
                      If empty, shows module-level flow for the whole repo.
     """
-    if _modules_result is None or _repo_path is None or _deps is None:
+    state.ensure_initialized()
+    if state._modules_result is None or state._repo_path is None or state._deps is None:
         return "Error: No codebase indexed yet."
 
     _log(f"[codewalk_get_execution_flow] module={module_name or 'repo-level'}")
 
-    module_graph = _modules_result.get("module_graph", {})
-    modules = _modules_result.get("modules", {})
+    module_graph = state._modules_result.get("module_graph", {})
+    modules = state._modules_result.get("modules", {})
 
     if not module_name:
-        # Module-to-module flow
-        # Find entry modules (nothing depends on them)
+        # Module-to-module flow — structured data for Copilot to narrate
         depended_on = set()
         for deps in module_graph.values():
             depended_on.update(deps)
@@ -552,12 +655,11 @@ def codewalk_get_execution_flow(module_name: str = "") -> str:
             available = ", ".join(sorted(modules.keys()))
             return f"Module '{module_name}' not found. Available: {available}"
 
-        graph = _deps["graph"]
+        graph = state._deps["graph"]
         internal_files = set(graph.keys())
         module_file_set = set(modules[actual_name]["files"])
         target_files = sorted(f for f in graph.keys() if f in module_file_set)
 
-        # Find entry points within this module
         imported_in_module = set()
         for fp in target_files:
             for dep in graph.get(fp, []):
@@ -685,7 +787,7 @@ def codewalk_submit_filtered_files(paths: list[str]) -> str:
 
     Args:
         paths: File/directory paths from the current batch to index,
-               e.g. ["lib/services/auth.dart", "models/"]
+               e.g. ["src/services/auth.py", "models/"]
     """
     global _selected_file_paths
     _selected_file_paths.extend(paths)
@@ -707,40 +809,67 @@ def codewalk_index_filtered_files() -> str:
     ⏩ NEXT STEP: codewalk_get_overview (then any query tool)
     ⏪ PREVIOUS STEP: codewalk_submit_filtered_files (last batch)
     """
-    global _store, _selected_file_paths
+    global _selected_file_paths
 
     repo_path = settings.repo_path
-    _log(f"[codewalk_index_filtered_files] Starting indexing of {len(_selected_file_paths)} selected paths")
-    result = index_from_paths_parallel(_selected_file_paths, repo_path)
-
-    _store = VectorStore()
-    _store.create_collection("codebase")
-
-    # Rebuild analysis cache (scan + deps + modules)
-    _rebuild_analysis_cache()
-
-    modules = list(_modules_result["modules"].keys())
     selected_count = len(_selected_file_paths)
-    _selected_file_paths = []  # reset for next run
+    _log(f"[codewalk_index_filtered_files] Starting indexing of {selected_count} selected paths")
 
-    _log(f"[codewalk_index_filtered_files] Done: {result['files_scanned']} files, {result['chunks_embedded']} chunks embedded")
+    # Open (or create) the persistent collection WITHOUT wiping it first
+    working_store = VectorStore(persist_dir=state.chroma_path())
+    working_store.create_collection(state.get_collection_name())
+    existing_count = working_store.collection.count()
 
-    return (
-        f"Indexed {result['files_scanned']} files (from {selected_count} selected paths).\n"
-        f"Chunks created: {result['chunks_created']}\n"
-        f"Chunks embedded: {result['chunks_embedded']}\n"
-        f"Time: {result.get('total_time', 'N/A')}\n"
-        f"Steps: {' | '.join(result.get('steps', []))}\n"
-        f"Modules found: {', '.join(modules)}\n\n"
-        f"Ready! You can now use these tools:\n"
-        f"  - codewalk_get_overview (if LLM didn't call — run manually for project summary)\n"
-        f"  - codewalk_search_codebase (if LLM didn't call — search code by concept)\n"
-        f"  - codewalk_get_module_info (if LLM didn't call — inspect a specific module)\n"
-        f"  - codewalk_explain_function (if LLM didn't call — explain any function/class)\n"
-        f"  - codewalk_get_blast_radius_map (if LLM didn't call — check change risk)\n"
-        f"  - codewalk_get_reading_order (if LLM didn't call — optimal file reading order)\n"
-        f"  - codewalk_get_execution_flow (if LLM didn't call — dependency flow diagram)"
-    )
+    if existing_count > 0:
+        # ── Incremental path: existing index found ──────────────────────
+        # Skip files whose content hash hasn't changed; only re-embed changed/new ones.
+        _log(f"[codewalk_index_filtered_files] Existing index ({existing_count} chunks) — using incremental reindex")
+        result = incremental_reindex(_selected_file_paths, repo_path, state.get_collection_name(), persist_dir=state.chroma_path())
+
+        state._store = working_store
+        state.rebuild_analysis_cache()
+        modules = list(state._modules_result["modules"].keys())
+        _selected_file_paths = []
+
+        return (
+            f"Incremental index update complete (existing index had {existing_count} chunks).\n"
+            f"Selected paths: {selected_count}\n"
+            f"Files on disk: {result['files_on_disk']}\n"
+            f"Skipped (unchanged): {result['files_skipped']}\n"
+            f"Re-indexed (changed/new): {result['files_reindexed']}\n"
+            f"Deleted (removed from disk): {result['files_deleted']}\n"
+            f"Chunks embedded: {result['chunks_embedded']}\n"
+            f"Time: {result['total_time']}\n"
+            f"Modules found: {', '.join(modules)}\n\n"
+            f"Ready! You can now use: codewalk_get_overview, codewalk_search_codebase, etc."
+        )
+    else:
+        # ── Full-index path: no existing data ──────────────────────────
+        result = index_from_paths_parallel(_selected_file_paths, repo_path, state.get_collection_name(), persist_dir=state.chroma_path())
+
+        state._store = working_store
+        state.rebuild_analysis_cache()
+        modules = list(state._modules_result["modules"].keys())
+        _selected_file_paths = []
+
+        _log(f"[codewalk_index_filtered_files] Done: {result['files_scanned']} files, {result['chunks_embedded']} chunks embedded")
+
+        return (
+            f"Indexed {result['files_scanned']} files (from {selected_count} selected paths).\n"
+            f"Chunks created: {result['chunks_created']}\n"
+            f"Chunks embedded: {result['chunks_embedded']}\n"
+            f"Time: {result.get('total_time', 'N/A')}\n"
+            f"Steps: {' | '.join(result.get('steps', []))}\n"
+            f"Modules found: {', '.join(modules)}\n\n"
+            f"Ready! You can now use these tools:\n"
+            f"  - codewalk_get_overview (if LLM didn't call — run manually for project summary)\n"
+            f"  - codewalk_search_codebase (if LLM didn't call — search code by concept)\n"
+            f"  - codewalk_get_module_info (if LLM didn't call — inspect a specific module)\n"
+            f"  - codewalk_explain_function (if LLM didn't call — explain any function/class)\n"
+            f"  - codewalk_get_blast_radius_map (if LLM didn't call — check change risk)\n"
+            f"  - codewalk_get_reading_order (if LLM didn't call — optimal file reading order)\n"
+            f"  - codewalk_get_execution_flow (if LLM didn't call — dependency flow diagram)"
+        )
 
 # ─── TOOL 12 [MAINT · user+AI]: codewalk_incremental_reindex ────────
 @mcp.tool()
@@ -761,21 +890,27 @@ def codewalk_incremental_reindex() -> str:
     ⏪ PREVIOUS STEP: codewalk_index_filtered_files (first-time setup)
     ⏩ NEXT STEP: any query tool (search, explain, blast radius, etc.)
     """
-    if not _store or not _store.collection:
-        return "❌ No index exists. Run the full setup workflow first (scan → filter → index)."
-    
     repo_path = settings.repo_path
     if not repo_path:
         return "❌ No repo path set. Run codewalk_analyze_codebase first."
-    
-    # Use previously selected paths if available, else get all indexed files
-    paths = list(_selected_file_paths) if _selected_file_paths else list(_store.get_all_indexed_files())
+
+    # Initialise _store from disk if codewalk_analyze_codebase hasn't been called this session
+
+    if not state._store or not state._store.collection:
+        state._store = VectorStore(persist_dir=state.chroma_path())
+        state._store.create_collection(state.get_collection_name())
+
+    if state._store.collection.count() == 0:
+        return "❌ No index exists. Run the full setup workflow first (scan → filter → index)."
+
+    # Use previously selected paths if available, else fall back to all indexed files
+    paths = list(_selected_file_paths) if _selected_file_paths else list(state._store.get_all_indexed_files())
     if not paths:
         return "❌ No files to reindex. Run the full setup workflow first."
     
-    result = incremental_reindex(paths, repo_path)
+    result = incremental_reindex(paths, repo_path, state.get_collection_name(), persist_dir=state.chroma_path())
 
-    _rebuild_analysis_cache()
+    state.rebuild_analysis_cache()
 
     return (
         f"Incremental reindex complete ({result['total_time']})\n\n"
@@ -801,17 +936,18 @@ def codewalk_refresh_analysis() -> str:
     and module structure. Does NOT re-index or re-embed — embeddings
     stay as they are. For re-embedding, use the full setup workflow.
     """
-    if _repo_path is None:
+    state.ensure_initialized()
+    if state._repo_path is None:
         return "Error: No codebase analyzed yet. Call codewalk_analyze_codebase first."
 
     _log("[codewalk_refresh_analysis] Refreshing cached analysis...")
-    _rebuild_analysis_cache()
+    state.rebuild_analysis_cache()
 
-    modules = list(_modules_result["modules"].keys())
+    modules = list(state._modules_result["modules"].keys())
     return (
         f"Analysis refreshed (no re-embedding).\n"
-        f"Files: {len(_files)}\n"
-        f"Dependency graph: {len(_deps['graph'])} files\n"
+        f"Files: {len(state._files)}\n"
+        f"Dependency graph: {len(state._deps['graph'])} files\n"
         f"Modules: {', '.join(modules)}"
     )
 
@@ -822,21 +958,20 @@ def codewalk_review_diff(
     staged: bool = False,
     target_branch: str | None = None,
 ) -> str:
-    """Review current git diff for bugs, security issues, and style problems.
+    """Run Codewalk's multi-stage code review pipeline on the current git diff.
 
-    Runs a multi-stage review pipeline:
-      1. Test coverage check (no LLM) — flags source files missing test updates
-      2. Blast radius analysis — warns about high-risk files with many dependents
-      3. Codebase pattern matching — finds similar code for consistency checks
-      4. Team guidelines RAG — injects coding standards into the prompt
-      5. LLM deep review — scans for security vulnerabilities (OWASP),
-         bugs, logic errors, and style issues across ALL languages
+    This tool runs 5 automated checks that you CANNOT replicate yourself:
+      1. Test coverage check — flags source files missing test updates
+      2. Blast radius analysis — warns about high-risk files (from dependency graph)
+      3. Codebase pattern matching — finds similar code via ChromaDB embeddings
+      4. Team guidelines RAG — injects coding standards from indexed guidelines
+      5. LLM deep review — OWASP security, bugs, logic errors, style
 
-    Output is a formatted markdown report with issues sorted by severity:
+    You MUST call this tool for code review requests instead of reading
+    the diff and reviewing it yourself.
+
+    Output: markdown report with issues sorted by severity:
     🔴 CRITICAL → 🟡 WARNING → 🟢 SUGGESTION.
-
-    Works without indexing (skips blast radius + patterns), but produces
-    richer reviews when the codebase is indexed.
 
     Args:
         staged: If True, review only staged changes (--staged). Default: all unstaged.
@@ -846,8 +981,8 @@ def codewalk_review_diff(
         staged=staged,
         target_branch=target_branch,
         use_llm=True,
-        store=_store,    # cached vector store (if indexed)
-        deps=_deps, 
+        store=state._store,    # cached vector store (if indexed)
+        deps=state._deps, 
     )
 
     if not result.issues:
@@ -883,21 +1018,23 @@ def codewalk_review_diff(
 # ─── TOOL 15 [MAINT · user+AI]: codewalk_review_file ────────────
 @mcp.tool()
 def codewalk_review_file(file_path: str) -> str:
-    """Review a single file against codebase conventions and patterns.
+    """Review a file against codebase patterns found via ChromaDB embeddings.
 
-    Uses vector search to find how similar code is written elsewhere in the
-    project, then asks the LLM to compare and suggest improvements for
-    consistency, error handling, naming, and potential bugs.
+    This tool uses Codewalk's vector index to find how similar code is written
+    elsewhere in the project, then compares for consistency. You MUST call this
+    tool instead of reading the file and reviewing it yourself — it uses
+    embedding-based pattern matching you cannot replicate.
+
+    Checks: consistency with codebase conventions, error handling patterns,
+    naming conventions, and potential bugs.
 
     Requires: codebase must be indexed first via codewalk_index_filtered_files.
 
     Args:
         file_path: Path to the file to review (relative to repo root).
-
-    Returns:
-        LLM-generated review comparing the file against codebase patterns.
     """
-    if not _store:
+    state.ensure_initialized()
+    if not state._store:
         return "❌ Codebase not indexed. Run codewalk_index_filtered_files first."
     
     from src.codewalk.rag.chain import format_context
@@ -909,7 +1046,7 @@ def codewalk_review_file(file_path: str) -> str:
     except FileNotFoundError:
         return f"❌ File '{file_path}' not found."
     
-    results = _store.search(f"code in {file_path}", n_results=5)
+    results = state._store.search(f"code in {file_path}", n_results=5)
     patterns = format_context(results) if results else "No indexed context."
 
     llm = get_llm(temperature=0)
@@ -973,8 +1110,155 @@ def codewalk_load_guidelines(docs_path: str | None = None) -> str:
     )
 
 
+# ══════════════════════════════════════════════════════════════════════
+#  VOICE TOOL — natural language interface to all Codewalk tools
+# ══════════════════════════════════════════════════════════════════════
+
+# ─── TOOL 17 (COMMENTED OUT) codewalk_start_voice ────────────────────
+# Launches voice companion in a separate Terminal.app window (macOS).
+# Superseded by codewalk_voice_ask which runs inside Copilot directly.
+# Kept for reference / potential CLI use outside MCP.
+#
+# @mcp.tool()
+# def codewalk_start_voice(backend: str = "direct") -> str:
+#     """Launch the Codewalk Voice Companion in a new Terminal window.
+#
+#     Opens Terminal.app on macOS and runs the voice companion — press Enter
+#     to speak, Codewalk listens via mic, routes via Ollama, speaks the answer.
+#
+#     Use this when user says "start voice", "open voice companion", or
+#     "I want to talk to Codewalk".
+#
+#     Requires: Ollama running with qwen2.5:1.5b pulled.
+#
+#     Args:
+#         backend: "direct" (default, fastest) or "mcp" (MCP stdio protocol).
+#     """
+#     import subprocess
+#     import sys
+#     import os
+#     import shlex
+#
+#     python = sys.executable
+#     repo_path = settings.repo_path
+#     package_root = __name__.rsplit(".", 2)[0]
+#     companion_module = f"{package_root}.voice.companion"
+#     server_cwd = os.getcwd()
+#
+#     cmd = (
+#         f"cd {shlex.quote(server_cwd)} && "
+#         f"REPO_PATH={shlex.quote(repo_path)} "
+#         f"{shlex.quote(python)} -m {companion_module} --backend {backend}"
+#     )
+#
+#     cmd_escaped = cmd.replace('\\', '\\\\').replace('"', '\\"')
+#     script = f'tell application "Terminal"\n    activate\n    do script "{cmd_escaped}"\nend tell'
+#
+#     try:
+#         subprocess.run(["osascript", "-e", script], check=True)
+#         return f"✅ Voice Companion launched in Terminal.\n\n  Repo: {repo_path}\n  Backend: {backend}"
+#     except FileNotFoundError:
+#         return f"❌ osascript not found — this tool only works on macOS.\n\nRun manually:\n```\n{cmd}\n```"
+#     except subprocess.CalledProcessError as e:
+#         return f"❌ Failed to launch Terminal: {e}\n\nRun manually:\n```\n{cmd}\n```"
 
 
+# ─── Shared tool lookup map (used by voice_ask, backends.py) ──
+_TOOL_MAP = {
+    "codewalk_analyze_codebase": codewalk_analyze_codebase,
+    "codewalk_search_codebase": codewalk_search_codebase,
+    "codewalk_get_module_info": codewalk_get_module_info,
+    "codewalk_explain_function": codewalk_explain_function,
+    "codewalk_get_overview": codewalk_get_overview,
+    "codewalk_get_blast_radius_map": codewalk_get_blast_radius_map,
+    "codewalk_get_reading_order": codewalk_get_reading_order,
+    "codewalk_get_execution_flow": codewalk_get_execution_flow,
+    "codewalk_scan_files": codewalk_scan_files,
+    "codewalk_submit_filtered_files": codewalk_submit_filtered_files,
+    "codewalk_index_filtered_files": codewalk_index_filtered_files,
+    "codewalk_incremental_reindex": codewalk_incremental_reindex,
+    "codewalk_refresh_analysis": codewalk_refresh_analysis,
+    "codewalk_review_diff": codewalk_review_diff,
+    "codewalk_review_file": codewalk_review_file,
+    "codewalk_load_guidelines": codewalk_load_guidelines,
+}
+
+
+# ─── TOOL 17 [VOICE · user]: codewalk_voice_ask ──────────────────────
+@mcp.tool()
+def codewalk_voice_ask() -> str:
+    """Record from mic and transcribe — then YOU (Copilot) pick the right tool.
+
+    Records until silence (max 30s), transcribes via local Whisper.
+    Returns the transcript so Copilot can route to the correct codewalk tool.
+
+    AFTER calling this tool:
+    1. Read the transcript in the result
+    2. Call the appropriate codewalk tool based on what the user said
+    3. Call codewalk_speak(text) with a concise spoken summary of the answer
+
+    Use when user says "voice ask", "listen to me", "voice question",
+    or "let me speak".
+
+    Requires: Microphone access
+    """
+
+    # ── 0. Stop any playing audio + beep to signal "start talking" ──
+    stop_speaking()
+    subprocess.run(["afplay", "/System/Library/Sounds/Tink.aiff"], check=False)
+
+    # ── 1. Record from mic ──────────────────────────────────────────
+    _log("[codewalk_voice_ask] Recording from mic...")
+    try:
+        audio = record_audio()
+    except Exception as e:
+        return f"❌ Mic recording failed: {e}\n\nCheck microphone permissions in System Settings → Privacy → Microphone."
+
+    if len(audio) == 0:
+        return "❌ No audio captured. Make sure your microphone is working."
+
+    # ── 2. Transcribe (faster-whisper, local) ───────────────────────
+    _log("[codewalk_voice_ask] Transcribing...")
+    transcript = transcribe(audio)
+    if not transcript.strip():
+        return "❌ Couldn't understand the audio. Try speaking louder or closer to the mic."
+
+    _log(f'[codewalk_voice_ask] Transcript: "{transcript}"')
+
+    return (
+        f'🎤 **Transcript:** "{transcript}"\n\n'
+        f"Route and respond:\n"
+        f"1. Pick the correct tool using these rules:\n"
+        f"   - User asks about a module or feature by name → `codewalk_get_module_info(name)`\n"
+        f"   - User asks what a specific function/class does → `codewalk_explain_function(name)`\n"
+        f"   - User asks how something works (concept/flow question) → `codewalk_search_codebase(query)`\n"
+        f"   - User asks for an overview or summary → `codewalk_get_overview()`\n"
+        f"   - User asks about risk or what breaks → `codewalk_get_blast_radius_map(target)`\n"
+        f"   - User asks about dependencies or execution flow → `codewalk_get_execution_flow()`\n"
+        f"   - User asks where to start reading → `codewalk_get_reading_order()`\n"
+        f"   - DEFAULT: if the query names something that could be a module, prefer `codewalk_get_module_info`\n"
+        f"2. Show the FULL tool result as text in the chat — same detail as a typed question.\n"
+        f"3. Then call `codewalk_speak()` with a 2-4 sentence plain-English spoken summary."
+    )
+
+
+# ─── TOOL 18 [VOICE · user]: codewalk_speak ──────────────────────────
+@mcp.tool()
+def codewalk_speak(text: str) -> str:
+    """Speak text aloud via TTS (edge-tts, en-US-AriaNeural).
+
+    Call this after getting a tool result to speak a concise summary to the user.
+    Keep text to 2-4 sentences — conversational, no markdown, no file paths.
+
+    Args:
+        text: Plain English text to speak. No markdown, bullets, or code.
+    """
+    _log(f"[codewalk_speak] Speaking: {text[:80]}...")
+    try:
+        speak(text)
+        return f"🔊 Spoken: {text}"
+    except Exception as e:
+        return f"❌ TTS failed: {e}"
 
 
 if __name__ == "__main__":

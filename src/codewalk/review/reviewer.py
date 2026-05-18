@@ -80,14 +80,30 @@ def review_diff(
             for issue in pre_check_issues
         ) or "None found."
 
+        # Build context sections — only include non-empty ones
+        context_parts = []
+        if blast_context:
+            context_parts.append(blast_context)
+        if pattern_context:
+            context_parts.append(pattern_context)
+        if guidelines_context:
+            context_parts.append(guidelines_context)
+        context_sections = "\n\n".join(context_parts) if context_parts else ""
+
         system = REVIEW_SYSTEM_PROMPT.format(
-            blast_radius_context=blast_context,
-            codebase_patterns=pattern_context,
-            team_guidelines=guidelines_context,
+            context_sections=context_sections,
         )
 
+        # TODO: Re-enable truncation after testing large diffs
+        # diff_capped = diff_text[:15000]
+        # truncation_notice = (
+        #     "⚠️ NOTE: This diff was truncated. Review only what is shown above."
+        #     if len(diff_text) > 15000 else ""
+        # )
+
         user = REVIEW_USER_PROMPT.format(
-            diff_content=diff_text[:15000],  # cap to avoid token limits
+            diff_content=diff_text,
+            truncation_notice="",
             pre_checks=pre_check_str,
         )
 
@@ -124,6 +140,7 @@ def review_diff(
                     title=issue.get("title", ""),
                     explanation=issue.get("explanation", ""),
                     suggestion=issue.get("suggestion"),
+                    code_snippet=issue.get("code_snippet"),
                 ))
         except (json.JSONDecodeError, KeyError, IndexError):
             llm_summary = response.content  # fallback to raw text

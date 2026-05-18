@@ -106,7 +106,8 @@ def chunk_and_embed_parallel(files: list[dict]) -> tuple[list[dict], int]:
     return all_embedded, chunk_count[0]
 
 def full_index(repo_path: str = "", collection_name: str = "codebase",
-               use_llm_filter: bool = True) -> dict:
+               use_llm_filter: bool = True,
+               persist_dir: str = "./data/chroma") -> dict:
     """Full pipeline: scan → chunk → embed → store. Nukes old data first.
 
     Args:
@@ -137,7 +138,7 @@ def full_index(repo_path: str = "", collection_name: str = "codebase",
     _log(f"[full_index] Embedded {len(embedded)} chunks")
 
     # Step 5: Store in ChromaDB (nuke old data first)
-    store = VectorStore()
+    store = VectorStore(persist_dir=persist_dir)
     store.create_collection(collection_name)
     store.clear_collection()
     store.add_chunks(embedded)
@@ -152,7 +153,8 @@ def full_index(repo_path: str = "", collection_name: str = "codebase",
     }
 
 def full_index_parallel(repo_path: str = "", collection_name: str = "codebase",
-                        use_llm_filter: bool = True) -> dict:
+                        use_llm_filter: bool = True,
+                        persist_dir: str = "./data/chroma") -> dict:
     """Full pipeline with parallel chunking + embedding.
 
     Same as full_index() but overlaps chunking (CPU) with embedding (GPU)
@@ -173,7 +175,7 @@ def full_index_parallel(repo_path: str = "", collection_name: str = "codebase",
     all_embedded, total_chunks = chunk_and_embed_parallel(files)
 
     _log(f"[parallel] Storing {len(all_embedded)} chunks in ChromaDB...")
-    store = VectorStore()
+    store = VectorStore(persist_dir=persist_dir)
     store.create_collection(collection_name)
     store.clear_collection()
     store.add_chunks(all_embedded)
@@ -190,7 +192,8 @@ def full_index_parallel(repo_path: str = "", collection_name: str = "codebase",
     }
 
 def index_from_paths_parallel(paths: list[str], repo_path: str = "",
-                              collection_name: str = "codebase") -> dict:
+                              collection_name: str = "codebase",
+                              persist_dir: str = "./data/chroma") -> dict:
     """Parallel version of index_from_paths.
 
     Same file-matching logic, but uses producer-consumer for chunk+embed.
@@ -226,7 +229,7 @@ def index_from_paths_parallel(paths: list[str], repo_path: str = "",
 
     # Step 4: Store
     t0 = time.time()
-    store = VectorStore()
+    store = VectorStore(persist_dir=persist_dir)
     store.create_collection(collection_name)
     store.add_chunks(all_embedded)
     store_time = time.time() - t0
@@ -250,7 +253,8 @@ def index_from_paths_parallel(paths: list[str], repo_path: str = "",
 
 
 def index_from_paths(paths: list[str], repo_path: str = "",
-                     collection_name: str = "codebase") -> dict:
+                     collection_name: str = "codebase",
+                     persist_dir: str = "./data/chroma") -> dict:
     """Index files matching the given paths or directories.
 
     Accepts both file paths and directory paths. A directory path
@@ -301,7 +305,7 @@ def index_from_paths(paths: list[str], repo_path: str = "",
     # Step 4: Store
     t0 = time.time()
     _log("[4/4] Storing in ChromaDB...")
-    store = VectorStore()
+    store = VectorStore(persist_dir=persist_dir)
     store.create_collection(collection_name)
     store.add_chunks(embedded)
     elapsed = time.time() - t0
@@ -321,14 +325,15 @@ def index_from_paths(paths: list[str], repo_path: str = "",
     }
 
 
-def reindex(repo_path: str = "", collection_name: str = "codebase") -> dict:
+def reindex(repo_path: str = "", collection_name: str = "codebase",
+            persist_dir: str = "./data/chroma") -> dict:
     """Smart re-index: only re-embed files that changed, add new, remove deleted.
 
     Thin wrapper around incremental_reindex() that processes ALL indexed files.
     """
     repo_path = repo_path or settings.repo_path
 
-    store = VectorStore()
+    store = VectorStore(persist_dir=persist_dir)
     store.create_collection(collection_name)
     indexed_files = list(store.get_all_indexed_files())
 
@@ -337,7 +342,7 @@ def reindex(repo_path: str = "", collection_name: str = "codebase") -> dict:
         all_files = scan_directory(repo_path)
         indexed_files = [f["file_path"] for f in all_files]
 
-    result = incremental_reindex(indexed_files, repo_path, collection_name)
+    result = incremental_reindex(indexed_files, repo_path, collection_name, persist_dir=persist_dir)
 
     # Map to legacy return format for /analyze callers
     return {
@@ -356,6 +361,7 @@ def incremental_reindex(
     paths: list[str],
     repo_path: str = "",
     collection_name: str = "codebase",
+    persist_dir: str = "./data/chroma",
 ) -> dict:
     """Incremental reindex — only re-embeds files whose content changed.
 
@@ -394,7 +400,7 @@ def incremental_reindex(
                 break
     
     # Step 2: Open existing collection (DON'T recreate — that wipes it)
-    store = VectorStore()
+    store = VectorStore(persist_dir=persist_dir)
     store.create_collection(collection_name)  # get_or_create — safe
 
     # Step 3: Get all indexed files + their hashes
