@@ -1,3 +1,26 @@
+"""
+=============================================================================
+ diff_parser.py - Git Diff Retrieval and Parsing
+=============================================================================
+
+WHAT THIS FILE DOES:
+    1. get_diff(): runs `git diff` and returns raw unified diff text
+    2. get_parsed_diff(): parses that raw text into structured DiffFile objects
+
+HOW IT WORKS:
+    Uses the `unidiff` library to parse unified diff format into objects.
+    Each file becomes a DiffFile with hunks, each hunk has typed lines.
+
+WHERE IT'S CALLED:
+    - reviewer.py -> prepare_review_context() calls both functions
+
+DEPENDENCIES:
+    - unidiff: third-party diff parser
+    - scanner.py: detect_language() for file type detection
+
+=============================================================================
+"""
+
 import subprocess
 from pathlib import Path
 
@@ -6,7 +29,13 @@ from src.codewalk.ingestion.scanner import detect_language
 
 
 def get_diff(staged: bool = False, target_branch: str | None = None, repo_path: str | None = None) -> str:
-    """Run git diff and return raw unified diff text."""
+    """Run git diff and return raw unified diff text.
+
+    Args:
+        staged: If True, diff staged changes (--staged)
+        target_branch: If set, diff against that branch (branch...HEAD)
+        repo_path: Working directory for git command
+    """
     cmd = ["git", "diff", "--unified=5"]
     if staged:
         cmd.append("--staged")
@@ -20,16 +49,20 @@ def get_diff(staged: bool = False, target_branch: str | None = None, repo_path: 
         timeout=60,
         cwd=repo_path,
     )
-
     return result.stdout
 
+
 def get_parsed_diff(diff_text: str) -> list[DiffFile]:
-    """Parse raw unified diff text into structured DiffFile objects."""
+    """Parse raw unified diff text into structured DiffFile objects.
+
+    Uses the `unidiff` library which handles all the @@ parsing.
+    Returns empty list if diff is empty.
+    """
     from unidiff import PatchSet
 
     if not diff_text.strip():
         return []
-    
+
     patch = PatchSet(diff_text)
     diff_files = []
 
@@ -38,6 +71,7 @@ def get_parsed_diff(diff_text: str) -> list[DiffFile]:
         for hunk in patched_file:
             lines = []
             for line in hunk:
+                # Classify each line
                 if line.is_added:
                     change_type = "added"
                     line_no = line.target_line_no
@@ -47,13 +81,13 @@ def get_parsed_diff(diff_text: str) -> list[DiffFile]:
                 else:
                     change_type = "context"
                     line_no = line.target_line_no
-                
+
                 lines.append(ChangedLine(
                     line_number=line_no or 0,
                     content=line.value,
                     change_type=change_type,
                 ))
-            
+
             hunks.append(DiffHunk(
                 start_line=hunk.target_start,
                 end_line=hunk.target_start + hunk.target_length,
@@ -71,8 +105,3 @@ def get_parsed_diff(diff_text: str) -> list[DiffFile]:
         ))
 
     return diff_files
-
-
-
-        
-                

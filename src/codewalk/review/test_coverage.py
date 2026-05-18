@@ -1,33 +1,45 @@
-from pathlib import Path
+"""
+=============================================================================
+ test_coverage.py - Test Coverage Checker
+=============================================================================
 
+WHAT THIS FILE DOES:
+    Checks if source files changed in a diff have corresponding test updates.
+    If you modify auth.py but don't touch test_auth.py, this flags it.
+
+    Supports 14+ languages: Python, JS, TS, Java, Kotlin, Go, Swift,
+    Dart, Ruby, Rust, C#, PHP.
+
+HOW IT WORKS:
+    1. Classify each changed file as "source" or "test" (by naming convention)
+    2. For each source file, guess where its test file should live
+    3. If no matching test file was updated in the diff, emit a WARNING
+
+WHERE IT'S CALLED:
+    - reviewer.py -> prepare_review_context() runs this as a pre-check
+
+=============================================================================
+"""
+
+from pathlib import Path
 from src.codewalk.review.models import Issue, Severity, Category
 
 
 class TestCoverage:
     """Check if changed source files have corresponding test updates."""
 
-    # Files to skip — config, init files, generated code
+    # Files to skip - config, init files, generated code
     SKIP_PATTERNS = {
-        # Python
         "__init__", "__main__", "conftest", "setup", "manage",
-        # JS / TS
         "index", "vite.config", "jest.config", "eslint.config",
         "next.config", "tailwind.config", "webpack.config", "tsconfig",
-        # Java / Kotlin
         "Application", "package-info",
-        # Go
         "doc",
-        # Swift
         "App", "AppDelegate", "SceneDelegate",
-        # Dart
         "generated_plugin_registrant",
-        # Ruby
         "Rakefile", "application",
-        # Rust
         "lib", "build",
-        # C#
         "Program", "Startup", "AssemblyInfo",
-        # Generic (cross-language)
         "main", "config", "settings", "constants", "types", "interfaces",
     }
 
@@ -48,7 +60,6 @@ class TestCoverage:
             if not expected_tests:
                 continue
 
-            # Check if ANY of the expected test files were updated
             if not any(test in changed_tests for test in expected_tests):
                 primary = expected_tests[0]
                 issues.append(Issue(
@@ -64,13 +75,11 @@ class TestCoverage:
                 ))
 
         return issues
-    
+
     def _is_test_file(self, file_path: str) -> bool:
-        """Detect if a file is a test file based on naming conventions."""
+        """Detect test file by naming convention (cross-language)."""
         lower = file_path.lower()
         name = Path(file_path).stem.lower()
-
-        # Common patterns across all languages
         return (
             "test" in name
             or "spec" in name
@@ -81,112 +90,77 @@ class TestCoverage:
             or lower.startswith("test/")
             or lower.startswith("tests/")
         )
-    
+
     def _guess_test_file(self, source_file: str) -> list[str]:
-        """Return possible test file paths for a source file. Empty = don't flag."""
+        """Return possible test file paths for a source file.
+
+        Returns empty list for files that shouldn't have tests (config, etc).
+        Each language has its own convention for test file location/naming.
+        """
         path = Path(source_file)
         stem = path.stem
         suffix = path.suffix.lower()
 
-        # Skip init/config/generated files
         if stem.lower() in self.SKIP_PATTERNS:
             return []
-        
-        # ── Python (.py) ──
-        if suffix == ".py":
-            return [
-                f"tests/test_{path.name}",
-                f"test/test_{path.name}",
-                f"tests/{stem}_test.py",
-            ]
 
-        # ── JavaScript (.js, .jsx) ──
+        # Python: tests/test_foo.py
+        if suffix == ".py":
+            return [f"tests/test_{path.name}", f"test/test_{path.name}", f"tests/{stem}_test.py"]
+
+        # JavaScript: foo.test.js, __tests__/foo.js
         if suffix in (".js", ".jsx"):
             base = path.name
-            return [
-                f"{stem}.test{suffix}",
-                f"{stem}.spec{suffix}",
-                f"__tests__/{base}",
-                f"__tests__/{stem}.test{suffix}",
-            ]
+            return [f"{stem}.test{suffix}", f"{stem}.spec{suffix}", f"__tests__/{base}", f"__tests__/{stem}.test{suffix}"]
 
-        # ── TypeScript (.ts, .tsx) ──
+        # TypeScript: foo.test.ts, __tests__/foo.test.ts
         if suffix in (".ts", ".tsx"):
-            return [
-                f"{stem}.test{suffix}",
-                f"{stem}.spec{suffix}",
-                f"__tests__/{stem}.test{suffix}",
-                f"__tests__/{stem}.spec{suffix}",
-            ]
+            return [f"{stem}.test{suffix}", f"{stem}.spec{suffix}", f"__tests__/{stem}.test{suffix}", f"__tests__/{stem}.spec{suffix}"]
 
-        # ── Java (.java) ──
+        # Java: src/test/java/.../FooTest.java
         if suffix == ".java":
-            # Maven/Gradle convention: src/main/java/... → src/test/java/...Test.java
             test_name = f"{stem}Test.java"
             candidates = [test_name]
             if "src/main/java/" in source_file:
-                test_path = source_file.replace("src/main/java/", "src/test/java/")
-                test_path = test_path.replace(path.name, test_name)
+                test_path = source_file.replace("src/main/java/", "src/test/java/").replace(path.name, test_name)
                 candidates.insert(0, test_path)
             return candidates
 
-        # ── Kotlin (.kt) ──
+        # Kotlin: src/test/kotlin/.../FooTest.kt
         if suffix == ".kt":
             test_name = f"{stem}Test.kt"
             candidates = [test_name]
             if "src/main/kotlin/" in source_file:
-                test_path = source_file.replace("src/main/kotlin/", "src/test/kotlin/")
-                test_path = test_path.replace(path.name, test_name)
+                test_path = source_file.replace("src/main/kotlin/", "src/test/kotlin/").replace(path.name, test_name)
                 candidates.insert(0, test_path)
             return candidates
 
-        # ── Go (.go) ──
+        # Go: foo_test.go (same directory)
         if suffix == ".go":
-            # Go tests live in the SAME directory: foo.go → foo_test.go
             return [str(path.parent / f"{stem}_test.go")]
 
-        # ── Swift (.swift) ──
+        # Swift: Tests/FooTests.swift
         if suffix == ".swift":
-            return [
-                f"{stem}Tests.swift",
-                f"{stem}Test.swift",
-                f"Tests/{stem}Tests.swift",
-            ]
+            return [f"{stem}Tests.swift", f"{stem}Test.swift", f"Tests/{stem}Tests.swift"]
 
-        # ── Dart (.dart) ──
+        # Dart: test/foo_test.dart
         if suffix == ".dart":
-            return [
-                f"test/{stem}_test.dart",
-                f"test/{path.name}",
-            ]
+            return [f"test/{stem}_test.dart", f"test/{path.name}"]
 
-        # ── Ruby (.rb) ──
+        # Ruby: spec/foo_spec.rb
         if suffix == ".rb":
-            return [
-                f"spec/{stem}_spec.rb",
-                f"test/test_{path.name}",
-                f"test/{stem}_test.rb",
-            ]
+            return [f"spec/{stem}_spec.rb", f"test/test_{path.name}", f"test/{stem}_test.rb"]
 
-        # ── Rust (.rs) ──
-        # Rust often has inline #[cfg(test)] — can't check that from filenames.
-        # Only check for separate test files in tests/ dir.
+        # Rust: tests/foo.rs
         if suffix == ".rs":
             return [f"tests/{path.name}"]
 
-        # ── C# (.cs) ──
+        # C#: FooTests.cs
         if suffix == ".cs":
-            return [
-                f"{stem}Tests.cs",
-                f"{stem}Test.cs",
-            ]
+            return [f"{stem}Tests.cs", f"{stem}Test.cs"]
 
-        # ── PHP (.php) ──
+        # PHP: tests/FooTest.php
         if suffix == ".php":
-            return [
-                f"tests/{stem}Test.php",
-                f"tests/Unit/{stem}Test.php",
-            ]
+            return [f"tests/{stem}Test.php", f"tests/Unit/{stem}Test.php"]
 
         return []
-

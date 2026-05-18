@@ -1,8 +1,45 @@
+"""
+=============================================================================
+ reviewer.py - The Main Code Review Engine
+=============================================================================
+
+WHAT THIS FILE DOES:
+    Orchestrates the entire code review pipeline:
+    1. Get git diff (staged or branch comparison)
+    2. Parse diff into structured objects
+    3. Run pre-checks (test coverage)
+    4. Check blast radius of changed files
+    5. Load team guidelines (if configured)
+    6. Send to LLM for deep review
+    7. Merge all issues into ReviewResult
+
+HOW IT HANDLES LARGE DIFFS:
+    - Small diffs (< 200 added lines): single LLM call with all context
+    - Large diffs (>= 200 added lines): per-file parallel LLM calls
+      using ThreadPoolExecutor (max 4 workers)
+
+WHERE IT'S CALLED:
+    - mcp/server.py -> codewalk_review_code() MCP tool
+    - api/main.py -> /review endpoint
+
+DEPENDENCIES:
+    - diff_parser.py: get_diff(), get_parsed_diff()
+    - models.py: all dataclasses
+    - test_coverage.py: pre-check for missing tests
+    - guidelines_loader.py: team guidelines
+    - review_prompts.py: LLM prompts
+    - blast_radius.py: risk assessment
+    - config.py: get_llm()
+
+=============================================================================
+"""
+
 import json
 import asyncio
 from pathlib import Path
 from dataclasses import dataclass, field
 from concurrent.futures import ThreadPoolExecutor
+
 from src.codewalk.config import get_llm
 from src.codewalk.review.diff_parser import get_diff, get_parsed_diff
 from src.codewalk.review.models import ReviewResult, Issue, Severity, Category, DiffFile
@@ -10,38 +47,47 @@ from src.codewalk.review.test_coverage import TestCoverage
 from src.codewalk.review.guidelines_loader import get_guidelines_store, search_guidelines
 from src.codewalk.review.review_prompts import REVIEW_SYSTEM_PROMPT, REVIEW_USER_PROMPT
 
-# Threshold: if total added lines exceed this, use per-file chunked review
+# If total added lines exceed this, switch to per-file chunked review
 CHUNK_THRESHOLD = 200
 
+
+# =============================================================================
+# Context Dataclasses
+# =============================================================================
 
 @dataclass
 class FileReviewContext:
     """Prepared context for reviewing a single file."""
     diff_file: DiffFile
-    file_diff_text: str
-    file_content: str = ""
-    caller_context: str = ""
-    security_context: str = ""
+    file_diff_text: str          # Reconstructed unified diff for this file
+    file_content: str = ""       # Full file content (for modified files)
+    caller_context: str = ""     # Who imports this file
+    security_context: str = ""   # Similar patterns from codebase
 
 
 @dataclass
 class ReviewContext:
-    """All prepared context needed for a code review (shared by MCP + LLM flows)."""
-    diff_text: str
-    diff_files: list[DiffFile]
-    file_contexts: list[FileReviewContext]
-    pre_check_issues: list[Issue]
-    blast_radius_warnings: list[str]
-    guidelines_context: str
+    """All prepared context needed for a code review."""
+    diff_text: str                          # Raw full diff
+    diff_files: list[DiffFile]              # Parsed diff files
+    file_contexts: list[FileReviewContext]   # Per-file enriched context
+    pre_check_issues: list[Issue]           # Issues from TestCoverage
+    blast_radius_warnings: list[str]        # High-risk file warnings
+    guidelines_context: str                 # Team guidelines text
     total_added: int
     total_removed: int
 
 
+# =============================================================================
+# Helper Functions
+# =============================================================================
+
 def _get_file_content(diff_file: DiffFile, repo_path: str | None) -> str:
     """Get full file content for modified files (not new files).
-    
-    For new files: diff already contains everything — return empty.
-    For modified files: read the full file so LLM sees class structure.
+
+    For new files the diff already has everything.
+    For modified files we read the full file so the LLM sees class structure.
+    Capped at 500 lines to avoid token overflow.
     """
     if diff_file.is_new_file or not repo_path:
         return ""
@@ -52,7 +98,6 @@ def _get_file_content(diff_file: DiffFile, repo_path: str | None) -> str:
 
     try:
         content = file_path.read_text(errors="replace")
-        # Cap at 500 lines to avoid token overflow
         lines = content.splitlines()
         if len(lines) > 500:
             lines = lines[:500]
@@ -63,7 +108,7 @@ def _get_file_content(diff_file: DiffFile, repo_path: str | None) -> str:
 
 
 def _get_caller_context(diff_file: DiffFile, deps: dict | None) -> str:
-    """Find which files import this specific file."""
+    """Find which files import this file (reverse dependency lookup)."""
     if not deps or "graph" not in deps:
         return ""
 
@@ -83,7 +128,11 @@ def _get_caller_context(diff_file: DiffFile, deps: dict | None) -> str:
 
 
 def _get_security_context_for_file(diff_file: DiffFile, store) -> str:
-    """Query vector store with security-focused questions for this specific file."""
+    """Query vector store for similar patterns to what's being changed.
+
+    Looks at added code and searches for related patterns in the codebase.
+    This gives the LLM context like "here's how auth is handled elsewhere."
+    """
     if not store:
         return ""
 
@@ -97,7 +146,7 @@ def _get_security_context_for_file(diff_file: DiffFile, store) -> str:
     if not added_code:
         return ""
 
-    # Build targeted query based on what's in the file
+    # Map keywords in code -> targeted search queries
     keywords_to_queries = {
         ("url", "redirect", "launch", "navigate", "href", "link"):
             "URL validation domain allowlist redirect security",
@@ -120,6 +169,7 @@ def _get_security_context_for_file(diff_file: DiffFile, store) -> str:
     if not queries:
         return ""
 
+    # Search max 2 queries, 2 results each
     all_results = []
     for query in queries[:2]:
         results = store.search(query, n_results=2)
@@ -128,7 +178,7 @@ def _get_security_context_for_file(diff_file: DiffFile, store) -> str:
     if not all_results:
         return ""
 
-    # Deduplicate
+    # Deduplicate by ID
     seen_ids = set()
     unique_results = []
     for r in all_results:
@@ -161,6 +211,10 @@ def _build_file_diff_text(diff_file: DiffFile) -> str:
     return "\n".join(lines)
 
 
+# =============================================================================
+# prepare_review_context() - Shared Preparation
+# =============================================================================
+
 def prepare_review_context(
     staged: bool = False,
     target_branch: str | None = None,
@@ -170,23 +224,22 @@ def prepare_review_context(
 ) -> ReviewContext | None:
     """Common preparation for both MCP and LLM review flows.
 
-    Parses diff, runs pre-checks, builds per-file context.
-    Returns None if diff is empty.
+    Returns None if the diff is empty (nothing to review).
     """
-    # Get diff
+    # 1. Get raw diff
     diff_text = get_diff(staged=staged, target_branch=target_branch, repo_path=repo_path)
     if not diff_text.strip():
         return None
 
-    # Parse diff
+    # 2. Parse into structured objects
     diff_files = get_parsed_diff(diff_text)
     total_added = sum(df.added_lines for df in diff_files)
     total_removed = sum(df.removed_lines for df in diff_files)
 
-    # Pre-checks
+    # 3. Run pre-checks (test coverage)
     pre_check_issues = list(TestCoverage().analyze(diff_files))
 
-    # Blast radius
+    # 4. Check blast radius for high-risk files
     blast_warnings = []
     if deps:
         from src.codewalk.analysis.blast_radius import get_blast_radius
@@ -194,17 +247,17 @@ def prepare_review_context(
             radius = get_blast_radius(df.file_path, deps)
             if radius["risk_level"] in ("high", "critical"):
                 blast_warnings.append(
-                    f"{df.file_path} — {radius['risk_level'].upper()} risk, "
+                    f"{df.file_path} - {radius['risk_level'].upper()} risk, "
                     f"{radius['affected_files']} dependents"
                 )
 
-    # Guidelines
+    # 5. Load team guidelines
     guidelines_context = ""
     guidelines_store = get_guidelines_store()
     if guidelines_store:
         guidelines_context = search_guidelines(guidelines_store, diff_files, n_results=3)
 
-    # Per-file context
+    # 6. Build per-file context
     file_contexts = []
     for df in diff_files:
         fc = FileReviewContext(
@@ -228,6 +281,43 @@ def prepare_review_context(
     )
 
 
+# =============================================================================
+# LLM Review Functions
+# =============================================================================
+
+def _parse_llm_response(content: str, fallback_file: str = "unknown") -> tuple[list[Issue], str]:
+    """Parse LLM JSON response into Issue objects. Returns (issues, summary)."""
+    # Strip markdown fences if present
+    if "```json" in content:
+        content = content.split("```json")[1].split("```")[0]
+    elif "```" in content:
+        content = content.split("```")[1].split("```")[0]
+
+    parsed = json.loads(content)
+    summary = parsed.get("summary", "")
+
+    category_map = {
+        "bug": Category.BUG,
+        "security": Category.SECURITY,
+        "style": Category.STYLE,
+    }
+
+    issues = []
+    for issue in parsed.get("issues", []):
+        issues.append(Issue(
+            severity=Severity[issue["severity"].upper()],
+            category=category_map.get(issue.get("category", "bug"), Category.BUG),
+            file_path=issue.get("file", fallback_file),
+            line_number=issue.get("line"),
+            title=issue.get("title", ""),
+            explanation=issue.get("explanation", ""),
+            suggestion=issue.get("suggestion"),
+            code_snippet=issue.get("code_snippet"),
+        ))
+
+    return issues, summary
+
+
 def _review_single_file(
     diff_file: DiffFile,
     repo_path: str | None,
@@ -235,41 +325,33 @@ def _review_single_file(
     deps: dict | None,
     guidelines_context: str,
 ) -> list[Issue]:
-    """Review a single file — one focused LLM call."""
+    """Review ONE file with a focused LLM call."""
     llm = get_llm(temperature=0)
 
-    # Build per-file context
+    # Build context sections for this file
     context_parts = []
 
-    # Full file content for modified files
     file_content = _get_file_content(diff_file, repo_path)
     if file_content:
         context_parts.append(
-            f"## Full file content ({diff_file.file_path})\n"
-            f"```\n{file_content}\n```"
+            f"## Full file content ({diff_file.file_path})\n```\n{file_content}\n```"
         )
 
-    # Caller context
     caller_ctx = _get_caller_context(diff_file, deps)
     if caller_ctx:
         context_parts.append(caller_ctx)
 
-    # Security context from vector store
     security_ctx = _get_security_context_for_file(diff_file, store)
     if security_ctx:
         context_parts.append(security_ctx)
 
-    # Guidelines
     if guidelines_context:
         context_parts.append(guidelines_context)
 
     context_sections = "\n\n".join(context_parts) if context_parts else ""
-
     system = REVIEW_SYSTEM_PROMPT.format(context_sections=context_sections)
 
-    # Build the diff for just this file
     file_diff = _build_file_diff_text(diff_file)
-
     user = REVIEW_USER_PROMPT.format(
         diff_content=file_diff,
         truncation_notice="",
@@ -281,40 +363,11 @@ def _review_single_file(
         {"role": "user", "content": user},
     ])
 
-    # Parse response
-    issues = []
     try:
-        content = response.content
-        if "```json" in content:
-            content = content.split("```json")[1].split("```")[0]
-        elif "```" in content:
-            content = content.split("```")[1].split("```")[0]
-
-        parsed = json.loads(content)
-
-        category_map = {
-            "bug": Category.BUG,
-            "security": Category.SECURITY,
-            "style": Category.STYLE,
-        }
-
-        for issue in parsed.get("issues", []):
-            issues.append(Issue(
-                severity=Severity[issue["severity"].upper()],
-                category=category_map.get(
-                    issue.get("category", "bug"), Category.BUG
-                ),
-                file_path=issue.get("file", diff_file.file_path),
-                line_number=issue.get("line"),
-                title=issue.get("title", ""),
-                explanation=issue.get("explanation", ""),
-                suggestion=issue.get("suggestion"),
-                code_snippet=issue.get("code_snippet"),
-            ))
+        issues, _ = _parse_llm_response(response.content, diff_file.file_path)
+        return issues
     except (json.JSONDecodeError, KeyError, IndexError):
-        pass  # skip unparseable responses for individual files
-
-    return issues
+        return []
 
 
 def _review_all_at_once(
@@ -325,13 +378,13 @@ def _review_all_at_once(
     deps: dict | None,
     pre_check_issues: list[Issue],
 ) -> tuple[list[Issue], str]:
-    """Original single-pass review for small diffs (< CHUNK_THRESHOLD lines)."""
+    """Single-pass review for small diffs (< CHUNK_THRESHOLD lines)."""
     llm = get_llm(temperature=0)
 
     # Build context
     context_parts = []
 
-    # Blast radius
+    # Blast radius warnings
     if deps:
         from src.codewalk.analysis.blast_radius import get_blast_radius
         high_risk = []
@@ -339,23 +392,19 @@ def _review_all_at_once(
             radius = get_blast_radius(df.file_path, deps)
             if radius["risk_level"] in ("high", "critical"):
                 high_risk.append(
-                    f"⚠️ {df.file_path} — {radius['risk_level'].upper()} risk, "
+                    f"Warning: {df.file_path} - {radius['risk_level'].upper()} risk, "
                     f"{radius['affected_files']} dependents"
                 )
         if high_risk:
-            context_parts.append(
-                "## Blast Radius Warnings\n" + "\n".join(high_risk)
-            )
+            context_parts.append("## Blast Radius Warnings\n" + "\n".join(high_risk))
 
-    # File content for modified files only
+    # Full file content (first 3 files only to save tokens)
     for df in diff_files[:3]:
         file_content = _get_file_content(df, repo_path)
         if file_content:
-            context_parts.append(
-                f"## Full file: {df.file_path}\n```\n{file_content}\n```"
-            )
+            context_parts.append(f"## Full file: {df.file_path}\n```\n{file_content}\n```")
 
-    # Security context
+    # Security context from vector store
     if store:
         for df in diff_files[:2]:
             sec_ctx = _get_security_context_for_file(df, store)
@@ -363,7 +412,7 @@ def _review_all_at_once(
                 context_parts.append(sec_ctx)
                 break
 
-    # Guidelines
+    # Team guidelines
     guidelines_store = get_guidelines_store()
     if guidelines_store:
         gl = search_guidelines(guidelines_store, diff_files, n_results=3)
@@ -371,11 +420,10 @@ def _review_all_at_once(
             context_parts.append(gl)
 
     context_sections = "\n\n".join(context_parts) if context_parts else ""
-
     system = REVIEW_SYSTEM_PROMPT.format(context_sections=context_sections)
 
     pre_check_str = "\n".join(
-        f"- [{issue.severity.value}] {issue.file_path}:{issue.line_number} — {issue.title}"
+        f"- [{issue.severity.value}] {issue.file_path}:{issue.line_number} - {issue.title}"
         for issue in pre_check_issues
     ) or "None found."
 
@@ -390,42 +438,15 @@ def _review_all_at_once(
         {"role": "user", "content": user},
     ])
 
-    issues = []
-    summary = ""
     try:
-        content = response.content
-        if "```json" in content:
-            content = content.split("```json")[1].split("```")[0]
-        elif "```" in content:
-            content = content.split("```")[1].split("```")[0]
-
-        parsed = json.loads(content)
-        summary = parsed.get("summary", "")
-
-        category_map = {
-            "bug": Category.BUG,
-            "security": Category.SECURITY,
-            "style": Category.STYLE,
-        }
-
-        for issue in parsed.get("issues", []):
-            issues.append(Issue(
-                severity=Severity[issue["severity"].upper()],
-                category=category_map.get(
-                    issue.get("category", "bug"), Category.BUG
-                ),
-                file_path=issue.get("file", "unknown"),
-                line_number=issue.get("line"),
-                title=issue.get("title", ""),
-                explanation=issue.get("explanation", ""),
-                suggestion=issue.get("suggestion"),
-                code_snippet=issue.get("code_snippet"),
-            ))
+        return _parse_llm_response(response.content)
     except (json.JSONDecodeError, KeyError, IndexError):
-        summary = response.content
+        return [], response.content
 
-    return issues, summary
 
+# =============================================================================
+# review_diff() - Main Entry Point
+# =============================================================================
 
 def review_diff(
     staged: bool = False,
@@ -435,10 +456,22 @@ def review_diff(
     deps: dict | None = None,
     repo_path: str | None = None,
 ) -> ReviewResult:
-    """LLM/API review pipeline: git diff → checks → LLM → ReviewResult.
-    
-    For small diffs (< 200 added lines): single LLM call with all context.
-    For large diffs: per-file parallel LLM calls for focused deep review.
+    """Full review pipeline: git diff -> checks -> LLM -> ReviewResult.
+
+    STRATEGY:
+        Small diffs (< 200 added lines): single LLM call
+        Large diffs (>= 200 added lines): per-file parallel calls (4 workers)
+
+    Args:
+        staged: Review staged changes only (git diff --staged)
+        target_branch: Compare against branch (branch...HEAD)
+        use_llm: If False, only run pre-checks (no LLM call)
+        store: VectorStore for security context search
+        deps: Dependency graph for blast radius
+        repo_path: Path to the git repo
+
+    Returns:
+        ReviewResult with all issues merged
     """
     ctx = prepare_review_context(
         staged=staged,
@@ -451,13 +484,13 @@ def review_diff(
     if ctx is None:
         return ReviewResult(summary="No changes to review.")
 
-    # ── LLM review ──
+    # --- LLM review ---
     llm_issues = []
     llm_summary = ""
 
     if use_llm:
         if ctx.total_added > CHUNK_THRESHOLD:
-            # ─── CHUNKED: Per-file parallel review ───
+            # CHUNKED: per-file parallel review
             errors = []
             with ThreadPoolExecutor(max_workers=4) as executor:
                 futures = [
@@ -479,7 +512,7 @@ def review_diff(
                 llm_summary = (
                     f"Reviewed {len(ctx.diff_files)} files individually. "
                     f"Found {len(llm_issues)} issues. "
-                    f"⚠️ {len(errors)} file(s) failed:\n{error_detail}"
+                    f"Warning: {len(errors)} file(s) failed:\n{error_detail}"
                 )
             else:
                 llm_summary = (
@@ -487,22 +520,19 @@ def review_diff(
                     f"Found {len(llm_issues)} issues."
                 )
         else:
-            # ─── SINGLE PASS: Small diff, one call ───
+            # SINGLE PASS: small diff, one LLM call
             llm_issues, llm_summary = _review_all_at_once(
                 ctx.diff_text, ctx.diff_files, repo_path, store, deps,
                 ctx.pre_check_issues,
             )
 
-    # ── Merge and return ──
+    # --- Merge all issues ---
     all_issues = ctx.pre_check_issues + llm_issues
 
     return ReviewResult(
         issues=all_issues,
-        summary=llm_summary or f"Reviewed {len(ctx.diff_files)} files. "
-                                f"Found {len(all_issues)} issues.",
+        summary=llm_summary or f"Reviewed {len(ctx.diff_files)} files. Found {len(all_issues)} issues.",
         files_reviewed=len(ctx.diff_files),
         lines_added=ctx.total_added,
         lines_removed=ctx.total_removed,
     )
-
-
