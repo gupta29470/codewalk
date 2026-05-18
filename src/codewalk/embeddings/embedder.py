@@ -1,15 +1,16 @@
-import logging
-import sys
-
+import torch
 from sentence_transformers import SentenceTransformer
 from langchain_core.embeddings import Embeddings
 from src.codewalk.config import settings
+from src.codewalk.log import log as _log
 
-logger = logging.getLogger("codewalk")
-
-def _log(msg: str):
-    print(msg, file=sys.stderr)
-    logger.info(msg)
+def _detect_device() -> str:
+    """Auto-detect the best available compute device."""
+    if torch.cuda.is_available():
+        return "cuda"
+    if torch.backends.mps.is_available():
+        return "mps"
+    return "cpu"
 
 class JinaCodeEmbeddings(Embeddings):
     """LangChain-compatible wrapper around Jina code embedding model.
@@ -18,8 +19,9 @@ class JinaCodeEmbeddings(Embeddings):
     and ChromaDB work without any changes.
     """
 
-    def __init__(self, model_name: str ="", device: str = "mps"):
+    def __init__(self, model_name: str = "", device: str = ""):
         model_name = model_name or settings.embedding_model
+        device = device or _detect_device()
         _log(f"Loading embedding model: {model_name} (device={device})")
         self._model = SentenceTransformer(
             model_name,

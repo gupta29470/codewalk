@@ -1,11 +1,9 @@
 import logging
-import sys
 from collections import Counter, defaultdict
 
+from src.codewalk.log import log as _log
+
 logger = logging.getLogger("codewalk")
-def _log(msg: str):
-    print(msg, file=sys.stderr)
-    logger.info(msg)
 
 _WRAPPER_DIRS = {
     "src", "lib", "app", "source", "packages", "pkg",

@@ -15,17 +15,17 @@ You will receive structured information about a codebase including:
 
 Write a clear, concise project overview in Markdown format. Include:
 
-1. **Project Summary** (2-3 sentences): What this project does and its core purpose.
+1. **Project Structure** (2-3 sentences): Describe what this project appears to contain based on the modules and tech stack listed. Do NOT guess the project's business purpose — only describe what you can see from the structure.
 2. **Tech Stack**: List the languages and key technologies.
-3. **Architecture Overview**: Describe the high-level structure — what each module does and how they connect.
-4. **Module Breakdown**: A brief description of each module's responsibility.
-5. **Key Entry Points**: Where a new developer should start reading code.
+3. **Architecture Overview**: Describe the high-level structure — what each module likely does based on its name and how they connect via dependencies.
+4. **Module Breakdown**: A brief description of each module's likely responsibility based on its name, file count, and dependencies.
 
 RULES:
 - Be specific — reference actual module names and file counts.
 - Keep it concise — this is a quick-start guide, not a book.
 - Use the dependency information to explain data flow.
 - Do NOT invent information not provided in the input.
+- If a module name is ambiguous, say "likely handles X based on the name" rather than stating it as fact.
 - Write in second person ("you", "your") to address the new developer directly.
 """
 

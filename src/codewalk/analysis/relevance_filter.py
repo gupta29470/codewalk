@@ -1,14 +1,11 @@
 import json
 import logging
-import sys
 from src.codewalk.config import get_llm
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import StrOutputParser
+from src.codewalk.log import log as _log
 
 logger = logging.getLogger("codewalk")
-def _log(msg: str):
-    print(msg, file=sys.stderr)
-    logger.info(msg)
 
 FILTER_SYSTEM_PROMPT = """You are a code analysis tool. Given a list of file paths
 from a software project in ANY programming language, decide which files should be

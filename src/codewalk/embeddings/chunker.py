@@ -1,17 +1,13 @@
 from pathlib import Path
 import hashlib
 import logging
-import sys
 
 from langchain_text_splitters import RecursiveCharacterTextSplitter, Language
 
 from src.codewalk.analysis.code_parser import parse_file, GRAMMAR_MAP
+from src.codewalk.log import log as _log
 
 logger = logging.getLogger("codewalk")
-
-def _log(msg: str):
-    print(msg, file=sys.stderr)
-    logger.info(msg)
 
 # Map our language names to LangChain's Language enum
 LANGUAGE_MAP =  {

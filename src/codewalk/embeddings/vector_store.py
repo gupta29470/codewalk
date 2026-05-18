@@ -1,14 +1,10 @@
 import logging
-import sys
 
 import chromadb
 from src.codewalk.embeddings.embedder import get_embedding_model
+from src.codewalk.log import log as _log
 
 logger = logging.getLogger("codewalk")
-
-def _log(msg: str):
-    print(msg, file=sys.stderr)
-    logger.info(msg)
 
 class VectorStore:
     def __init__(self, persist_dir: str = "./data/chroma"):

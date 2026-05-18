@@ -1,11 +1,9 @@
 import logging
-import sys
 from pathlib import Path
 
+from src.codewalk.log import log as _log
+
 logger = logging.getLogger("codewalk")
-def _log(msg: str):
-    print(msg, file=sys.stderr)
-    logger.info(msg)
 
 CONFIG_FILE_MAP = {
     "package.json": "javascript/node",

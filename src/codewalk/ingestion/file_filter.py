@@ -1,4 +1,5 @@
 from pathlib import Path
+import fnmatch as fnmatch_module
 
 # Dot-folders to KEEP (useful code/config)
 KEEP_DOT_DIRS = {
@@ -330,5 +331,65 @@ def should_skip(file_path: str) -> bool:
     if any(path.name.endswith(suffix) for suffix in SKIP_SUFFIXES):
         return True
     
+    # Check .codewalkignore patterns
+    if _codewalkignore_matches(file_path):
+        return True
+
     return False
+
+
+# ─── .codewalkignore support ─────────────────────────────────────────
+
+_codewalkignore_patterns: list[str] | None = None
+
+def _load_codewalkignore() -> list[str]:
+    """Load patterns from .codewalkignore in the repo root (gitignore syntax)."""
+    global _codewalkignore_patterns
+    if _codewalkignore_patterns is not None:
+        return _codewalkignore_patterns
+
+    from src.codewalk.config import settings
+    ignore_path = Path(settings.repo_path) / ".codewalkignore"
+    if not ignore_path.exists():
+        _codewalkignore_patterns = []
+        return _codewalkignore_patterns
+
+    patterns = []
+    for line in ignore_path.read_text().splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        patterns.append(line)
+    _codewalkignore_patterns = patterns
+    return _codewalkignore_patterns
+
+
+def _codewalkignore_matches(file_path: str) -> bool:
+    """Check if a file path matches any .codewalkignore pattern."""
+    patterns = _load_codewalkignore()
+    if not patterns:
+        return False
+
+    for pattern in patterns:
+        # Directory pattern (ends with /)
+        if pattern.endswith("/"):
+            dir_name = pattern.rstrip("/")
+            if dir_name in Path(file_path).parts:
+                return True
+        # Glob pattern
+        elif fnmatch_module.fnmatch(file_path, pattern):
+            return True
+        # Also check just the filename
+        elif fnmatch_module.fnmatch(Path(file_path).name, pattern):
+            return True
+        # Check if pattern matches any path segment
+        elif "/" not in pattern and pattern in Path(file_path).parts:
+            return True
+    return False
+
+
+def reset_codewalkignore():
+    """Reset cached patterns (call when repo_path changes)."""
+    global _codewalkignore_patterns
+    _codewalkignore_patterns = None
         

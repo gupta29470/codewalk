@@ -6,6 +6,7 @@ from src.codewalk.ingestion.tech_detect import detect_tech_stack
 from src.codewalk.generation.diagram_generator import generate_module_diagram
 from src.codewalk.analysis.blast_radius import get_blast_radius, calculate_full_blast_map
 from src.codewalk.analysis.reading_order import generate_reading_order_raw
+from src.codewalk.review.reviewer import review_diff as _review_diff
 from src.codewalk.config import settings
 
 def create_tools(store: VectorStore, modules_result: dict,
@@ -379,9 +380,55 @@ def create_tools(store: VectorStore, modules_result: dict,
                 + "\n".join(dep_lines)
             )
 
-    
+    # ─── TOOL 8: review_diff ─────────────────────────────────────
+    @tool
+    def review_diff(staged: bool = False, target_branch: str = "") -> str:
+        """Review git diff for bugs, security issues, and style problems.
+
+        Runs multi-stage review: test coverage check, blast radius,
+        codebase patterns, team guidelines, and LLM deep review.
+
+        Args:
+            staged: If True, review only staged changes. Default: unstaged.
+            target_branch: Diff against a branch (e.g. "main") for full PR review.
+        """
+        result = _review_diff(
+            staged=staged,
+            target_branch=target_branch or None,
+            use_llm=True,
+            store=store,
+            deps=deps,
+        )
+
+        if not result.issues:
+            return (
+                f"✅ No issues found.\n"
+                f"Reviewed {result.files_reviewed} files "
+                f"(+{result.lines_added} / -{result.lines_removed})\n\n"
+                f"{result.summary}"
+            )
+
+        lines = []
+        for issue in result.issues:
+            icon = {"critical": "🔴", "warning": "🟡", "suggestion": "🟢"}.get(
+                issue.severity, "⚪"
+            )
+            loc = f"{issue.file_path}:{issue.line_number}" if issue.line_number else issue.file_path
+            lines.append(f"{icon} [{issue.category}] {loc}: {issue.title}")
+            if issue.explanation:
+                lines.append(f"   {issue.explanation}")
+
+        return (
+            f"## Code Review Results\n"
+            f"Reviewed {result.files_reviewed} files "
+            f"(+{result.lines_added} / -{result.lines_removed})\n\n"
+            + "\n".join(lines)
+            + f"\n\n**Summary:** {result.summary}"
+        )
+
     return [search_codebase, get_module_info, explain_function,
-            get_overview, get_blast_radius_map, get_reading_order, get_execution_flow]
+            get_overview, get_blast_radius_map, get_reading_order,
+            get_execution_flow, review_diff]
 
 
 

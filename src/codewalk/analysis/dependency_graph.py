@@ -1,14 +1,12 @@
 import logging
-import sys
 from pathlib import Path
 from platform import node
 
 from tree_sitter_cpp import language
 
+from src.codewalk.log import log as _log
+
 logger = logging.getLogger("codewalk")
-def _log(msg: str):
-    print(msg, file=sys.stderr)
-    logger.info(msg)
 
 from src.codewalk.analysis.code_parser import (
     get_parser_for_language,

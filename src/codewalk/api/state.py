@@ -1,6 +1,5 @@
 import logging
 import os
-import sys
 
 from src.codewalk.embeddings.vector_store import VectorStore
 from src.codewalk.agent.graph import create_agent
@@ -8,12 +7,9 @@ from src.codewalk.ingestion.scanner import scan_directory
 from src.codewalk.analysis.dependency_graph import build_dependency_graph
 from src.codewalk.analysis.module_detector import detect_modules
 from src.codewalk.config import settings
+from src.codewalk.log import log as _log
 
 logger = logging.getLogger("codewalk")
-
-def _log(msg: str):
-    print(msg, file=sys.stderr)
-    logger.info(msg)
 
 # ─── Module-level state (single source of truth for MCP + API) ──────
 
