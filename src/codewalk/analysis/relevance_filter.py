@@ -1,3 +1,41 @@
+"""
+=============================================================================
+ relevance_filter.py - LLM-Based File Relevance Filtering
+=============================================================================
+
+WHAT THIS FILE DOES:
+    After the file_filter.py removes obvious junk (binaries, node_modules),
+    this module does a SECOND pass using an LLM to decide which of the
+    remaining files are worth embedding for code search.
+
+    It filters out:
+      - Test files (test_*.py, *_spec.ts)
+      - Migration files
+      - CI/CD configs
+      - Documentation
+      - Empty __init__.py files
+      - Fixture/mock data
+
+WHY TWO FILTERS?
+    file_filter.py: Fast, rule-based, catches 90% of junk (no LLM cost)
+    relevance_filter.py: Slow, LLM-based, catches the remaining 10%
+    
+    The LLM can understand CONTEXT that rules can't:
+      "test/helpers/auth_helper.py" - is this a test helper (skip) or
+      real auth code misplaced in test/ (keep)? LLM decides from the path.
+
+WHERE IT'S CALLED:
+    - pipeline.py -> filter_files_with_llm() after initial scan
+
+DEPENDENCIES:
+    - config.py: get_llm() for the language model
+    - langchain: prompt templates and output parsing
+
+=============================================================================
+"""
+
+# --- Imports ---
+
 import json
 import logging
 from src.codewalk.config import get_llm
@@ -6,6 +44,11 @@ from langchain_core.output_parsers import StrOutputParser
 from src.codewalk.log import log as _log
 
 logger = logging.getLogger("codewalk")
+
+
+# =============================================================================
+# LLM Prompts
+# =============================================================================
 
 FILTER_SYSTEM_PROMPT = """You are a code analysis tool. Given a list of file paths
 from a software project in ANY programming language, decide which files should be
@@ -30,42 +73,25 @@ Return "yes" for:
   setup.py, build.gradle, Package.swift, Cargo.toml, mix.exs
 
 Return "no" for:
-- Test files in ANY language:
-  test_*, *_test.*, *_spec.*, *Test.java, *Tests.cs, *_test.go,
-  *_test.dart, *_test.rs, spec/*, tests/*, __tests__/*, t/*,
-  *Spec.scala, *_spec.rb, *Test.kt, *Tests.swift, test/*, cypress/*
-- Generated/auto-generated code:
-  *.g.dart, *.freezed.dart, *.gen.*, *.generated.*, generated/*,
-  .dart_tool/*, __generated__/*, *.pb.go, *_pb2.py, *.swagger.json,
-  *.designer.cs, *.g.cs, R.java, BuildConfig.java, Pods/*, *.xcodeproj/*
-- Translation/localization data:
-  *.arb, *.xliff, *.xlf, *.po, *.pot, *.mo, l10n/*, locales/*, i18n/*,
-  *.lproj/*, *.strings, *.stringsdict
-- Database migration files:
-  migrations/*, alembic/versions/*, db/migrate/*, priv/repo/migrations/*,
-  Migrations/*, flyway/*, liquibase/*
-- Lock files and auto-generated manifests:
-  *.lock, package-lock.json, yarn.lock, Podfile.lock, Gemfile.lock,
-  composer.lock, Cargo.lock, pubspec.lock, go.sum, pnpm-lock.yaml
-- Fixture/seed/mock data: fixtures/*, seeds/*, mocks/*, factories/*,
-  testdata/*, __snapshots__/*
-- Documentation: *.md, *.rst, *.txt, *.adoc, docs/*, doc/*
+- Test files in ANY language
+- Generated/auto-generated code
+- Translation/localization data
+- Database migration files
+- Lock files and auto-generated manifests
+- Fixture/seed/mock data
+- Documentation files
 - Empty package markers: __init__.py with no real code
-- CI/CD configs: .github/*, .circleci/*, .gitlab-ci.yml, Jenkinsfile,
-  .travis.yml, azure-pipelines.yml, .buildkite/*
-- IDE/editor configs: .vscode/*, .idea/*, *.xcworkspace/*,
-  .settings/*, .classpath, .project, *.iml
-- Dependency directories: vendor/*, node_modules/*, Pods/*,
-  .gradle/*, build/*, dist/*, target/*, _build/*, deps/*
-- Asset files: *.svg, *.png, *.jpg, *.gif, *.ico, *.woff, *.ttf,
-  *.eot, *.mp3, *.mp4, *.pdf, fonts/*, images/*, assets/images/*
-- Minified/bundled files: *.min.js, *.min.css, *.bundle.js, *.chunk.js
+- CI/CD configs
+- IDE/editor configs
+- Dependency directories
+- Asset files
+- Minified/bundled files
 
 IMPORTANT:
-- When in doubt, return "yes" — better to index too much than miss real code
+- When in doubt, return "yes" - better to index too much than miss real code
 - Use the FULL file path to decide, not just the extension
-- The project could be in ANY language — do NOT assume Python or JavaScript
-- Return valid JSON only — no markdown, no explanation, no extra text"""
+- The project could be in ANY language - do NOT assume Python or JavaScript
+- Return valid JSON only - no markdown, no explanation, no extra text"""
 
 
 FILTER_HUMAN_PROMPT = """Decide which of these {total_files} files should be indexed.
@@ -85,11 +111,16 @@ Example:
 }}"""
 
 
-BATCH_SIZE = 3000  # max files per LLM call to stay under context limits
+# Maximum files per LLM call (to stay under context window limits)
+BATCH_SIZE = 3000
 
+
+# =============================================================================
+# Internal Helpers
+# =============================================================================
 
 def _format_file_list(files: list[dict]) -> str:
-    """Format file paths for the LLM."""
+    """Format file paths as indented list for the LLM prompt."""
     lines = []
     for f in files:
         lines.append(f"  {f['file_path']}")
@@ -97,7 +128,11 @@ def _format_file_list(files: list[dict]) -> str:
 
 
 def _filter_batch(batch: list[dict]) -> dict:
-    """Send one batch of files to the LLM and return yes/no decisions."""
+    """Send one batch of files to the LLM and return yes/no decisions.
+
+    Returns: {"file_path": "yes" or "no", ...}
+    Falls back to keeping all files if LLM returns invalid JSON.
+    """
     prompt = ChatPromptTemplate.from_messages([
         ("system", FILTER_SYSTEM_PROMPT),
         ("human", FILTER_HUMAN_PROMPT),
@@ -113,11 +148,11 @@ def _filter_batch(batch: list[dict]) -> dict:
         })
     except Exception as e:
         raise RuntimeError(
-            f"{e} — Try reducing BATCH_SIZE in "
+            f"{e} - Try reducing BATCH_SIZE in "
             f"src/codewalk/analysis/relevance_filter.py (currently {BATCH_SIZE})"
         ) from e
 
-    # Parse JSON response
+    # Parse JSON response (strip markdown fences if present)
     text = result.strip()
     if text.startswith("```"):
         lines = text.split("\n")
@@ -126,20 +161,36 @@ def _filter_batch(batch: list[dict]) -> dict:
     try:
         return json.loads(text)
     except json.JSONDecodeError:
-        # If LLM returns garbage, keep all files in this batch
+        # LLM returned garbage -> keep all files (safe fallback)
         return {f["file_path"]: "yes" for f in batch}
 
+
+# =============================================================================
+# filter_files_with_llm() - Main Entry Point
+# =============================================================================
 
 def filter_files_with_llm(files: list[dict]) -> list[dict]:
     """Use LLM to filter which files should be embedded.
 
-    Splits files into batches of BATCH_SIZE to stay under LLM context limits.
+    EXECUTION FLOW:
+        1. Split files into batches of BATCH_SIZE (3000)
+        2. For each batch: send file paths to LLM -> get yes/no per file
+        3. Keep only files marked "yes"
+        4. Return filtered list
+
+    WHY BATCH?
+        LLMs have context window limits. 3000 file paths fit comfortably
+        in most models. Larger repos get split into multiple LLM calls.
+
+    SAFETY:
+        If LLM fails (timeout, invalid JSON), the batch defaults to
+        keeping ALL files (better to index extra than miss code).
 
     Args:
-        files: from scan_directory() — list of file dicts
+        files: from scan_directory() - list of file dicts
 
     Returns:
-        Filtered list — only files worth embedding.
+        Filtered list - only files the LLM thinks are worth indexing.
     """
     if not files:
         return files
@@ -163,6 +214,6 @@ def filter_files_with_llm(files: list[dict]) -> list[dict]:
 
     skipped = len(files) - len(filtered)
     if skipped > 0:
-        _log(f"[filter] LLM filtered out {skipped} files — {len(filtered)} remain")
+        _log(f"[filter] LLM filtered out {skipped} files - {len(filtered)} remain")
 
     return filtered
