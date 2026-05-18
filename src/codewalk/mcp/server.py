@@ -1328,6 +1328,9 @@ def codewalk_voice_ask() -> str:
     if len(audio) == 0:
         return "❌ No audio captured. Make sure your microphone is working."
 
+    # ── Beep to signal "recording stopped" ──
+    subprocess.run(["afplay", "/System/Library/Sounds/Pop.aiff"], check=False)
+
     # ── 2. Transcribe (faster-whisper, local) ───────────────────────
     _log("[codewalk_voice_ask] Transcribing...")
     transcript = transcribe(audio)
