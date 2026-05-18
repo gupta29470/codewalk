@@ -23,6 +23,7 @@ frontend/.next/
 # Scratch/teaching files
 teach.py
 explain.py
+explain/
 
 codewalk_plan.md
 

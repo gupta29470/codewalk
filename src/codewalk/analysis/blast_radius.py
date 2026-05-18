@@ -108,19 +108,44 @@ def calculate_full_blast_map(graph: dict[str, list[str]]) -> dict:
             "highest_risk": "config.py"
         }
     """
+    # Build reverse graph ONCE (O(E)) — then reuse for all BFS
+    reverse = build_reverse_graph(graph)
+    internal_files = set(graph.keys())
+    total_files = len(internal_files)
+
     results = []
     risk_counts = {"critical": 0, "high": 0, "moderate": 0, "low": 0, "none": 0}
 
-    for file_path in graph:
-        radius = get_blast_radius(file_path, graph)
+    for target_file in graph:
+        # BFS from target_file through the pre-built reverse graph
+        visited = {target_file}
+        queue_bfs = deque()
+        impact_tree = {}
+
+        for dependent in reverse.get(target_file, []):
+            if dependent not in visited:
+                queue_bfs.append((dependent, 1))
+                visited.add(dependent)
+
+        while queue_bfs:
+            current_file, depth = queue_bfs.popleft()
+            impact_tree[current_file] = depth
+            for dependent in reverse.get(current_file, []):
+                if dependent not in visited:
+                    queue_bfs.append((dependent, depth + 1))
+                    visited.add(dependent)
+
+        total_affected = len(impact_tree)
+        risk_level = _calculate_risk(total_affected, total_files)
+
         results.append({
-            "file": file_path,
-            "affected_files": radius["affected_files"],
-            "risk_level": radius["risk_level"],
-            "direct_count": len(radius["direct"]),
-            "transitive_count": len(radius["transitive"]),
+            "file": target_file,
+            "affected_files": total_affected,
+            "risk_level": risk_level,
+            "direct_count": sum(1 for d in impact_tree.values() if d == 1),
+            "transitive_count": sum(1 for d in impact_tree.values() if d > 1),
         })
-        risk_counts[radius["risk_level"]] = risk_counts.get(radius["risk_level"], 0) + 1
+        risk_counts[risk_level] = risk_counts.get(risk_level, 0) + 1
 
     results.sort(key=lambda x: x["affected_files"], reverse=True)
     highest_risk = results[0]["file"] if results else ""

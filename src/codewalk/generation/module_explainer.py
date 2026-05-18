@@ -1,14 +1,11 @@
 import logging
-import sys
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import StrOutputParser
 
 from src.codewalk.config import settings, get_llm
+from src.codewalk.log import log as _log
 
 logger = logging.getLogger("codewalk")
-def _log(msg: str):
-    print(msg, file=sys.stderr)
-    logger.info(msg)
 
 MODULE_SYSTEM_PROMPT = """You are a senior software engineer explaining a code module to a new team member.
 
@@ -30,6 +27,7 @@ RULES:
 - Be specific — use actual file names and module names.
 - Keep it concise — 1 paragraph per section max.
 - Infer file purpose from the filename and module context.
+- If a filename is generic (utils, helpers, common, base, misc, types), say "utility/shared code" rather than guessing specific contents.
 - Do NOT invent implementation details, class names, or function signatures.
 - Write in second person ("you") to address the reader directly.
 """

@@ -1,13 +1,10 @@
 import logging
-import sys
 from pathlib import Path
 
 from src.codewalk.ingestion.file_filter import should_skip
+from src.codewalk.log import log as _log
 
 logger = logging.getLogger("codewalk")
-def _log(msg: str):
-    print(msg, file=sys.stderr)
-    logger.info(msg)
 
 # Map file extensions to language names
 EXTENSION_MAP = {

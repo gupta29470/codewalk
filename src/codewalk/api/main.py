@@ -38,12 +38,11 @@ from src.codewalk.voice.stt import transcribe_bytes
 from src.codewalk.voice.tts import synthesize
 from src.codewalk.voice.router import route
 from src.codewalk.voice.backends import execute_direct
+from src.codewalk.log import log as _log
+from src.codewalk.errors import classify_error
 
 
 logger = logging.getLogger("codewalk")
-def _log(msg: str):
-    print(msg, file=sys.stderr)
-    logger.info(msg)
 
 
 # ─── Create the FastAPI app ─────────────────────────────────────────
@@ -61,6 +60,16 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+@app.exception_handler(Exception)
+async def global_exception_handler(request, exc):
+    """Convert all unhandled exceptions to user-friendly messages."""
+    user_message = classify_error(exc)
+    _log(f"[api] Error: {exc}")
+    return JSONResponse(
+        status_code=500,
+        content={"detail": user_message},
+    )
 
 # ─── POST /analyze ───────────────────────────────────────────────────
 @app.post("/analyze", response_model=AnalyzeResponse)

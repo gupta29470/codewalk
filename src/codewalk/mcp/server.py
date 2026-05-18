@@ -18,12 +18,10 @@ from mcp.server.fastmcp import FastMCP
 
 from src.codewalk.ingestion.scanner import scan_directory
 from src.codewalk.ingestion.tech_detect import detect_tech_stack
+from src.codewalk.log import log as _log
 
 logger = logging.getLogger("codewalk")
 
-def _log(msg: str):
-    print(msg, file=sys.stderr)
-    logger.info(msg)
 from src.codewalk.analysis.dependency_graph import build_dependency_graph
 from src.codewalk.analysis.module_detector import detect_modules
 from src.codewalk.generation.diagram_generator import generate_module_diagram
@@ -32,6 +30,7 @@ from src.codewalk.generation.overview_generator import generate_overview
 from src.codewalk.embeddings.vector_store import VectorStore
 from src.codewalk.rag.chain import format_context
 from src.codewalk.pipeline import full_index_parallel, index_from_paths_parallel, incremental_reindex
+from src.codewalk.ingestion.file_filter import should_skip
 from src.codewalk.config import settings, get_llm
 from src.codewalk.analysis.blast_radius import (
     get_blast_radius,
@@ -96,6 +95,12 @@ mcp = FastMCP(
         "    2. Show the FULL result as text in the chat (same detail as typed)\n"
         "    3. Call codewalk_speak() with a 2-4 sentence spoken summary\n"
         "- codewalk_speak(text) — speak a plain-English summary aloud via TTS\n"
+        "\n"
+        "## ERROR HANDLING\n"
+        "If any tool returns a message starting with 'Error:':\n"
+        "- 'No codebase indexed' → tell user to run codewalk_analyze_codebase first\n"
+        "- 'Module not found' → show the available modules from the error message\n"
+        "- Never retry the same tool with identical arguments after an error\n"
     ),
 )
 
@@ -112,23 +117,23 @@ MCP_BATCH_SIZE = 100  # files per batch for Copilot filtering
 # ─── TOOL 1 [SETUP · user+AI]: codewalk_analyze_codebase ────────────
 @mcp.tool()
 def codewalk_analyze_codebase() -> str:
-    """Analyze a codebase structure — modules, dependencies, blast radius.
+    """Analyze a codebase structure and auto-index for search.
 
-    This must be called FIRST. After this, follow the indexing workflow:
-      1) Call codewalk_scan_files(batch=1) to get file paths
-      2) Call codewalk_submit_filtered_files() with the relevant source files
-      3) Repeat codewalk_scan_files/codewalk_submit_filtered_files for each batch
-      4) Call codewalk_index_filtered_files() to embed and enable search
+    This must be called FIRST. It will:
+    1. Detect modules, dependencies, and blast radius
+    2. If an index already exists → skip to ready state (INDEX READY)
+    3. If no index exists → auto-filter files (skip tests/node_modules/etc)
+       and embed them for semantic search
 
-    ⏩ NEXT STEP: codewalk_scan_files(batch=1)
-    Do NOT skip to codewalk_get_overview or other tools until indexing is complete.
+    No additional steps needed — this tool handles everything.
+    After this returns, query tools are ready to use.
+
+    ⏩ NEXT STEP: Use any query tool (codewalk_get_overview, codewalk_search_codebase, etc.)
     """
     _log(f"[codewalk_analyze_codebase] Starting analysis: {settings.repo_path}")
     state.rebuild_analysis_cache()
 
     # Check if there's an existing index for search.
-    # Use repo-derived collection name from repo path — consistent with
-    # codewalk_index_filtered_files and codewalk_incremental_reindex.
     state._store = VectorStore(persist_dir=state.chroma_path())
     state._store.create_collection(state.get_collection_name())
     existing = state._store.collection.count()
@@ -145,13 +150,41 @@ def codewalk_analyze_codebase() -> str:
             f"Ready to answer questions — use query tools directly."
         )
 
+    # ── Auto-filter: use built-in skip patterns (no user intervention) ──
+    _log("[codewalk_analyze_codebase] INDEX EMPTY — auto-filtering and indexing...")
+    all_paths = [f["file_path"] for f in state._files if not should_skip(f["file_path"])]
+    _log(f"[codewalk_analyze_codebase] Auto-filtered to {len(all_paths)} files (from {len(state._files)} total)")
+
+    if not all_paths:
+        return (
+            f"Codebase analyzed successfully.\n"
+            f"Files found: {len(state._files)}\n"
+            f"Modules found: {', '.join(modules)}\n"
+            f"⚠️ No indexable files found after filtering.\n"
+            f"Check .codewalkignore or file patterns."
+        )
+
+    # ── Auto-index: chunk + embed + store ──
+    result = index_from_paths_parallel(
+        all_paths, settings.repo_path,
+        state.get_collection_name(),
+        persist_dir=state.chroma_path()
+    )
+
+    # Refresh store reference
+    state._store = VectorStore(persist_dir=state.chroma_path())
+    state._store.create_collection(state.get_collection_name())
+
+    _log(f"[codewalk_analyze_codebase] Indexed {result['chunks_embedded']} chunks in {result.get('total_time', 'N/A')}")
+
     return (
-        f"Codebase analyzed successfully.\n"
+        f"Codebase analyzed and indexed successfully.\n"
         f"Files found: {len(state._files)}\n"
-        f"Modules found: {', '.join(modules)}\n"
-        f"Search index: INDEX EMPTY — no embeddings found.\n\n"
-        f"⏩ NEXT STEP: Call codewalk_scan_files(batch=1) to start the indexing workflow.\n"
-        f"(If the AI doesn't call it automatically, run it yourself.)"
+        f"Files indexed: {result['files_scanned']}\n"
+        f"Chunks embedded: {result['chunks_embedded']}\n"
+        f"Time: {result.get('total_time', 'N/A')}\n"
+        f"Modules found: {', '.join(modules)}\n\n"
+        f"✅ Ready to answer questions — use query tools directly."
     )
 
 # ══════════════════════════════════════════════════════════════════════
@@ -163,9 +196,8 @@ def codewalk_analyze_codebase() -> str:
 def codewalk_search_codebase(query: str) -> str:
     """Search the codebase using ChromaDB semantic embeddings — NOT a text search.
 
-    This uses vector similarity on pre-computed embeddings to find code by
-    meaning, not keywords. You MUST call this tool instead of searching or
-    grepping files yourself — it finds results that keyword search would miss.
+    Uses vector similarity on pre-computed embeddings to find code by meaning,
+    not keywords. Finds results that keyword search would miss.
 
     Returns up to 5 relevant code snippets with file paths, line numbers,
     and surrounding context.
@@ -190,11 +222,7 @@ def codewalk_search_codebase(query: str) -> str:
 # ─── TOOL 3 [QUERY · user+AI]: codewalk_get_module_info ──────────────
 @mcp.tool()
 def codewalk_get_module_info(module_name: str) -> str:
-    """Get module or feature details from Codewalk's indexed analysis — files, symbols, dependencies, blast radius.
-
-    This tool returns data from Codewalk's ChromaDB index and dependency graph
-    that is NOT available by reading files directly. You MUST call this tool
-    instead of searching files yourself.
+    """Get module or feature details — files, symbols, dependencies.
 
     Returns: file list with extracted function/class symbols (name, type, line range),
     module dependencies, and which other modules depend on this one.
@@ -337,14 +365,10 @@ def codewalk_get_module_info(module_name: str) -> str:
 def codewalk_explain_function(function_name: str) -> str:
     """Look up a function/class in Codewalk's index and explain it with blast radius.
 
-    This tool uses ChromaDB symbol search + the dependency graph to return:
+    Uses ChromaDB symbol search + the dependency graph to return:
     1. Source code from the indexed embeddings
     2. LLM-generated line-by-line explanation
     3. Blast radius — which files break if this symbol changes
-
-    You MUST call this tool instead of finding and reading the function
-    yourself. The blast radius and cross-reference data are pre-computed
-    and not available by reading files.
 
     Args:
         function_name: Exact name of the function, method, or class,
@@ -370,6 +394,7 @@ def codewalk_explain_function(function_name: str) -> str:
     # LLM explanation
     source_code = to_show[0]["text"]
     symbol = to_show[0]["metadata"].get("symbol_name", function_name)
+    language = to_show[0]["metadata"].get("language", "")
     try:
         from langchain_core.prompts import ChatPromptTemplate
         from langchain_core.output_parsers import StrOutputParser
@@ -381,10 +406,10 @@ def codewalk_explain_function(function_name: str) -> str:
                 "Be concise — one sentence per logical block. "
                 "Do NOT repeat the code, just explain it."
             )),
-            ("human", "Explain this code for `{symbol}`:\n\n```\n{code}\n```"),
+            ("human", "Explain this {language} code for `{symbol}`:\n\n```{language}\n{code}\n```"),
         ])
         chain = prompt | llm | StrOutputParser()
-        explanation = chain.invoke({"symbol": symbol, "code": source_code})
+        explanation = chain.invoke({"symbol": symbol, "code": source_code, "language": language})
         context += f"\n\n### Explanation\n{explanation}"
     except Exception as e:
         _log(f"[codewalk_explain_function] LLM explanation failed: {e}")
@@ -413,14 +438,11 @@ def codewalk_explain_function(function_name: str) -> str:
 def codewalk_get_overview() -> str:
     """Get the project overview from Codewalk's computed analysis.
 
-    Returns data you cannot get by reading files yourself:
+    Returns:
     - Tech stack detection results
     - Module list with file counts
     - Mermaid dependency diagram (auto-generated from dependency graph)
-    - Top 3 riskiest files by blast radius with break chains
-
-    You MUST call this tool for overview/summary requests instead of
-    reading files and summarizing yourself.
+    - Top 10 riskiest files by blast radius with break chains
     """
     state.ensure_initialized()
     if state._modules_result is None or state._repo_path is None or state._deps is None:
@@ -960,15 +982,12 @@ def codewalk_review_diff(
 ) -> str:
     """Run Codewalk's multi-stage code review pipeline on the current git diff.
 
-    This tool runs 5 automated checks that you CANNOT replicate yourself:
+    Runs 5 automated checks:
       1. Test coverage check — flags source files missing test updates
       2. Blast radius analysis — warns about high-risk files (from dependency graph)
       3. Codebase pattern matching — finds similar code via ChromaDB embeddings
       4. Team guidelines RAG — injects coding standards from indexed guidelines
       5. LLM deep review — OWASP security, bugs, logic errors, style
-
-    You MUST call this tool for code review requests instead of reading
-    the diff and reviewing it yourself.
 
     Output: markdown report with issues sorted by severity:
     🔴 CRITICAL → 🟡 WARNING → 🟢 SUGGESTION.
@@ -1020,10 +1039,8 @@ def codewalk_review_diff(
 def codewalk_review_file(file_path: str) -> str:
     """Review a file against codebase patterns found via ChromaDB embeddings.
 
-    This tool uses Codewalk's vector index to find how similar code is written
-    elsewhere in the project, then compares for consistency. You MUST call this
-    tool instead of reading the file and reviewing it yourself — it uses
-    embedding-based pattern matching you cannot replicate.
+    Uses the vector index to find how similar code is written elsewhere in
+    the project, then compares for consistency.
 
     Checks: consistency with codebase conventions, error handling patterns,
     naming conventions, and potential bugs.
@@ -1052,12 +1069,23 @@ def codewalk_review_file(file_path: str) -> str:
     llm = get_llm(temperature=0)
     response = llm.invoke([
         {"role": "system", "content": (
-            "You review a file against its codebase conventions. "
-            "Compare to patterns elsewhere. Focus on: consistency, "
-            "error handling, naming, potential bugs. Be specific with lines."
+            "You are a senior engineer reviewing a file against codebase conventions.\n\n"
+            "Given: the file's source code + patterns found elsewhere in the codebase.\n\n"
+            "SEVERITY LEVELS:\n"
+            "- 🔴 CRITICAL: Bugs, security vulnerabilities\n"
+            "- 🟡 WARNING: Logic errors, inconsistency with codebase patterns\n"
+            "- 🟢 SUGGESTION: Readability, naming improvements\n\n"
+            "RULES:\n"
+            "- Only reference line numbers you can see in the provided code\n"
+            "- Compare against the 'Patterns elsewhere' section for consistency\n"
+            "- If the file follows conventions well, say so (don't invent issues)\n"
+            "- If the file was truncated, only review what you can see\n\n"
+            "Format: One issue per line as '🔴/🟡/🟢 Line X: [issue] — [suggestion]'\n"
+            "End with a one-line summary."
         )},
         {"role": "user", "content": (
-            f"## File:\n```\n{content[:10000]}\n```\n\n"
+            f"## File: {file_path}\n```\n{content[:10000]}\n```"
+            f"{chr(10) + '(File truncated at 10000 chars)' if len(content) > 10000 else ''}\n\n"
             f"## Patterns elsewhere:\n{patterns}"
         )},
     ])
@@ -1225,20 +1253,31 @@ def codewalk_voice_ask() -> str:
 
     _log(f'[codewalk_voice_ask] Transcript: "{transcript}"')
 
+    # ── Check for "stop" command ───────────────────────────────────
+    stop_words = {"stop", "stop talking", "shut up", "be quiet", "enough"}
+    if transcript.strip().lower() in stop_words:
+        stop_speaking()
+        return "🔇 Stopped playback."
+
+    # ── 3. Beep to signal "got it, processing..." ──────────────────
+    subprocess.run(["afplay", "/System/Library/Sounds/Tink.aiff"], check=False)
+
     return (
         f'🎤 **Transcript:** "{transcript}"\n\n'
         f"Route and respond:\n"
         f"1. Pick the correct tool using these rules:\n"
-        f"   - User asks about a module or feature by name → `codewalk_get_module_info(name)`\n"
+        f"   - User names a specific module → `codewalk_get_module_info(name)`\n"
         f"   - User asks what a specific function/class does → `codewalk_explain_function(name)`\n"
-        f"   - User asks how something works (concept/flow question) → `codewalk_search_codebase(query)`\n"
+        f"   - User asks how something works (concept/flow) → `codewalk_search_codebase(query)`\n"
         f"   - User asks for an overview or summary → `codewalk_get_overview()`\n"
         f"   - User asks about risk or what breaks → `codewalk_get_blast_radius_map(target)`\n"
         f"   - User asks about dependencies or execution flow → `codewalk_get_execution_flow()`\n"
         f"   - User asks where to start reading → `codewalk_get_reading_order()`\n"
-        f"   - DEFAULT: if the query names something that could be a module, prefer `codewalk_get_module_info`\n"
+        f"   - User asks to review changes → `codewalk_review_diff()`\n"
+        f"   - DEFAULT: if user names something that could be a module → `codewalk_get_module_info`, otherwise → `codewalk_search_codebase`\n"
         f"2. Show the FULL tool result as text in the chat — same detail as a typed question.\n"
-        f"3. Then call `codewalk_speak()` with a 2-4 sentence plain-English spoken summary."
+        f"3. Then call `codewalk_speak()` with a 2-4 sentence plain-English spoken summary.\n"
+        f"⚠️ NEVER skip step 2 or 3. NEVER pass the full tool output to speak — summarize it."
     )
 
 

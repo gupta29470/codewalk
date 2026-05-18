@@ -133,10 +133,25 @@ User: "reading order of this project"
 User: "show me the blast radius for the whole project"
 {{"tool": "codewalk_get_blast_radius_map", "arguments": {{}}}}
 
+User: "review my changes"
+{{"tool": "codewalk_review_diff", "arguments": {{}}}}
+
+User: "review the pipeline file"
+{{"tool": "codewalk_review_file", "arguments": {{"file_path": "src/codewalk/pipeline.py"}}}}
+
+User: "reindex changed files"
+{{"tool": "codewalk_incremental_reindex", "arguments": {{}}}}
+
+User: "refresh the analysis"
+{{"tool": "codewalk_refresh_analysis", "arguments": {{}}}}
+
+User: "load our coding guidelines"
+{{"tool": "codewalk_load_guidelines", "arguments": {{}}}}
+
 Return ONLY valid JSON, nothing else:
 {{"tool": "tool_name", "arguments": {{...}}}}
 
-If no tool matches, return:
+If the question is NOT about code/project/architecture at all (e.g. "what time is it", "tell me a joke"):
 {{"tool": null, "arguments": {{}}}}
 """
 

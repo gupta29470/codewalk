@@ -47,6 +47,10 @@ You receive a git diff and must identify issues in these severity levels:
 
 {context_sections}
 
+IMPORTANT:
+- Focus checklists on the LANGUAGES present in the diff. Skip irrelevant language patterns.
+- If no issues are found, return: {{"issues": [], "summary": "No issues found. The changes look good."}}
+
 Respond in this exact JSON format (no extra text before or after):
 {{
     "issues": [
@@ -76,5 +80,5 @@ REVIEW_USER_PROMPT = """## Changes to review:
 {pre_checks}
 
 Review the diff above. Focus on issues NOT already caught by pre-checks.
-Return ONLY the JSON object, no markdown fences, no explanation outside the JSON.
+Return ONLY the JSON object in the format specified in the system prompt. No markdown fences, no explanation outside the JSON.
 """

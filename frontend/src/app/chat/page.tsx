@@ -6,13 +6,20 @@ import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
 import { Card } from "@/components/ui/card";
 import { ScrollArea } from "@/components/ui/scroll-area";
-import { Loader2, Send, Bot, User } from "lucide-react";
+import { Loader2, Send, Bot, User, Wifi, WifiOff } from "lucide-react";
 import ReactMarkdown from "react-markdown";
 
 interface Message {
     role: "user" | "assistant";
     content: string;
 }
+
+const SUGGESTED_QUESTIONS = [
+    "Give me an overview of this project",
+    "What are the riskiest files to change?",
+    "Explain the main entry point",
+    "What modules exist?",
+];
 
 export default function ChatPage() {
     const [messages, setMessages] = useState<Message[]>([
@@ -25,6 +32,7 @@ export default function ChatPage() {
     const [input, setInput] = useState("");
     const [loading, setLoading] = useState(false);
     const [threadId] = useState(() => `thread-${Date.now()}`);
+    const [connected, setConnected] = useState(true);
     const scrollRef = useRef<HTMLDivElement>(null);
 
     useEffect(() => {
@@ -33,8 +41,23 @@ export default function ChatPage() {
         }
     }, [messages]);
 
-    async function handleSend() {
-        const trimmed = input.trim();
+    // Connection check on mount + periodic polling
+    useEffect(() => {
+        const checkConnection = async () => {
+            try {
+                await api.health();
+                setConnected(true);
+            } catch {
+                setConnected(false);
+            }
+        };
+        checkConnection();
+        const interval = setInterval(checkConnection, 10000);
+        return () => clearInterval(interval);
+    }, []);
+
+    async function handleSend(message?: string) {
+        const trimmed = (message || input).trim();
         if (!trimmed || loading) return;
 
         const userMsg: Message = { role: "user", content: trimmed };
@@ -68,9 +91,20 @@ export default function ChatPage() {
         }
     }
 
+    const showSuggestions = messages.length <= 1 && !loading;
+
     return (
         <div className="flex flex-col h-[calc(100vh-3rem)]">
-            <h1 className="text-2xl font-bold mb-4">Ask Codewalk</h1>
+            <div className="flex items-center justify-between mb-4">
+                <h1 className="text-2xl font-bold">Ask Codewalk</h1>
+                <div className="flex items-center gap-2 text-sm">
+                    {connected ? (
+                        <><Wifi className="h-4 w-4 text-green-500" /><span className="text-muted-foreground">Connected</span></>
+                    ) : (
+                        <><WifiOff className="h-4 w-4 text-red-500" /><span className="text-red-500">Backend offline — run `uvicorn src.codewalk.api.main:app`</span></>
+                    )}
+                </div>
+            </div>
 
             {/* Messages */}
             <Card className="flex-1 overflow-hidden">
@@ -126,6 +160,21 @@ export default function ChatPage() {
             </Card>
 
             {/* Input */}
+            {showSuggestions && (
+                <div className="flex flex-wrap gap-2 mt-4">
+                    {SUGGESTED_QUESTIONS.map((q) => (
+                        <Button
+                            key={q}
+                            variant="outline"
+                            size="sm"
+                            className="text-xs"
+                            onClick={() => handleSend(q)}
+                        >
+                            {q}
+                        </Button>
+                    ))}
+                </div>
+            )}
             <div className="flex gap-2 mt-4">
                 <Textarea
                     placeholder="Type your question..."
@@ -135,7 +184,7 @@ export default function ChatPage() {
                     rows={1}
                     className="resize-none"
                 />
-                <Button onClick={handleSend} disabled={loading || !input.trim()}>
+                <Button onClick={() => handleSend()} disabled={loading || !input.trim()}>
                     <Send className="h-4 w-4" />
                 </Button>
             </div>

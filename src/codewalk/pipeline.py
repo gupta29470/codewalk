@@ -15,25 +15,12 @@ from src.codewalk.embeddings.embedder import embed_chunks
 from src.codewalk.embeddings.vector_store import VectorStore
 from src.codewalk.analysis.relevance_filter import filter_files_with_llm
 from src.codewalk.config import settings
-
-# Set up file logger — user can tail -f data/codewalk.log
-_log_dir = Path("data")
-_log_dir.mkdir(exist_ok=True)
+from src.codewalk.log import log as _log
 
 _SENTINEL = object()
 EMBED_BATCH_SIZE = 256
 
 logger = logging.getLogger("codewalk")
-logger.setLevel(logging.INFO)
-if not logger.handlers:
-    fh = logging.FileHandler(_log_dir / "codewalk.log")
-    fh.setFormatter(logging.Formatter("%(asctime)s | %(message)s", datefmt="%H:%M:%S"))
-    logger.addHandler(fh)
-
-def _log(msg: str):
-    """Log to both stdout and file."""
-    print(msg, file=sys.stderr)
-    logger.info(msg)
 
 
 def chunk_and_embed_parallel(files: list[dict]) -> tuple[list[dict], int]:

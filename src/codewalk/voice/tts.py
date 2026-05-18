@@ -1,6 +1,7 @@
 import asyncio
 import atexit
 import os
+import sys
 import tempfile
 import subprocess
 import edge_tts
@@ -45,6 +46,7 @@ def speak(text: str, voice: str = DEFAULT_VOICE):
 
     Saves to temp file → plays with macOS afplay (built-in).
     Tracks the afplay process so stop_speaking() or process exit kills it.
+    Listens for Escape key to interrupt playback.
     """
     global _current_playback, _current_tmp
 
@@ -60,7 +62,31 @@ def speak(text: str, voice: str = DEFAULT_VOICE):
     _current_tmp = tmp_path
     # Launch afplay as a tracked subprocess (can be killed)
     _current_playback = subprocess.Popen(["afplay", tmp_path])
-    _current_playback.wait()
+
+    # Wait for playback to finish, checking for stop signal
+    import select
+    import termios
+    import tty
+
+    try:
+        fd = sys.stdin.fileno()
+        old_settings = termios.tcgetattr(fd)
+        tty.setcbreak(fd)
+        try:
+            while _current_playback and _current_playback.poll() is None:
+                # Check if a key was pressed (non-blocking)
+                if select.select([sys.stdin], [], [], 0.1)[0]:
+                    ch = sys.stdin.read(1)
+                    if ch == '\x1b':  # Escape key
+                        stop_speaking()
+                        break
+        finally:
+            termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
+    except (OSError, termios.error):
+        # Not a terminal (e.g. MCP stdio) — just wait normally
+        if _current_playback:
+            _current_playback.wait()
+
     _current_playback = None
 
     # Clean up temp file
