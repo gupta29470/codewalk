@@ -37,7 +37,6 @@ from src.codewalk.analysis.blast_radius import (
     calculate_full_blast_map,
 )
 from src.codewalk.analysis.reading_order import generate_reading_order_raw
-from src.codewalk.review.reviewer import review_diff
 from src.codewalk.review.guidelines_loader import get_guidelines_store
 from src.codewalk.voice.stt import record_audio, transcribe
 from src.codewalk.voice.tts import speak, stop_speaking
@@ -980,59 +979,95 @@ def codewalk_review_diff(
     staged: bool = False,
     target_branch: str | None = None,
 ) -> str:
-    """Run Codewalk's multi-stage code review pipeline on the current git diff.
+    """Review the current git diff for bugs, security vulnerabilities, and logic errors.
 
-    Runs 5 automated checks:
-      1. Test coverage check — flags source files missing test updates
-      2. Blast radius analysis — warns about high-risk files (from dependency graph)
-      3. Codebase pattern matching — finds similar code via ChromaDB embeddings
-      4. Team guidelines RAG — injects coding standards from indexed guidelines
-      5. LLM deep review — OWASP security, bugs, logic errors, style
+    Gathers the diff, enriches it with codebase context (file contents, dependency
+    graph, security patterns from the vector index), runs automated pre-checks,
+    and returns everything for deep analysis.
 
-    Output: markdown report with issues sorted by severity:
-    🔴 CRITICAL → 🟡 WARNING → 🟢 SUGGESTION.
+    Automated pre-checks:
+      - Test coverage: flags source files missing corresponding test updates
+      - Blast radius: warns about high-risk files with many dependents
 
     Args:
         staged: If True, review only staged changes (--staged). Default: all unstaged.
         target_branch: Diff against a branch (e.g. "main" for full PR review).
     """
-    result = review_diff(
+    from src.codewalk.review.reviewer import prepare_review_context
+
+    ctx = prepare_review_context(
         staged=staged,
         target_branch=target_branch,
-        use_llm=True,
-        store=state._store,    # cached vector store (if indexed)
-        deps=state._deps, 
+        store=state._store,
+        deps=state._deps,
+        repo_path=settings.repo_path,
     )
 
-    if not result.issues:
-        return (
-            f"✅ No issues found.\n"
-            f"Reviewed {result.files_reviewed} files "
-            f"(+{result.lines_added} / -{result.lines_removed})\n\n"
-            f"{result.summary}"
-        )
-    
-    lines = [
-        f"## Code Review — {result.files_reviewed} files "
-        f"(+{result.lines_added} / -{result.lines_removed})\n"
-    ]
+    if ctx is None:
+        return "No changes to review (empty diff)."
 
-    severity_icons = {"critical": "🔴", "warning": "🟡", "suggestion": "🟢"}
+    # ── Build output ──
+    output_parts = []
+    output_parts.append(
+        f"## Code Review Request — {len(ctx.diff_files)} files "
+        f"(+{ctx.total_added} / -{ctx.total_removed})\n"
+    )
 
-    for issue in sorted(result.issues, key=lambda issue: issue.severity.value):
-        icon = severity_icons.get(issue.severity.value, "⚪")
-        loc = f"{issue.file_path}:{issue.line_number}" if issue.line_number else issue.file_path
-        lines.append(f"{icon} **{issue.title}**")
-        lines.append(f"   {loc}")
-        lines.append(f"   {issue.explanation}")
-        if issue.suggestion:
-            lines.append(f"   💡 {issue.suggestion}")
-        if issue.code_snippet:
-            lines.append(f"   ```\n   {issue.code_snippet}\n   ```")
-        lines.append("")
+    # Pre-check results
+    if ctx.pre_check_issues:
+        output_parts.append("### Pre-check Findings")
+        for issue in ctx.pre_check_issues:
+            output_parts.append(
+                f"- 🟡 [{issue.severity.value}] {issue.file_path}: {issue.title}"
+            )
+        output_parts.append("")
 
-    lines.append(f"\n**Summary:** {result.summary}")
-    return "\n".join(lines)
+    # Blast radius warnings
+    if ctx.blast_radius_warnings:
+        output_parts.append("### Blast Radius Warnings")
+        for w in ctx.blast_radius_warnings:
+            output_parts.append(f"- ⚠️ {w}")
+        output_parts.append("")
+
+    # Guidelines
+    if ctx.guidelines_context:
+        output_parts.append(ctx.guidelines_context)
+        output_parts.append("")
+
+    # ── Per-file diff + context ──
+    output_parts.append("---\n### Files to Review\n")
+
+    for fc in ctx.file_contexts:
+        df = fc.diff_file
+        output_parts.append(f"## File: {df.file_path} (+{df.added_lines}/-{df.removed_lines})")
+
+        if fc.file_content:
+            output_parts.append(f"<full_file>\n{fc.file_content}\n</full_file>")
+
+        if fc.caller_context:
+            output_parts.append(fc.caller_context)
+
+        if fc.security_context:
+            output_parts.append(fc.security_context)
+
+        output_parts.append(f"<diff>\n{fc.file_diff_text}\n</diff>\n")
+
+    # ── Review instructions ──
+    output_parts.append(
+        "---\n"
+        "## YOUR TASK\n"
+        "Review each file above. For each issue found, report:\n"
+        "- Severity: 🔴 CRITICAL / 🟡 WARNING / 🟢 SUGGESTION\n"
+        "- File and line number\n"
+        "- What's wrong and why it's dangerous\n"
+        "- Suggested fix\n\n"
+        "Focus on: OWASP top 10 (injection, auth bypass, XSS, SSRF, open redirect), "
+        "race conditions, resource leaks, null safety, async gaps (setState after await "
+        "without mounted check), unbounded growth, hardcoded secrets, certificate pinning "
+        "bypass, SQL injection, path traversal. Be AGGRESSIVE — better to over-flag."
+    )
+
+    return "\n".join(output_parts)
 
 # ─── TOOL 15 [MAINT · user+AI]: codewalk_review_file ────────────
 @mcp.tool()

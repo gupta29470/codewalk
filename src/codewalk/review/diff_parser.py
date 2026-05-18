@@ -1,11 +1,11 @@
 import subprocess
 from pathlib import Path
 
-from src.codewalk.review.models import DiffHunk, DiffFile
+from src.codewalk.review.models import DiffHunk, DiffFile, ChangedLine
 from src.codewalk.ingestion.scanner import detect_language
 
 
-def get_diff(staged: bool = False, target_branch: str | None = None) -> str:
+def get_diff(staged: bool = False, target_branch: str | None = None, repo_path: str | None = None) -> str:
     """Run git diff and return raw unified diff text."""
     cmd = ["git", "diff", "--unified=5"]
     if staged:
@@ -18,6 +18,7 @@ def get_diff(staged: bool = False, target_branch: str | None = None) -> str:
         capture_output=True,
         text=True,
         timeout=60,
+        cwd=repo_path,
     )
 
     return result.stdout
@@ -47,11 +48,11 @@ def get_parsed_diff(diff_text: str) -> list[DiffFile]:
                     change_type = "context"
                     line_no = line.target_line_no
                 
-                lines.append({
-                    "line_number": line_no or 0,
-                    "content": line.value,
-                    "change_type": change_type,
-                })
+                lines.append(ChangedLine(
+                    line_number=line_no or 0,
+                    content=line.value,
+                    change_type=change_type,
+                ))
             
             hunks.append(DiffHunk(
                 start_line=hunk.target_start,
