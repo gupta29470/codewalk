@@ -1,8 +1,32 @@
+"""
+=============================================================================
+ flow_generator.py - LLM-Generated Execution Flow Diagram
+=============================================================================
+
+WHAT THIS FILE DOES:
+    Uses an LLM to generate an execution flow diagram (Mermaid) and
+    step-by-step narration of how the codebase runs.
+
+    Unlike diagram_generator.py (which is mechanical/deterministic),
+    this uses LLM intelligence to identify the MAIN execution path
+    and narrate it in plain English.
+
+WHERE IT'S CALLED:
+    - server.py -> codewalk_get_execution_flow() MCP tool
+
+DEPENDENCIES:
+    - config.py: get_llm()
+    - langchain: prompt templates
+
+=============================================================================
+"""
+
 from src.codewalk.config import get_llm
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import StrOutputParser
 
-# ─── System prompt for execution flow ────────────────────────────────
+# --- LLM Prompt ---
+
 FLOW_SYSTEM_PROMPT = """You are a codebase onboarding assistant.
 Given a reading order of files and their dependencies, generate:
 
@@ -13,7 +37,7 @@ Rules:
 - Use `graph TD` (top-down) for the Mermaid diagram
 - Show only the main execution path, not every file
 - Entry points are files that nothing else imports (no incoming edges)
-- Keep narration concise — one sentence per step
+- Keep narration concise - one sentence per step
 - Reference actual file names from the reading order
 - Do NOT invent function names or logic not present in the input"""
 
@@ -31,40 +55,42 @@ Generate:
 2. A "How this code runs" narration (numbered steps)"""
 
 
+# --- Helpers ---
+
 def _format_reading_order(orders: list[dict]) -> str:
-    """Format reading order for the LLM prompt."""
+    """Format reading order list for the LLM prompt."""
     lines = []
     for item in orders:
         name = item["file"].split("/")[-1]
-        lines.append(f"{item['position']}. {name} — {item['why']}")
-
+        lines.append(f"{item['position']}. {name} - {item['why']}")
     return "\n".join(lines)
 
+
 def _format_dependency_summary(graph: dict) -> str:
-    """Format dependency graph as a readable summary for the LLM."""
+    """Format dependency graph as readable text for LLM."""
     internal = set(graph.keys())
     lines = []
-
     for file, deps in graph.items():
         name = file.split("/")[-1]
         internal_deps = [dep.split("/")[-1] for dep in deps if dep in internal]
-
         if internal_deps:
-            lines.append(f"{name} → imports: {', '.join(internal_deps)}")
+            lines.append(f"{name} -> imports: {', '.join(internal_deps)}")
         else:
-            lines.append(f"{name} → (no internal imports)")
-
+            lines.append(f"{name} -> (no internal imports)")
     return "\n".join(lines)
 
+
+# --- Main Function ---
+
 def generate_execution_flow(reading_order: dict, deps: dict) -> str:
-    """Generate execution flow diagram + narration using the LLM.
+    """Generate execution flow diagram + narration using LLM.
 
     Args:
-        reading_order: from generate_reading_order() — {"order": [...], ...}
-        deps: from build_dependency_graph() — {"graph": {...}, ...}
+        reading_order: from generate_reading_order() - {"order": [...], ...}
+        deps: from build_dependency_graph() - {"graph": {...}, ...}
 
     Returns:
-        String with Mermaid diagram + narration (Markdown formatted).
+        Markdown string with Mermaid diagram + numbered narration.
     """
     prompt = ChatPromptTemplate.from_messages([
         ("system", FLOW_SYSTEM_PROMPT),

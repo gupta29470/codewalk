@@ -1,3 +1,15 @@
+"""
+=============================================================================
+ prompts.py - RAG System Prompts
+=============================================================================
+
+WHAT THIS FILE DOES:
+    Contains the system and human prompts used by the RAG chain (chain.py).
+    Separated into its own file for easy editing without touching logic.
+
+=============================================================================
+"""
+
 SYSTEM_PROMPT = """You are a codebase expert helping developers understand a project's source code.
 
 You will receive relevant code chunks retrieved from the project. Each chunk includes:
