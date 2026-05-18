@@ -1,10 +1,39 @@
-"""Codewalk MCP server — 18 tools for codebase onboarding, search, review, and voice.
+"""
+=============================================================================
+ server.py - MCP Server (18 Tools for VS Code Copilot Integration)
+=============================================================================
 
-Tool categories:
-  SETUP  (1, 9-11): Analyze repo, scan/filter files, index embeddings.
-  QUERY  (2-8):     Search code, explain functions, blast radius, reading order, execution flow.
-  MAINT  (12-16):   Incremental reindex, refresh analysis, review diff/file, load guidelines.
-  VOICE  (17-18):   Mic record+transcribe (Copilot routes), TTS speak.
+WHAT THIS FILE DOES:
+    The MCP (Model Context Protocol) server that VS Code Copilot connects to.
+    Exposes 18 tools that Copilot can call to analyze, search, review, and
+    speak about a codebase.
+
+TOOL CATEGORIES:
+    SETUP  (Tools 1, 9-11): Analyze repo, scan/filter files, index embeddings
+    QUERY  (Tools 2-8):     Search code, explain functions, blast radius,
+                            reading order, execution flow, module info, overview
+    MAINT  (Tools 12-16):   Incremental reindex, refresh analysis, review
+                            diff/file, load guidelines
+    VOICE  (Tools 17-18):   Mic record+transcribe, TTS speak
+
+HOW IT INTEGRATES:
+    1. VS Code reads mcp.json which points to this server
+    2. Copilot spawns `python -m src.codewalk.mcp.server` over stdio
+    3. Copilot reads the `instructions` field to know how to use tools
+    4. User asks a question -> Copilot picks the right tool -> tool returns data
+
+WHERE IT'S CALLED:
+    - VS Code Copilot via MCP protocol (stdio transport)
+    - voice/backends.py -> _TOOL_MAP for direct execution
+    - Can also run standalone: `python -m src.codewalk.mcp.server`
+
+DEPENDENCIES:
+    - All analysis/, generation/, review/, voice/ modules
+    - api/state.py: shared state singleton
+    - pipeline.py: indexing functions
+    - FastMCP: MCP protocol implementation
+
+=============================================================================
 """
 
 import inspect
