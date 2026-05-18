@@ -754,7 +754,7 @@ or
 @codewalk_review_file src/codewalk/pipeline.py
 ```
 
-**When to use:** When you want to compare a specific file against patterns found elsewhere in the codebase.
+**When to use:** When you want to review any file — no git diff needed. Reads the file directly, enriches it with caller context (who imports it), security patterns from the vector store, similar code elsewhere in the codebase, and team guidelines. Copilot performs the review natively — no local LLM, instant results.
 
 ---
 
