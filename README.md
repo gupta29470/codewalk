@@ -29,7 +29,7 @@ Codewalk analyzes any codebase and gives you:
 - **Reading order** — optimal file reading sequence (dependencies first)
 - **Execution flow** — entry points, module-to-module and file-to-file dependency flow
 - **AI chat** — ask anything about the code, powered by RAG + tool-calling agent
-- **Code review** — review git diffs for bugs, security issues, and style (LLM + pre-checks)
+- **Code review** — review git diffs for bugs, security issues, and style (context-enriched, OWASP-focused)
 - **Incremental reindex** — re-embed only changed files using content hash comparison
 - **Voice interface** — talk to your codebase hands-free: mic → transcribe → Copilot routes → speak answer
 
@@ -52,7 +52,7 @@ Four ways to use it:
 | **LLM token costs are high** | Without RAG, the LLM needs your entire codebase in context — slow and expensive. Codewalk embeds code into a vector DB and retrieves only the relevant chunks per query. Faster answers, fraction of the tokens. |
 | **Senior dev switches modules** | You know the auth module but now need to work on payments. Get module info, blast radius, and execution flow without bugging the payments team. |
 | **Before a refactor** | Check blast radius before touching shared code. "If I change `base_model.py`, what breaks?" — get the answer before you break prod. |
-| **PR reviews** | Run `codewalk_review_diff` or `POST /review` — automated multi-stage review with OWASP security checks, test coverage detection, blast radius warnings, team guidelines matching, and LLM deep scan. |
+| **PR reviews** | Run `codewalk_review_diff` or `POST /review` — automated multi-stage review with OWASP security checks, test coverage detection, blast radius warnings, and team guidelines matching. MCP mode leverages the calling model (Claude/GPT) directly — no separate LLM needed. |
 | **Documentation is outdated** | Codewalk analyzes the *actual code*, not stale wiki pages. Always up to date. |
 
 ---
@@ -68,7 +68,7 @@ Four ways to use it:
 | 🔄 **Execution Flow** | Entry points, module/file dependency chains, Mermaid diagrams |
 | 🤖 **AI Chat** | LangGraph agent with 7 tools, multi-turn conversation with memory |
 | 🔎 **Semantic Search** | ChromaDB vector search on embedded code chunks (RAG) |
-| 🔬 **Code Review** | Multi-stage review pipeline: test coverage, blast radius, guidelines RAG, LLM deep scan |
+| 🔬 **Code Review** | Multi-stage review pipeline: test coverage, blast radius, guidelines RAG, context-enriched deep analysis |
 | 🔄 **Incremental Reindex** | Content hash comparison — only re-embeds changed files, skips unchanged |
 | 🧩 **MCP Server** | 18 tools for VS Code Copilot / Claude Code / Cursor / Codex |
 | 🎙️ **Voice Interface** | Talk to your codebase — mic recording, local STT (faster-whisper), Copilot-driven routing (MCP) / Ollama routing (API), TTS response |
@@ -505,7 +505,7 @@ You just tell the AI to analyze — **the AI handles the rest automatically**.
 │                                                                     │
 │  codewalk_incremental_reindex   → re-embed only changed files       │
 │  codewalk_refresh_analysis      → re-scan without re-embedding      │
-│  codewalk_review_diff           → review git diff (LLM + checks)    │
+│  codewalk_review_diff           → review git diff (context + checks) │
 │  codewalk_review_file           → review file vs codebase patterns  │
 │  codewalk_load_guidelines       → load team coding standards        │
 └─────────────────────────────────────────────────────────────────────┘
@@ -738,7 +738,7 @@ or
 @codewalk_review_diff staged=true target_branch="main"
 ```
 
-**When to use:** Before pushing a PR. Catches security vulnerabilities (OWASP), bugs, missing test coverage, and style issues.
+**When to use:** Before pushing a PR. Catches security vulnerabilities (OWASP), bugs, missing test coverage, and style issues. In MCP mode, Copilot performs the review directly using enriched context (full file contents, dependency graph, vector store patterns) — no local LLM overhead, instant results.
 
 ---
 
