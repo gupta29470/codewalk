@@ -1,3 +1,29 @@
+"""
+=============================================================================
+ backends.py - Tool Execution Backends
+=============================================================================
+
+WHAT THIS FILE DOES:
+    Provides 3 ways to execute Codewalk tools from the voice companion:
+    1. execute_direct(): call Python functions directly (fastest, same process)
+    2. execute_mcp()/execute_mcp_sync(): call via MCP protocol over stdio
+    3. execute_api(): call via FastAPI HTTP endpoints
+
+WHY MULTIPLE BACKENDS:
+    - Direct: for CLI companion (no server needed)
+    - MCP: for testing MCP protocol compatibility
+    - API: for web frontend (browser talks to FastAPI)
+
+WHERE IT'S CALLED:
+    - companion.py -> main() picks backend based on --backend flag
+
+DEPENDENCIES:
+    - mcp/server.py: _TOOL_MAP for direct execution
+    - httpx: for HTTP calls to FastAPI
+
+=============================================================================
+"""
+
 import httpx
 import asyncio
 import inspect
@@ -5,10 +31,10 @@ import json
 
 from src.codewalk.mcp.server import _TOOL_MAP
 
-# Reuse the shared map — single source of truth
+# Reuse the shared tool map from MCP server
 _TOOL_FUNCTIONS = _TOOL_MAP
 
-# ── FastAPI HTTP backend (frontend path) ──
+# Maps tool names to FastAPI routes (for API backend)
 _TOOL_TO_ROUTE = {
     "codewalk_analyze_codebase": ("POST", "/analyze"),
     "codewalk_search_codebase": ("POST", "/chat"),
@@ -24,31 +50,25 @@ _TOOL_TO_ROUTE = {
     "codewalk_load_guidelines": ("POST", "/review/guidelines"),
 }
 
+
 def execute_direct(tool_name: str, arguments: dict) -> str:
-    """Call a Codewalk tool function directly (same process).
+    """Call a Codewalk tool function directly (same process, fastest).
 
-    Args:
-        tool_name: e.g. "codewalk_get_reading_order"
-        arguments: e.g. {"module_name": "analysis"}
-
-    Returns:
-        Tool result as a string.
+    Cleans up arguments to only pass valid params (routing models
+    sometimes hallucinate extra parameters).
     """
     fn = _TOOL_FUNCTIONS.get(tool_name)
     if not fn:
         return f"Unknown tool: {tool_name}"
-    
-    # Remove None values and args the function doesn't accept
-    # (tiny routing models sometimes hallucinate extra parameters)
+
+    # Only pass args the function actually accepts
     valid_params = set(inspect.signature(fn).parameters.keys())
     clean_args = {k: v for k, v in arguments.items() if v is not None and k in valid_params}
     return fn(**clean_args)
 
-async def execute_mcp(tool_name: str, arguments: dict) -> str:
-    """Call a Codewalk tool via MCP protocol over stdio.
 
-    Spawns the MCP server as a subprocess if not already running.
-    """
+async def execute_mcp(tool_name: str, arguments: dict) -> str:
+    """Call a Codewalk tool via MCP protocol over stdio subprocess."""
     from mcp.client.stdio import stdio_client
     from mcp import ClientSession, StdioServerParameters
 
@@ -62,26 +82,23 @@ async def execute_mcp(tool_name: str, arguments: dict) -> str:
             await session.initialize()
             result = await session.call_tool(tool_name, arguments)
             return result.content[0].text
-        
+
+
 def execute_mcp_sync(tool_name: str, arguments: dict) -> str:
     """Sync wrapper for MCP execution."""
     return asyncio.run(execute_mcp(tool_name, arguments))
 
+
 def execute_api(tool_name: str, arguments: dict, base_url: str = "http://localhost:8000") -> str:
     """Call a Codewalk tool via FastAPI HTTP endpoint.
 
-    Args:
-        tool_name: e.g. "codewalk_get_reading_order"
-        arguments: e.g. {"module_name": "analysis"}
-        base_url: FastAPI server URL.
-
-    Returns:
-        JSON response as string.
+    Substitutes path parameters (e.g. {module_name}) and routes
+    to the correct HTTP method/path.
     """
     route_info = _TOOL_TO_ROUTE.get(tool_name)
     if route_info is None:
         return f"No API route for tool: {tool_name}"
-    
+
     method, path = route_info
 
     # Substitute path parameters like {module_name}
@@ -98,4 +115,4 @@ def execute_api(tool_name: str, arguments: dict, base_url: str = "http://localho
             response = client.post(url, json=arguments)
 
     response.raise_for_status()
-    return json.dumps(response.json(), indent=2)
+    return response.text

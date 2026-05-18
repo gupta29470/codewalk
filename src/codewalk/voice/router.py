@@ -1,12 +1,47 @@
+"""
+=============================================================================
+ router.py - Voice Command Router (Transcript -> Tool Selection)
+=============================================================================
+
+WHAT THIS FILE DOES:
+    Takes a user's spoken transcript and determines which Codewalk tool
+    to call and with what arguments.
+
+    Example: "what does scan directory do" -> codewalk_explain_function(function_name="scan_directory")
+
+HOW IT WORKS:
+    1. TOOL_REGISTRY defines all 16 tools with parameter schemas
+    2. ROUTER_SYSTEM_PROMPT teaches the LLM how to route
+    3. route_with_ollama() uses local qwen2.5:1.5b (free, 398MB)
+    4. route_with_llm() uses the user's configured LLM (API key)
+    5. route() auto-picks based on config
+
+WHERE IT'S CALLED:
+    - companion.py -> main loop calls route_with_ollama()
+    - api/main.py -> /voice/ask endpoint
+
+DEPENDENCIES:
+    - config.py: settings.llm_provider for auto-routing
+    - httpx: for Ollama HTTP calls
+    - langchain: for LLM routing (API key path)
+
+=============================================================================
+"""
+
 import json
 import httpx
 from src.codewalk.config import settings
 
-# ── Tool registry: all 16 Codewalk tools with schemas ──
+
+# =============================================================================
+# Tool Registry - All 16 Codewalk Tools
+# =============================================================================
+# This is the voice companion's understanding of what tools exist.
+# Each entry has a description (for the routing prompt) and parameter schemas.
 
 TOOL_REGISTRY = {
     "codewalk_analyze_codebase": {
-        "description": "Analyze repo structure — modules, dependencies. Must call first.",
+        "description": "Analyze repo structure - modules, dependencies. Must call first.",
         "parameters": {},
     },
     "codewalk_search_codebase": {
@@ -72,11 +107,13 @@ TOOL_REGISTRY = {
         "description": "Load team coding guidelines for use in reviews.",
         "parameters": {"docs_path": {"type": "string", "description": "Path to guidelines directory", "default": None}},
     },
-    # "codewalk_voice_ask" — not in routing map (voice_ask IS the router entry point)
 }
 
 
-# System prompt for the routing LLM
+# =============================================================================
+# Router System Prompt
+# =============================================================================
+
 ROUTER_SYSTEM_PROMPT = """You are a tool router for Codewalk, a codebase onboarding tool.
 Given the user's spoken request, pick the BEST matching tool and extract arguments.
 
@@ -85,94 +122,46 @@ Available tools:
 
 RULES:
 - Ignore filler words: "um", "uh", "like", "so", "basically", "can you"
-- Match partial names: "scanner" → "scanner.py", "blast" → blast_radius_map
-- "overview" or "summary" → codewalk_get_overview (not search)
-- "what does X do" → codewalk_explain_function (not search)
-- "what's in module X" → codewalk_get_module_info (not search)
-- "what breaks" / "risk" / "impact" → codewalk_get_blast_radius_map
-- "this project", "the project", "whole project", "entire codebase", "everything" → leave optional params EMPTY (do NOT invent a module name)
+- Match partial names: "scanner" -> "scanner.py", "blast" -> blast_radius_map
+- "overview" or "summary" -> codewalk_get_overview (not search)
+- "what does X do" -> codewalk_explain_function (not search)
+- "what's in module X" -> codewalk_get_module_info (not search)
+- "what breaks" / "risk" / "impact" -> codewalk_get_blast_radius_map
+- "this project", "the project", "whole project" -> leave optional params EMPTY
 
-DEFAULT RULE — when in doubt, use codewalk_search_codebase:
-- "how does X work" → ALWAYS search, never execution_flow
-- "X flow" where X is a concept/feature (auth, payment, login) → ALWAYS search
-- codewalk_get_execution_flow is ONLY for "show me the dependency diagram" or "execution flow of the whole project" — never for feature concepts
-- codewalk_get_module_info is ONLY when user names an EXACT top-level module
-- If you are not sure which tool → codewalk_search_codebase with the full transcript as query
+DEFAULT RULE - when in doubt, use codewalk_search_codebase:
+- "how does X work" -> ALWAYS search
+- "X flow" where X is a concept/feature -> ALWAYS search
+- codewalk_get_execution_flow is ONLY for dependency diagrams
+- codewalk_get_module_info is ONLY when user names an EXACT module
+- If unsure -> codewalk_search_codebase with full transcript as query
 
-EXAMPLES:
-User: "give me the reading order for analysis"
-{{"tool": "codewalk_get_reading_order", "arguments": {{"module_name": "analysis"}}}}
-
-User: "what does scan directory do"
-{{"tool": "codewalk_explain_function", "arguments": {{"function_name": "scan_directory"}}}}
-
-User: "um what breaks if I change the scanner"
-{{"tool": "codewalk_get_blast_radius_map", "arguments": {{"target": "scanner.py"}}}}
-
-User: "show me the overview"
-{{"tool": "codewalk_get_overview", "arguments": {{}}}}
-
-User: "how does authentication work"
-{{"tool": "codewalk_search_codebase", "arguments": {{"query": "authentication"}}}}
-
-User: "authentication flow"
-{{"tool": "codewalk_search_codebase", "arguments": {{"query": "authentication flow"}}}}
-
-User: "show me the login flow"
-{{"tool": "codewalk_search_codebase", "arguments": {{"query": "login flow"}}}}
-
-User: "show me the dependency diagram"
-{{"tool": "codewalk_get_execution_flow", "arguments": {{}}}}
-
-User: "what's in the API module"
-{{"tool": "codewalk_get_module_info", "arguments": {{"module_name": "api"}}}}
-
-User: "reading order of this project"
-{{"tool": "codewalk_get_reading_order", "arguments": {{}}}}
-
-User: "show me the blast radius for the whole project"
-{{"tool": "codewalk_get_blast_radius_map", "arguments": {{}}}}
-
-User: "review my changes"
-{{"tool": "codewalk_review_diff", "arguments": {{}}}}
-
-User: "review the pipeline file"
-{{"tool": "codewalk_review_file", "arguments": {{"file_path": "src/codewalk/pipeline.py"}}}}
-
-User: "reindex changed files"
-{{"tool": "codewalk_incremental_reindex", "arguments": {{}}}}
-
-User: "refresh the analysis"
-{{"tool": "codewalk_refresh_analysis", "arguments": {{}}}}
-
-User: "load our coding guidelines"
-{{"tool": "codewalk_load_guidelines", "arguments": {{}}}}
-
-Return ONLY valid JSON, nothing else:
+Return ONLY valid JSON:
 {{"tool": "tool_name", "arguments": {{...}}}}
 
-If the question is NOT about code/project/architecture at all (e.g. "what time is it", "tell me a joke"):
+If not about code/project at all:
 {{"tool": null, "arguments": {{}}}}
 """
 
-def _build_tools_description() -> str:
-    """Build a concise tool list for the system prompt."""
-    lines = []
 
+def _build_tools_description() -> str:
+    """Build concise tool list for the system prompt."""
+    lines = []
     for name, info in TOOL_REGISTRY.items():
         params = ", ".join(f"{k}: {v['type']}" for k, v in info["parameters"].items()) if info["parameters"] else "none"
         lines.append(f"- {name}({params}): {info['description']}")
     return "\n".join(lines)
 
+
+# =============================================================================
+# Routing Functions
+# =============================================================================
+
 def route_with_ollama(transcript: str, model: str = "qwen2.5:1.5b") -> dict:
-    """Route using local Ollama (free, for Ollama users and MCP CLI).
+    """Route using local Ollama (free, no API key needed).
 
-    Args:
-        transcript: User's spoken text.
-        model: Ollama model name. Default qwen2.5:1.5b (398MB).
-
-    Returns:
-        {"tool": "tool_name", "arguments": {...}} or {"tool": None}
+    Uses a tiny model (398MB) that's fast enough for routing.
+    Falls back to {"tool": None} on any error.
     """
     system_prompt = ROUTER_SYSTEM_PROMPT.format(
         tools_description=_build_tools_description()
@@ -187,33 +176,24 @@ def route_with_ollama(transcript: str, model: str = "qwen2.5:1.5b") -> dict:
                 {"role": "user", "content": transcript},
             ],
             "stream": False,
-            "format": "json",  # force JSON output
+            "format": "json",
         },
         timeout=30,
     )
-
     response.raise_for_status()
     content = response.json()["message"]["content"]
 
     try:
         result = json.loads(content)
-        # Validate tool exists
         if result.get("tool") and result["tool"] not in TOOL_REGISTRY:
             return {"tool": None, "arguments": {}}
         return result
     except json.JSONDecodeError:
         return {"tool": None, "arguments": {}}
-    
+
 
 def route_with_llm(transcript: str) -> dict:
-    """Route using the user's configured LLM (for API key users).
-
-    Uses get_llm() from config — whatever provider they have
-    (OpenAI, Anthropic, Groq, etc.).
-
-    Returns:
-        {"tool": "tool_name", "arguments": {...}} or {"tool": None}
-    """
+    """Route using the user's configured LLM (for API key users)."""
     from src.codewalk.config import get_llm
     from langchain_core.prompts import ChatPromptTemplate
     from langchain_core.output_parsers import StrOutputParser
@@ -237,12 +217,13 @@ def route_with_llm(transcript: str) -> dict:
         return result
     except (json.JSONDecodeError, KeyError):
         return {"tool": None, "arguments": {}}
-    
+
+
 def route(transcript: str) -> dict:
     """Auto-pick routing strategy based on config.
 
-    - If provider is "ollama" → use qwen2.5:1.5b for routing
-    - If provider has an API key → use get_llm() for routing
+    Ollama users -> local qwen2.5:1.5b (free)
+    API key users -> their configured LLM
     """
     if settings.llm_provider == "ollama":
         return route_with_ollama(transcript)

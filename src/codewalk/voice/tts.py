@@ -1,3 +1,30 @@
+"""
+=============================================================================
+ tts.py - Text-to-Speech (Edge TTS + Audio Playback)
+=============================================================================
+
+WHAT THIS FILE DOES:
+    1. synthesize(): Converts text to MP3 audio bytes using Microsoft Edge TTS
+    2. speak(): Synthesizes + plays audio immediately (with Escape to stop)
+    3. stop_speaking(): Kills any in-progress audio playback
+
+HOW IT WORKS:
+    - Uses edge-tts library (free, no API key, Microsoft neural voices)
+    - Plays audio via macOS `afplay` command
+    - Monitors keyboard for Escape key to interrupt
+    - Cleans up temp files and processes on exit
+
+WHERE IT'S CALLED:
+    - companion.py -> speak() for voice responses
+    - api/main.py -> synthesize() for web frontend audio
+
+DEPENDENCIES:
+    - edge_tts: Microsoft Edge neural TTS (free)
+    - macOS afplay: built-in audio player
+
+=============================================================================
+"""
+
 import asyncio
 import atexit
 import os
@@ -8,50 +35,49 @@ import edge_tts
 
 DEFAULT_VOICE = "en-US-AriaNeural"
 
-# ── Track the current playback process so it can be killed on exit ──
+# Track current playback so it can be killed
 _current_playback: subprocess.Popen | None = None
 _current_tmp: str | None = None
 
+
 async def _synthesize_async(text: str, voice: str = DEFAULT_VOICE) -> bytes:
-    """Generate MP3 audio bytes from text using edge-tts."""
+    """Generate MP3 audio bytes from text using edge-tts (async)."""
     if len(text) > 5000:
         text = text[:5000] + "... response truncated for voice."
 
     communicate = edge_tts.Communicate(text, voice)
-    # Collect audio chunks into bytes
     audio_chunks = []
     async for chunk in communicate.stream():
         if chunk["type"] == "audio":
             audio_chunks.append(chunk["data"])
     return b"".join(audio_chunks)
 
+
 def synthesize(text: str, voice: str = DEFAULT_VOICE) -> bytes:
     """Generate MP3 audio bytes from text (sync wrapper).
 
-    Safe to call from inside an existing event loop (e.g. MCP server)
-    — runs TTS in a separate thread with its own loop.
+    Handles being called from within an existing event loop (MCP server)
+    by running TTS in a separate thread.
     """
     try:
         asyncio.get_running_loop()
-        # Inside an event loop (MCP server) — run in a new thread
+        # Inside event loop - run in thread to avoid blocking
         import concurrent.futures
         with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
             return pool.submit(asyncio.run, _synthesize_async(text, voice)).result()
     except RuntimeError:
-        # No loop running — safe to call directly
+        # No loop running - call directly
         return asyncio.run(_synthesize_async(text, voice))
 
-def speak(text: str, voice: str = DEFAULT_VOICE):
-    """Generate audio and play it immediately (CLI use).
 
-    Saves to temp file → plays with macOS afplay (built-in).
-    Tracks the afplay process so stop_speaking() or process exit kills it.
-    Listens for Escape key to interrupt playback.
+def speak(text: str, voice: str = DEFAULT_VOICE):
+    """Synthesize and play audio immediately (CLI use).
+
+    Saves to temp file, plays with afplay, monitors for Escape to stop.
     """
     global _current_playback, _current_tmp
 
-    # Kill any already-playing audio first
-    stop_speaking()
+    stop_speaking()  # Kill any already-playing audio
 
     audio_bytes = synthesize(text, voice)
 
@@ -60,10 +86,9 @@ def speak(text: str, voice: str = DEFAULT_VOICE):
         tmp_path = tmp_file.name
 
     _current_tmp = tmp_path
-    # Launch afplay as a tracked subprocess (can be killed)
     _current_playback = subprocess.Popen(["afplay", tmp_path])
 
-    # Wait for playback to finish, checking for stop signal
+    # Wait for playback, checking for Escape key
     import select
     import termios
     import tty
@@ -74,7 +99,6 @@ def speak(text: str, voice: str = DEFAULT_VOICE):
         tty.setcbreak(fd)
         try:
             while _current_playback and _current_playback.poll() is None:
-                # Check if a key was pressed (non-blocking)
                 if select.select([sys.stdin], [], [], 0.1)[0]:
                     ch = sys.stdin.read(1)
                     if ch == '\x1b':  # Escape key
@@ -83,13 +107,11 @@ def speak(text: str, voice: str = DEFAULT_VOICE):
         finally:
             termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
     except (OSError, termios.error):
-        # Not a terminal (e.g. MCP stdio) — just wait normally
+        # Not a terminal (MCP stdio) - just wait
         if _current_playback:
             _current_playback.wait()
 
     _current_playback = None
-
-    # Clean up temp file
     try:
         os.unlink(tmp_path)
     except OSError:
@@ -118,5 +140,5 @@ def stop_speaking():
         _current_tmp = None
 
 
-# Kill afplay when the Python process exits (e.g. MCP cancelled)
+# Kill afplay when Python process exits
 atexit.register(stop_speaking)
