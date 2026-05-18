@@ -1,3 +1,42 @@
+"""
+=============================================================================
+ main.py - FastAPI REST Server
+=============================================================================
+
+WHAT THIS FILE DOES:
+    The REST API server for Codewalk. Provides HTTP endpoints that mirror
+    MCP tool functionality plus additional features (streaming, voice).
+
+ENDPOINTS:
+    POST /analyze         - Index a codebase (scan + chunk + embed)
+    POST /analyze/stream  - Same but with SSE progress events
+    POST /chat            - Ask the LangGraph agent a question
+    GET  /overview        - Project overview (tech, modules, diagram)
+    GET  /modules         - List all modules
+    GET  /modules/{name}  - Module details + blast radius
+    GET  /blast-radius    - Blast radius for all files
+    GET  /reading-order   - Recommended file reading order
+    GET  /execution-flow  - Execution flow diagram + narration
+    POST /refresh         - Rebuild analysis cache (no re-embedding)
+    POST /incremental-reindex - Re-embed only changed files
+    POST /review          - Review git diff
+    POST /review/file     - Review single file
+    POST /review/guidelines - Load team guidelines
+    POST /voice/ask       - Voice Q&A (audio in, audio + text out)
+    GET  /health          - Health check
+
+WHERE IT'S CALLED:
+    - `uvicorn src.codewalk.api.main:app` or via Docker
+    - Web frontend talks to these endpoints
+
+DEPENDENCIES:
+    - state.py: all runtime state
+    - models.py: request/response schemas
+    - All analysis/generation/review/voice modules
+
+=============================================================================
+"""
+
 import logging
 import sys
 import json
@@ -41,11 +80,12 @@ from src.codewalk.voice.backends import execute_direct
 from src.codewalk.log import log as _log
 from src.codewalk.errors import classify_error
 
-
 logger = logging.getLogger("codewalk")
 
 
-# ─── Create the FastAPI app ─────────────────────────────────────────
+# =============================================================================
+# App Setup
+# =============================================================================
 
 app = FastAPI(
     title="Codewalk API",
@@ -61,25 +101,27 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+
 @app.exception_handler(Exception)
 async def global_exception_handler(request, exc):
     """Convert all unhandled exceptions to user-friendly messages."""
     user_message = classify_error(exc)
     _log(f"[api] Error: {exc}")
-    return JSONResponse(
-        status_code=500,
-        content={"detail": user_message},
-    )
+    return JSONResponse(status_code=500, content={"detail": user_message})
 
-# ─── POST /analyze ───────────────────────────────────────────────────
+
+# =============================================================================
+# POST /analyze - Index a Codebase
+# =============================================================================
+
 @app.post("/analyze", response_model=AnalyzeResponse)
 async def analyze(request: AnalyzeRequest):
-    """Index a codebase: scan → chunk → embed → store → build agent.
+    """Index a codebase: scan -> chunk -> embed -> store -> build agent.
 
     Modes:
-        auto    — skip indexing if collection already has data (default)
-        reindex — smart re-index (only changed/new/deleted files)
-        full    — nuke everything and re-embed from scratch
+        auto    - skip indexing if collection already has data (default)
+        reindex - smart re-index (only changed/new/deleted files)
+        full    - nuke everything and re-embed from scratch
     """
     try:
         request.repo_path = request.repo_path or settings.repo_path
@@ -90,30 +132,29 @@ async def analyze(request: AnalyzeRequest):
         store.create_collection(request.collection_name)
         existing_count = store.collection.count()
 
-        # ── Decide whether to index ──────────────────────────────
+        # Decide whether to index
         if request.index_mode == "full" or existing_count == 0:
             index_result = full_index_parallel(request.repo_path, request.collection_name, use_llm_filter=settings.use_llm_filter, persist_dir=persist_dir)
         elif request.index_mode == "reindex":
             index_result = reindex(request.repo_path, request.collection_name, persist_dir=persist_dir)
         else:
-            # Auto mode + data exists → skip indexing entirely
             index_result = {
                 "repo_path": request.repo_path,
                 "files_scanned": 0,
                 "chunks_created": 0,
                 "skipped": True,
             }
-            _log(f"[api] Skipping indexing — collection already has {existing_count} chunks")
+            _log(f"[api] Skipping indexing - collection already has {existing_count} chunks")
 
-        # ── Always run analysis (fast — no embedding) ────────────
+        # Always run analysis (fast - no embedding)
         files = scan_directory(request.repo_path)
         deps = build_dependency_graph(files)
         modules_result = detect_modules(files, deps)
 
-        # ── Create agent ─────────────────────────────────────────
+        # Create agent
         agent = create_agent(store, modules_result, files=files, deps=deps)
 
-        # ── Save state (including files/deps cache) ─────────────
+        # Save state
         state.initialize(store, agent, modules_result, index_result,
                          files=files, deps=deps, repo_path=request.repo_path)
 
@@ -126,77 +167,63 @@ async def analyze(request: AnalyzeRequest):
         )
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
-    
+
+
+# =============================================================================
+# POST /analyze/stream - SSE Progress Stream
+# =============================================================================
+
 @app.post("/analyze/stream")
 async def analyze_stream(request: AnalyzeRequest):
     """Stream analysis progress via Server-Sent Events."""
 
     def event_stream():
-        """Generator that yields SSE events at each pipeline step."""
         try:
             request.repo_path = request.repo_path or settings.repo_path
             if not request.collection_name:
                 request.collection_name = request.repo_path.rstrip("/").split("/")[-1] or "codebase"
 
-            # Step 1: Check existing data
             yield f"data: {json.dumps({'step': 'init', 'message': 'Checking existing index...'})}\n\n"
             persist_dir = f"{request.repo_path.rstrip('/')}/.codewalk/chroma"
             store = VectorStore(persist_dir=persist_dir)
             store.create_collection(request.collection_name)
             existing_count = store.collection.count()
 
-            # Step 2: Indexing
             if request.index_mode == "full" or existing_count == 0:
-                # ── Full index with progress ──
                 yield f"data: {json.dumps({'step': 'scan', 'message': 'Scanning directory...'})}\n\n"
                 files = scan_directory(request.repo_path)
                 scanned_count = len(files)
                 yield f"data: {json.dumps({'step': 'scan', 'message': f'Scanned {scanned_count} files'})}\n\n"
 
                 if settings.use_llm_filter:
-                    yield f"data: {json.dumps({'step': 'filter', 'message': f'Smart filtering {scanned_count} files via LLM — wait time depends on number of files...'})}\n\n"
+                    yield f"data: {json.dumps({'step': 'filter', 'message': f'Smart filtering {scanned_count} files via LLM...'})}\n\n"
                     files = filter_files_with_llm(files)
-                    yield f"data: {json.dumps({'step': 'filter', 'message': f'Kept {len(files)} relevant files (filtered out {scanned_count - len(files)})'})}\n\n"
+                    yield f"data: {json.dumps({'step': 'filter', 'message': f'Kept {len(files)} relevant files'})}\n\n"
                 else:
-                    yield f"data: {json.dumps({'step': 'filter', 'message': 'LLM filter disabled — using all scanned files'})}\n\n"
+                    yield f"data: {json.dumps({'step': 'filter', 'message': 'LLM filter disabled'})}\n\n"
 
                 yield f"data: {json.dumps({'step': 'chunk', 'message': 'Chunking + embedding in parallel...'})}\n\n"
-
                 embedded, chunks_created = chunk_and_embed_parallel(files)
-
                 yield f"data: {json.dumps({'step': 'chunk', 'message': f'Created {chunks_created} chunks'})}\n\n"
                 yield f"data: {json.dumps({'step': 'embed', 'message': f'Embedded {len(embedded)} chunks'})}\n\n"
 
                 yield f"data: {json.dumps({'step': 'store', 'message': 'Storing in vector database...'})}\n\n"
                 store.clear_collection()
                 store.add_chunks(embedded)
-                yield f"data: {json.dumps({'step': 'store', 'message': f'Stored {len(embedded)} chunks in ChromaDB'})}\n\n"
+                yield f"data: {json.dumps({'step': 'store', 'message': f'Stored {len(embedded)} chunks'})}\n\n"
 
-                index_result = {
-                    "repo_path": request.repo_path,
-                    "files_scanned": len(files),
-                    "chunks_created": chunks_created,
-                }
+                index_result = {"repo_path": request.repo_path, "files_scanned": len(files), "chunks_created": chunks_created}
 
             elif request.index_mode == "reindex":
                 yield f"data: {json.dumps({'step': 'scan', 'message': 'Scanning for changes...'})}\n\n"
                 index_result = reindex(request.repo_path, request.collection_name, persist_dir=persist_dir)
-                new = index_result['new_files']
-                changed = index_result['changed_files']
-                deleted = index_result['deleted_files']
-                msg = f'New: {new}, Changed: {changed}, Deleted: {deleted}'
+                msg = f"New: {index_result['new_files']}, Changed: {index_result['changed_files']}, Deleted: {index_result['deleted_files']}"
                 yield f"data: {json.dumps({'step': 'reindex', 'message': msg})}\n\n"
-
             else:
-                yield f"data: {json.dumps({'step': 'skip', 'message': f'Index exists ({existing_count} chunks) — skipping'})}\n\n"
-                index_result = {
-                    "repo_path": request.repo_path,
-                    "files_scanned": 0,
-                    "chunks_created": 0,
-                    "skipped": True,
-                }
+                yield f"data: {json.dumps({'step': 'skip', 'message': f'Index exists ({existing_count} chunks) - skipping'})}\n\n"
+                index_result = {"repo_path": request.repo_path, "files_scanned": 0, "chunks_created": 0, "skipped": True}
 
-            # Step 3: Analysis
+            # Analysis
             yield f"data: {json.dumps({'step': 'analyze', 'message': 'Building dependency graph...'})}\n\n"
             files = scan_directory(request.repo_path)
             deps = build_dependency_graph(files)
@@ -204,15 +231,14 @@ async def analyze_stream(request: AnalyzeRequest):
             num_modules = len(modules_result['modules'])
             yield f"data: {json.dumps({'step': 'analyze', 'message': f'Detected {num_modules} modules'})}\n\n"
 
-            # Step 4: Create agent
+            # Agent
             yield f"data: {json.dumps({'step': 'agent', 'message': 'Creating AI agent...'})}\n\n"
             agent = create_agent(store, modules_result, files=files, deps=deps)
 
-            # Step 5: Save state (including files/deps cache)
+            # Save state
             state.initialize(store, agent, modules_result, index_result,
                              files=files, deps=deps, repo_path=request.repo_path)
 
-            # Final event — includes full result
             yield f"data: {json.dumps({'step': 'done', 'message': 'Analysis complete!', 'result': {'status': 'complete', 'repo_path': request.repo_path, 'files_scanned': index_result.get('files_scanned', 0), 'chunks_created': index_result.get('chunks_created', 0), 'modules': list(modules_result['modules'].keys())}})}\n\n"
 
         except Exception as e:
@@ -223,47 +249,43 @@ async def analyze_stream(request: AnalyzeRequest):
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
-    
-# ─── POST /chat ──────────────────────────────────────────────────────
+
+
+# =============================================================================
+# POST /chat - Agent Q&A
+# =============================================================================
+
 @app.post("/chat", response_model=ChatResponse)
 async def chat(request: ChatRequest):
-    """Ask the agent a question about the codebase."""
+    """Ask the LangGraph agent a question about the codebase."""
     try:
         state.ensure_initialized()
         agent = state.get_agent()
-        config = {
-            "configurable": {
-                "thread_id": request.thread_id
-            }
-        }
-        result = agent.invoke(
-            {"messages": [("human", request.message)]},
-            config=config
-        )
+        config = {"configurable": {"thread_id": request.thread_id}}
+        result = agent.invoke({"messages": [("human", request.message)]}, config=config)
         answer = result["messages"][-1].content
         return ChatResponse(answer=answer, thread_id=request.thread_id)
     except RuntimeError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
-    
-# ─── GET /overview ───────────────────────────────────────────────────
+
+
+# =============================================================================
+# GET /overview - Project Overview
+# =============================================================================
+
 @app.get("/overview", response_model=OverviewResponse)
 async def overview():
-    """Get the project overview (tech stack, modules, diagram, LLM summary)."""
+    """Get project overview (tech stack, modules, diagram, LLM summary)."""
     try:
         state.ensure_initialized()
         modules_result = state.get_modules_result()
         store = state.get_store()
 
-        # Generate diagram
         diagram = generate_module_diagram(modules_result["module_graph"])
-
-        # Detect tech stack
         analyze_result = state.get_analyze_result()
         tech = detect_tech_stack(analyze_result.get("repo_path", settings.repo_path))
-
-        # Generate overview (calls LLM)
         overview_text = generate_overview(tech, modules_result, diagram)
 
         deps = state.get_deps()
@@ -284,18 +306,32 @@ async def overview():
             modules=list(modules_result["modules"].keys()),
             diagram=diagram,
             overview_text=overview_text,
-            riskiest_files=top_risky, 
+            riskiest_files=top_risky,
         )
-    
     except RuntimeError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
-    
-# ─── GET /modules/{name} ────────────────────────────────────────────
+
+
+# =============================================================================
+# GET /modules - List and Details
+# =============================================================================
+
+@app.get("/modules")
+def list_modules():
+    """List all available modules."""
+    try:
+        state.ensure_initialized()
+        modules_result = state.get_modules_result()
+        return {"modules": list(modules_result["modules"].keys()), "total": modules_result["stats"]["total_modules"]}
+    except RuntimeError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
 @app.get("/modules/{module_name}", response_model=ModuleResponse)
 async def get_module(module_name: str):
-    """Get details about a specific module."""
+    """Get details about a specific module (files, deps, blast radius)."""
     try:
         state.ensure_initialized()
         module_result = state.get_modules_result()
@@ -308,8 +344,8 @@ async def get_module(module_name: str):
             if name.lower() == module_name.lower():
                 actual_name = name
                 break
-        
-        # Fallback: search for sub-folder inside modules (e.g. "users" → features/users)
+
+        # Fallback: search for sub-folder (e.g. "users" inside features/)
         matched_as_feature = False
         if not actual_name:
             source_root = module_result.get("source_root", "")
@@ -326,31 +362,20 @@ async def get_module(module_name: str):
                     for f in all_files:
                         if f["file_path"] in matching_set:
                             lang_counter[f["language"]] += 1
-                    info = {
-                        "files": matching_files,
-                        "file_count": len(matching_files),
-                        "languages": dict(lang_counter),
-                    }
+                    info = {"files": matching_files, "file_count": len(matching_files), "languages": dict(lang_counter)}
                     break
 
         if not actual_name:
             available = ", ".join(sorted(modules.keys()))
-            raise HTTPException(
-                status_code=404,
-                detail=f"Module '{module_name}' not found. Available: {available}",
-            )
-        
+            raise HTTPException(status_code=404, detail=f"Module '{module_name}' not found. Available: {available}")
+
         if not matched_as_feature:
             info = modules[actual_name]
         depends_on = module_graph.get(actual_name, [])
-        depended_by = [
-            other for other, deps in module_graph.items()
-            if actual_name in deps
-        ]
+        depended_by = [other for other, deps_list in module_graph.items() if actual_name in deps_list]
 
         deps = state.get_deps()
         graph = deps["graph"]
-
         file_risks = []
         risk_order = {"critical": 4, "high": 3, "moderate": 2, "low": 1, "none": 0}
         max_risk = "low"
@@ -374,10 +399,9 @@ async def get_module(module_name: str):
             languages=info["languages"],
             depends_on=depends_on,
             depended_by=depended_by,
-            blast_radius=file_risks, 
+            blast_radius=file_risks,
             module_risk=max_risk,
         )
-    
     except HTTPException:
         raise
     except RuntimeError as e:
@@ -385,20 +409,21 @@ async def get_module(module_name: str):
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-# ─── GET /blast-radius ───────────────────────────────────────────────
+
+# =============================================================================
+# GET /blast-radius
+# =============================================================================
+
 @app.get("/blast-radius/{module_name}", response_model=BlastRadiusResponse)
 @app.get("/blast-radius", response_model=BlastRadiusResponse)
 async def get_blast_radius_for_module(module_name: str = ""):
-    """Get blast radius for files. Optionally scope to a module."""
+    """Get blast radius for files, optionally scoped to a module."""
     try:
         state.ensure_initialized()
         modules_result = state.get_modules_result()
-        analyze_result = state.get_analyze_result()
-        repo_path = analyze_result.get("repo_path", settings.repo_path)
         deps = state.get_deps()
         graph = deps["graph"]
 
-        # Determine scope
         if module_name:
             modules = modules_result["modules"]
             actual_name = None
@@ -408,10 +433,7 @@ async def get_blast_radius_for_module(module_name: str = ""):
                     break
             if not actual_name:
                 available = ", ".join(sorted(modules.keys()))
-                raise HTTPException(
-                    status_code=404,
-                    detail=f"Module '{module_name}' not found. Available: {available}",
-                )
+                raise HTTPException(status_code=404, detail=f"Module '{module_name}' not found. Available: {available}")
             target_files = sorted(modules[actual_name]["files"])
             scope = actual_name
         else:
@@ -436,13 +458,7 @@ async def get_blast_radius_for_module(module_name: str = ""):
 
         file_results.sort(key=lambda x: x["affected_files"], reverse=True)
 
-        return BlastRadiusResponse(
-            module=scope,
-            module_risk=max_risk,
-            total_files=len(file_results),
-            files=file_results,
-        )
-
+        return BlastRadiusResponse(module=scope, module_risk=max_risk, total_files=len(file_results), files=file_results)
     except HTTPException:
         raise
     except RuntimeError as e:
@@ -450,53 +466,38 @@ async def get_blast_radius_for_module(module_name: str = ""):
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-# ─── GET /modules (list all) ────────────────────────────────────────
-@app.get("/modules")
-def list_modules():
-    """List all available modules."""
+
+# =============================================================================
+# GET /reading-order and /execution-flow
+# =============================================================================
+
+@app.get("/reading-order")
+def get_reading_order_endpoint():
+    """Get recommended reading order with blast radius info."""
     try:
         state.ensure_initialized()
-        modules_result = state.get_modules_result()
-        return {
-            "modules": list(modules_result["modules"].keys()),
-            "total": modules_result["stats"]["total_modules"],
-        }
-    except RuntimeError as e:
-        raise HTTPException(status_code=400, detail=str(e))
-    
-# ─── GET /reading-order ────────────────────────────────────────
-@app.get("/reading-order")
-def get_reading_order():
-    """Get the recommended reading order for the codebase."""
-    try:
-       state.ensure_initialized()
-       analyze_result = state.get_analyze_result()
-       repo_path = analyze_result.get("repo_path", settings.repo_path)
-       files = state.get_files()
-       deps = state.get_deps()
-       order = generate_reading_order(files, deps)
-       graph = deps["graph"]
-       for item in order["order"]:
-           radius = get_blast_radius(item["file"], graph)
-           item["risk_level"] = radius["risk_level"]
-           item["affected_files"] = radius["affected_files"]
-           item["direct"] = [f.split("/")[-1] for f in radius["direct"]]
-           item["transitive"] = [f.split("/")[-1] for f in radius["transitive"]]
-           
-       return order
+        files = state.get_files()
+        deps = state.get_deps()
+        order = generate_reading_order(files, deps)
+        graph = deps["graph"]
+        for item in order["order"]:
+            radius = get_blast_radius(item["file"], graph)
+            item["risk_level"] = radius["risk_level"]
+            item["affected_files"] = radius["affected_files"]
+            item["direct"] = [f.split("/")[-1] for f in radius["direct"]]
+            item["transitive"] = [f.split("/")[-1] for f in radius["transitive"]]
+        return order
     except RuntimeError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
-    
-# ─── GET /execution-flow ───────────────────────────────────────
+
+
 @app.get("/execution-flow")
-def get_execution_flow():
-    """Get the execution flow diagram and narration."""
-    try: 
+def get_execution_flow_endpoint():
+    """Get execution flow diagram and narration."""
+    try:
         state.ensure_initialized()
-        analyze_result = state.get_analyze_result()
-        repo_path = analyze_result.get("repo_path", settings.repo_path)
         files = state.get_files()
         deps = state.get_deps()
         order = generate_reading_order(files, deps)
@@ -506,15 +507,15 @@ def get_execution_flow():
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
-    
-# ─── POST /refresh ─────────────────────────────────────────────────
+
+
+# =============================================================================
+# POST /refresh and /incremental-reindex
+# =============================================================================
+
 @app.post("/refresh")
 async def refresh_analysis():
-    """Re-scan files and rebuild dependency graph + modules.
-
-    Does NOT re-embed or re-index. Use this after code changes
-    to update blast radius, reading order, and module structure.
-    """
+    """Re-scan files and rebuild analysis. No re-embedding."""
     try:
         state.ensure_initialized()
         analyze_result = state.get_analyze_result()
@@ -523,20 +524,15 @@ async def refresh_analysis():
         files = scan_directory(repo_path)
         deps = build_dependency_graph(files)
         modules_result = detect_modules(files, deps)
-
         state.refresh(files, deps, modules_result)
 
-        return {
-            "status": "refreshed",
-            "files": len(files),
-            "modules": list(modules_result["modules"].keys()),
-        }
+        return {"status": "refreshed", "files": len(files), "modules": list(modules_result["modules"].keys())}
     except RuntimeError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-# ─── POST /incremental-reindex ───────────────────────────────────────
+
 @app.post("/incremental-reindex")
 async def incremental_reindex_endpoint():
     """Re-embed only files that changed since last indexing."""
@@ -551,7 +547,6 @@ async def incremental_reindex_endpoint():
 
         result = incremental_reindex(indexed_files, repo_path, collection_name, persist_dir=persist_dir)
 
-        # Refresh analysis cache after reindex
         files = scan_directory(repo_path)
         deps = build_dependency_graph(files)
         modules_result = detect_modules(files, deps)
@@ -565,7 +560,11 @@ async def incremental_reindex_endpoint():
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-# ─── POST /review ────────────────────────────────────────────────────
+
+# =============================================================================
+# POST /review endpoints
+# =============================================================================
+
 @app.post("/review")
 async def review_endpoint(request: ReviewRequest):
     """Review current git diff for bugs, security issues, and style."""
@@ -578,7 +577,7 @@ async def review_endpoint(request: ReviewRequest):
             store = state.get_store()
             deps = state.get_deps()
         except RuntimeError:
-            pass  # works without indexing, just less context
+            pass
 
         result = review_diff(
             staged=request.staged,
@@ -614,7 +613,7 @@ async def review_endpoint(request: ReviewRequest):
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-# ─── POST /review/file ───────────────────────────────────────────────
+
 @app.post("/review/file")
 async def review_file_endpoint(request: ReviewFileRequest):
     """Review a single file against codebase conventions."""
@@ -651,7 +650,7 @@ async def review_file_endpoint(request: ReviewFileRequest):
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-# ─── POST /review/guidelines ─────────────────────────────────────────
+
 @app.post("/review/guidelines")
 async def load_guidelines_endpoint(request: GuidelinesRequest):
     """Load team coding guidelines for use in reviews."""
@@ -661,10 +660,7 @@ async def load_guidelines_endpoint(request: GuidelinesRequest):
 
         path = request.docs_path or settings.review_guidelines_path
         if not path:
-            raise HTTPException(
-                status_code=400,
-                detail="No path provided. Pass docs_path or set REVIEW_GUIDELINES_PATH.",
-            )
+            raise HTTPException(status_code=400, detail="No path provided. Pass docs_path or set REVIEW_GUIDELINES_PATH.")
         if not os.path.isdir(path):
             raise HTTPException(status_code=404, detail=f"Directory not found: {path}")
 
@@ -678,9 +674,12 @@ async def load_guidelines_endpoint(request: GuidelinesRequest):
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
-    
 
-# ─── POST /voice/ask ─────────────────────────────────────────
+
+# =============================================================================
+# POST /voice/ask - Voice Q&A
+# =============================================================================
+
 @app.post("/voice/ask")
 async def voice_ask_endpoint(
     audio: UploadFile = File(...),
@@ -688,31 +687,21 @@ async def voice_ask_endpoint(
 ):
     """Voice-in, voice-out codebase Q&A.
 
-    Accepts audio file (webm/mp3/wav from browser mic).
-    Routes to the right Codewalk tool, executes it, speaks the result.
-
-    Returns JSON:
-      question: transcribed text
-      tool: which tool was called
-      answer: tool result (full text)
-      speech: summarized text for TTS
-      audio_base64: MP3 audio as base64
+    Accepts audio file -> transcribes -> routes to tool -> executes ->
+    generates speech summary -> returns text + audio.
     """
-    # 1. STT
+    # 1. Speech-to-text
     audio_bytes = await audio.read()
     question = transcribe_bytes(audio_bytes, file_name=audio.filename or "audio.webm")
 
     if not question.strip():
         fallback = "I didn't catch that. Could you try again?"
         return JSONResponse({
-            "question": "",
-            "tool": None,
-            "answer": fallback,
-            "speech": fallback,
-            "audio_base64": base64.b64encode(synthesize(fallback)).decode(),
+            "question": "", "tool": None, "answer": fallback,
+            "speech": fallback, "audio_base64": base64.b64encode(synthesize(fallback)).decode(),
         })
-    
-    # 2. Route
+
+    # 2. Route to tool
     route_result = route(question)
     tool_name = route_result.get("tool")
     arguments = route_result.get("arguments", {})
@@ -720,24 +709,21 @@ async def voice_ask_endpoint(
     if not tool_name:
         fallback = "Sorry, I couldn't match that to a Codewalk tool."
         return JSONResponse({
-            "question": question,
-            "tool": None,
-            "answer": fallback,
-            "speech": fallback,
-            "audio_base64": base64.b64encode(synthesize(fallback)).decode(),
+            "question": question, "tool": None, "answer": fallback,
+            "speech": fallback, "audio_base64": base64.b64encode(synthesize(fallback)).decode(),
         })
-    
-    # 3. Auto-load index if server restarted
+
+    # 3. Auto-load index if needed
     state.ensure_initialized()
 
     # 4. Execute tool
     result = execute_direct(tool_name, arguments)
 
-    # 5. Generate technical + speech versions via main LLM
+    # 5. Generate speech version
     from src.codewalk.voice.companion import format_voice_response
     voice = format_voice_response(result)
 
-    # 5. TTS on the speech version
+    # 6. TTS
     audio_response = synthesize(voice["speech"])
 
     return JSONResponse({
@@ -748,7 +734,10 @@ async def voice_ask_endpoint(
         "audio_base64": base64.b64encode(audio_response).decode(),
     })
 
-# ─── Health check ───────────────────────────────────────────────────
+
+# =============================================================================
+# Health Check
+# =============================================================================
 
 @app.get("/health")
 def health():

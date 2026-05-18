@@ -1,3 +1,32 @@
+"""
+=============================================================================
+ state.py - Global Application State (Singleton)
+=============================================================================
+
+WHAT THIS FILE DOES:
+    Holds all runtime state for the application as module-level variables.
+    This is the SINGLE SOURCE OF TRUTH shared between MCP server and API.
+
+    State includes:
+    - VectorStore (ChromaDB connection)
+    - LangGraph agent
+    - Modules result (from detect_modules)
+    - File scan results
+    - Dependency graph
+
+HOW IT WORKS:
+    - initialize() sets everything after POST /analyze
+    - get_*() functions raise RuntimeError if not yet initialized
+    - ensure_initialized() auto-loads from disk if possible
+    - refresh() updates analysis without touching embeddings
+
+WHERE IT'S CALLED:
+    - api/main.py: all endpoints use get_store(), get_modules_result(), etc.
+    - mcp/server.py: shares the same state module
+
+=============================================================================
+"""
+
 import logging
 import os
 
@@ -11,7 +40,9 @@ from src.codewalk.log import log as _log
 
 logger = logging.getLogger("codewalk")
 
-# ─── Module-level state (single source of truth for MCP + API) ──────
+# =============================================================================
+# Module-Level State Variables
+# =============================================================================
 
 _store: VectorStore | None = None
 _agent = None
@@ -20,6 +51,11 @@ _analyze_result: dict | None = None
 _files: list[dict] | None = None       # scan_directory() result
 _deps: dict | None = None              # build_dependency_graph() result
 _repo_path: str | None = None          # target repo being analyzed
+
+
+# =============================================================================
+# Getters (raise if not initialized)
+# =============================================================================
 
 def get_store() -> VectorStore:
     """Get the VectorStore. Raises if not initialized."""
@@ -63,6 +99,10 @@ def get_deps() -> dict:
     return _deps
 
 
+# =============================================================================
+# Setters
+# =============================================================================
+
 def initialize(store: VectorStore, agent, modules_result: dict, analyze_result: dict,
                files: list[dict] | None = None, deps: dict | None = None,
                repo_path: str | None = None):
@@ -86,7 +126,9 @@ def refresh(files: list[dict], deps: dict, modules_result: dict):
     _modules_result = modules_result
 
 
-# ─── Helper functions (shared by MCP + API) ─────────────────────────
+# =============================================================================
+# Helper Functions
+# =============================================================================
 
 def get_repo_path() -> str:
     """Return the current repo path (from state or settings fallback)."""
@@ -94,17 +136,13 @@ def get_repo_path() -> str:
 
 
 def get_collection_name() -> str:
-    """Derive the ChromaDB collection name from the repo path (last segment).
-
-    e.g. /home/user/my-project  →  "my-project"
-         /opt/repos/backend     →  "backend"
-    """
+    """Derive ChromaDB collection name from repo path (last segment)."""
     path = _repo_path or settings.repo_path
     return path.rstrip("/").split("/")[-1] or "codebase"
 
 
 def chroma_path() -> str:
-    """ChromaDB directory stored inside the target repo: {repo_path}/.codewalk/chroma/"""
+    """ChromaDB directory: {repo_path}/.codewalk/chroma/"""
     repo = (_repo_path or settings.repo_path).rstrip("/")
     return f"{repo}/.codewalk/chroma"
 
@@ -124,8 +162,8 @@ def rebuild_analysis_cache():
 def ensure_initialized():
     """Auto-load index + analysis cache from disk if not already in memory.
 
-    Called by query tools and API endpoints so users don't have to run
-    codewalk_analyze_codebase / POST /analyze manually after a restart.
+    Called by query endpoints so users don't have to manually run
+    /analyze after a server restart.
     """
     global _store, _agent, _analyze_result
 
@@ -134,7 +172,7 @@ def ensure_initialized():
 
     chroma = chroma_path()
     if not os.path.isdir(chroma):
-        return  # No index on disk — nothing to load
+        return  # No index on disk
 
     _log("[ensure_initialized] Auto-loading index + analysis from disk...")
     rebuild_analysis_cache()
@@ -145,10 +183,7 @@ def ensure_initialized():
     count = _store.collection.count()
     _log(f"[ensure_initialized] Loaded {count} chunks from {chroma}")
 
-    # Set _analyze_result so API endpoints can read repo_path
     _analyze_result = {"repo_path": get_repo_path(), "skipped": True}
 
-    # Recreate the agent so /chat works after restart
     if _agent is None and _store is not None and _modules_result is not None:
         _agent = create_agent(_store, _modules_result, files=_files, deps=_deps)
-        _log("[ensure_initialized] Agent recreated")
