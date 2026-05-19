@@ -269,7 +269,7 @@ async def overview():
         deps = state.get_deps()
         blast_map = calculate_full_blast_map(deps["graph"])
         top_risky = []
-        for item in blast_map["blast_map"][:3]:
+        for item in blast_map["blast_map"][:30]:
             radius = get_blast_radius(item["file"], deps["graph"])
             top_risky.append({
                 **item,

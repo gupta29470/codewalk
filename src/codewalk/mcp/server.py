@@ -72,7 +72,7 @@ mcp = FastMCP(
         "- 'Give me an overview' → codewalk_get_overview\n"
         "- 'What's in module Z?' → codewalk_get_module_info(Z) — files + functions/classes\n"
         "- 'What breaks if I change X?' → codewalk_get_blast_radius_map(target=X) — "
-        "X can be a module name, file name, or empty for top 15 riskiest\n"
+        "X can be a module name, file name, or empty for top 30 riskiest\n"
         "- 'Where should I start reading?' → codewalk_get_reading_order — returns ALL files\n"
         "- 'Show me the dependency flow' → codewalk_get_execution_flow — "
         "no arg = module-to-module flow, with module_name = file-to-file flow\n"
@@ -92,6 +92,16 @@ mcp = FastMCP(
         "    2. Show the FULL result as text in the chat (same detail as typed)\n"
         "    3. Call codewalk_speak() with a 2-4 sentence spoken summary\n"
         "- codewalk_speak(text) — speak a plain-English summary aloud via TTS\n"
+        "\n"
+        "## PRESENTING BLAST RADIUS RESULTS\n"
+        "When showing blast radius or overview results, separate files into two groups:\n"
+        "1. **Core / Foundational** (design system, utils, extensions, config, constants,\n"
+        "   shared widgets, theme files, base classes) — summarize briefly, e.g.\n"
+        "   '12 design system files are high-risk as expected.'\n"
+        "2. **Business Logic** (screens, controllers, services, repositories, blocs,\n"
+        "   cubits, use cases, API clients) — show these in full detail.\n"
+        "Lead with the Business Logic section — that's what the user cares about.\n"
+        "Foundational files being high-risk is expected and not actionable.\n"
         "\n"
         "## ERROR HANDLING\n"
         "If any tool returns a message starting with 'Error:':\n"
@@ -408,9 +418,9 @@ def codewalk_get_overview() -> str:
 
     Returns:
     - Tech stack detection results
-    - Module list with file counts
-    - Mermaid dependency diagram (auto-generated from dependency graph)
-    - Top 10 riskiest files by blast radius with break chains
+    - Module list with file counts and languages
+    - Module dependency flow (entry points → core modules)
+    - Top 30 riskiest files by blast radius with break chains
     """
     state.ensure_initialized()
     if state._modules_result is None or state._repo_path is None or state._deps is None:
@@ -418,14 +428,15 @@ def codewalk_get_overview() -> str:
 
     _log("[codewalk_get_overview] Generating overview...")
     tech = detect_tech_stack(state._repo_path)
-    diagram = generate_module_diagram(state._modules_result["module_graph"])
     modules = list(state._modules_result["modules"].keys())
 
+    # TEACH: Blast radius — send top 30 so Copilot has enough to separate
+    # foundational files from business logic files
     blast_map = calculate_full_blast_map(state._deps["graph"])
-    top10 = blast_map["blast_map"][:10]
+    top_risky = blast_map["blast_map"][:30]
 
     risky_lines = []
-    for item in top10:
+    for item in top_risky:
         file_path = item["file"]
         name = file_path.split("/")[-1]
         risk = item["risk_level"].upper()
@@ -438,7 +449,7 @@ def codewalk_get_overview() -> str:
 
     risky_section = "\n".join(risky_lines) if risky_lines else "  No high-risk files"
 
-    # Build structured overview for the host to interpret
+    # TEACH: Module info — same as before, no changes
     modules_info = state._modules_result["modules"]
     module_lines = []
     for name, info in sorted(modules_info.items()):
@@ -446,13 +457,41 @@ def codewalk_get_overview() -> str:
         module_lines.append(f"  - {name} ({info['file_count']} files): {lang_str}")
     modules_section = "\n".join(module_lines)
 
+    module_graph = state._modules_result.get("module_graph", {})
+
+    # Entry modules: modules that NO other module depends on
+    depended_on = set()
+    for dep_list in module_graph.values():
+        depended_on.update(dep_list)
+    entry_modules = sorted(m for m in module_graph if m not in depended_on)
+
+    # Core modules: modules depended on by the MOST other modules
+    from collections import Counter
+    dep_count = Counter()
+    for dep_list in module_graph.values():
+        dep_count.update(dep_list)
+    core_modules = [name for name, _ in dep_count.most_common(3)] if dep_count else []
+
+    # Dependency flow lines: "module_a → depends on: module_b, module_c"
+    flow_lines = []
+    for mod_name in sorted(module_graph.keys()):
+        deps = module_graph.get(mod_name, [])
+        if deps:
+            flow_lines.append(f"  {mod_name} → {', '.join(deps)}")
+        else:
+            flow_lines.append(f"  {mod_name} → (standalone, no dependencies)")
+    flow_section = "\n".join(flow_lines)
+
     return (
         f"## Project Overview\n\n"
         f"**Tech Stack:** {', '.join(tech) if tech else 'Not detected'}\n"
         f"**Total Files:** {state._modules_result['stats']['total_files']}\n"
         f"**Total Modules:** {state._modules_result['stats']['total_modules']}\n\n"
         f"### Modules\n{modules_section}\n\n"
-        f"### Architecture (Mermaid)\n```mermaid\n{diagram}\n```\n\n"
+        f"### Module Dependency Flow\n"
+        f"**Entry points** (top-level, nothing depends on these): {', '.join(entry_modules) or 'None'}\n"
+        f"**Core modules** (most depended on): {', '.join(core_modules) or 'None'}\n\n"
+        f"{flow_section}\n\n"
         f"### Riskiest Files (blast radius)\n{risky_section}"
     )
 
@@ -466,13 +505,13 @@ def codewalk_get_blast_radius_map(target: str = "") -> str:
 
     Args:
         target: A module name (e.g. "analysis"), a file name (e.g. "scanner.py"),
-                or empty for the top 15 riskiest files across the whole repo.
+                or empty for the top 30 riskiest files across the whole repo.
     """
     state.ensure_initialized()
     if state._modules_result is None or state._repo_path is None or state._deps is None:
         return "Error: No codebase indexed yet. Call codewalk_analyze_codebase first."
 
-    _log(f"[codewalk_get_blast_radius_map] Target: {target or 'top 15'}")
+    _log(f"[codewalk_get_blast_radius_map] Target: {target or 'top 30'}")
     graph = state._deps["graph"]
 
     # Determine which files to analyze based on target
@@ -503,7 +542,7 @@ def codewalk_get_blast_radius_map(target: str = "") -> str:
                 )
     else:
         target_files = sorted(graph.keys())
-        scope = "top 15 riskiest"
+        scope = "top 30 riskiest"
 
     risk_order = {"critical": 4, "high": 3, "moderate": 2, "low": 1, "none": 0}
     max_risk = "low"
@@ -517,9 +556,10 @@ def codewalk_get_blast_radius_map(target: str = "") -> str:
 
     results.sort(key=lambda x: x[1]["affected_files"], reverse=True)
 
-    # If no target specified, show only top 15 non-SAFE files
+    # If no target specified, show top 30 non-SAFE files (enough for Copilot to
+    # separate foundational files from business logic)
     if not target:
-        results = [r for r in results if r[1]["affected_files"] > 0][:15]
+        results = [r for r in results if r[1]["affected_files"] > 0][:30]
 
     lines = []
     for file_path, radius in results:

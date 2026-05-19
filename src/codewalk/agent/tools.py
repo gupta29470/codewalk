@@ -138,10 +138,10 @@ def create_tools(store: VectorStore, modules_result: dict,
         modules = list(modules_result["modules"].keys())
 
         blast_map = calculate_full_blast_map(deps["graph"])
-        top3 = blast_map["blast_map"][:3]
+        top_risky = blast_map["blast_map"][:30]
 
         risky_lines = []
-        for item in top3:
+        for item in top_risky:
             file_path = item["file"]
             name = file_path.split("/")[-1]
             risk = item["risk_level"].upper()
@@ -173,7 +173,7 @@ def create_tools(store: VectorStore, modules_result: dict,
 
         Args:
             target: A module name (e.g. "analysis"), a file name (e.g. "scanner.py"),
-                    or empty for the top 15 riskiest files.
+                    or empty for the top 30 riskiest files.
         """
         if deps is None:
             return "Error: No analysis data available."
@@ -205,7 +205,7 @@ def create_tools(store: VectorStore, modules_result: dict,
                     )
         else:
             target_files = sorted(graph.keys())
-            scope = "top 15 riskiest"
+            scope = "top 30 riskiest"
 
         risk_order = {"critical": 4, "high": 3, "moderate": 2, "low": 1, "none": 0}
         max_risk = "low"
@@ -220,7 +220,7 @@ def create_tools(store: VectorStore, modules_result: dict,
         results.sort(key=lambda x: x[1]["affected_files"], reverse=True)
 
         if not target:
-            results = [r for r in results if r[1]["affected_files"] > 0][:15]
+            results = [r for r in results if r[1]["affected_files"] > 0][:30]
 
         lines = []
         for file_path, radius in results:
