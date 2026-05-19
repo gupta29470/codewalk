@@ -491,13 +491,13 @@ You just tell the AI to analyze — **the AI handles the rest automatically**.
 ┌─────────────────────────────────────────────────────────────────────┐
 │                   QUERY TOOLS (use after setup)                     │
 │                                                                     │
-│  codewalk_get_overview          → project summary + diagrams        │
+│  codewalk_get_overview          → project summary + dependency flow │
 │  codewalk_search_codebase       → semantic code search              │
 │  codewalk_get_module_info       → inspect a specific module         │
 │  codewalk_explain_function      → AI-powered function explanation   │
 │  codewalk_get_blast_radius_map  → change risk analysis              │
 │  codewalk_get_reading_order     → optimal file reading sequence     │
-│  codewalk_get_execution_flow    → dependency flow diagram           │
+│  codewalk_get_execution_flow    → module/file dependency flow       │
 └─────────────────────────────────────────────────────────────────────┘
 
 ┌─────────────────────────────────────────────────────────────────────┐
