@@ -29,7 +29,7 @@ def record_audio(
     Returns:
         numpy array of audio samples (float32, mono, 16kHz).
     """
-    print("🎤 Listening... (speak now, will stop after silence)", file=sys.stderr)
+    print("🎤 Recording... (will stop after 5 seconds of silence)", file=sys.stderr)
 
     chunks = []
     silent_chunks = 0
