@@ -121,7 +121,7 @@ https://github.com/user-attachments/assets/a1dfd347-1135-47d2-b01d-3d995d86208e
 
 ### Voice Interface
 
-> 🎥 **[Video coming soon]**
+https://github.com/user-attachments/assets/51d41d48-970f-437e-8c50-e6a104d71e0e
 
 ---
 
