@@ -14,12 +14,22 @@ WHAT THIS FILE DOES:
 HOW IT WORKS:
     1. On startup: creates all 7 tables (IF NOT EXISTS = safe to re-run).
     2. After analysis: populate_from_analysis() fills every table:
-       a. _populate_files()        → file records with deterministic hash IDs
-       b. _populate_imports()      → file→file import edges (FK-safe, deduped)
-       c. _populate_symbols()      → functions/classes from tree-sitter parsing
-       d. _populate_symbol_calls() → function→function call edges (resolved)
-       e. _populate_modules()      → module groupings and module→module deps
+       a. FIRST: DELETE all tables in reverse FK order (symbol_calls → symbols
+          → imports → module_deps → modules → files) to avoid constraint violations
+       b. _populate_files()        → file records with deterministic hash IDs
+       c. _populate_imports()      → file→file import edges (FK-safe, deduped)
+       d. _populate_symbols()      → functions/classes from tree-sitter parsing
+       e. _populate_symbol_calls() → function→function call edges (resolved)
+       f. _populate_modules()      → module groupings and module→module deps
     3. Data persists across restarts — no rebuild needed unless code changes.
+
+IMPORTANT — CALLERS/CALLEES LOOKUP:
+    get_callers_of_symbol() and get_callees_of_symbol() do NOT use
+    _stable_id(qualified_name) directly. Why? Because symbol_id is hashed
+    from (qualified_name, file_path, start_line) — not just qualified_name.
+    So we first look up symbol_id from the symbols table by qualified_name,
+    then use that ID in the JOIN query. One extra query, but correct for
+    overloaded functions at different lines.
 
 REAL-WORLD ANALOGY:
     Think of DuckDB as a library catalog system. Each table is a different

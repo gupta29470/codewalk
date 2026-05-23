@@ -9,9 +9,17 @@ WHAT THIS FILE DOES:
     2. Parse diff into structured objects
     3. Run pre-checks (test coverage)
     4. Check blast radius of changed files
-    5. Load team guidelines (if configured)
-    6. Send to LLM for deep review
-    7. Merge all issues into ReviewResult
+    5. Get symbol-level caller context (which functions call the changed code)
+    6. Load team guidelines (if configured)
+    7. Send to LLM for deep review
+    8. Merge all issues into ReviewResult
+
+SYMBOL-LEVEL CALLER CONTEXT (V1.9):
+    When graph_store is available, the reviewer looks up callers for ONLY
+    the symbols whose line ranges overlap with the diff hunks. This means:
+    "You changed authenticate_user() — here are the 5 call sites that
+    will be affected." Falls back to file-level importers when graph_store
+    is not available.
 
 HOW IT HANDLES LARGE DIFFS:
     - Small diffs (< 200 added lines): single LLM call with all context
@@ -20,7 +28,7 @@ HOW IT HANDLES LARGE DIFFS:
 
 WHERE IT'S CALLED:
     - mcp/server.py -> codewalk_review_code() MCP tool
-    - api/main.py -> /review endpoint
+    - api/main.py -> /review endpoint (passes repo_path + ensure_initialized)
 
 DEPENDENCIES:
     - diff_parser.py: get_diff(), get_parsed_diff()
@@ -29,6 +37,7 @@ DEPENDENCIES:
     - guidelines_loader.py: team guidelines
     - review_prompts.py: LLM prompts
     - blast_radius.py: risk assessment
+    - graph_store.py: symbol-level caller lookup (optional)
     - config.py: get_llm()
 
 =============================================================================

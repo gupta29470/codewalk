@@ -36,6 +36,8 @@ KEY CONCEPTS:
       (high = bottleneck, changing it breaks many paths)
     - pagerank: importance based on who links to you recursively
       (high = many important files depend on this one)
+    - EMPTY GRAPH: when vcount()==0, topological_sort() falls back to
+      all files from DuckDB (alphabetical) instead of returning []
 
 WHERE IT'S CALLED:
     - api/state.py → creates GraphRuntime after GraphStore is populated
@@ -78,6 +80,12 @@ class GraphRuntime:
     Two separate graphs:
         file_graph   — file-level import edges (pipeline.py → scanner.py)
         module_graph — module-level dependency edges (pipeline → analysis)
+
+    EMPTY GRAPH FALLBACK:
+        If file_graph has 0 vertices (no import edges detected), topological_sort()
+        falls back to returning ALL files from DuckDB sorted alphabetically.
+        This handles repos where import extraction isn't supported or produces
+        no edges — the reading order won't be dependency-aware but won't be empty.
     """
 
     # ── Constructor ─────────────────────────────────────────────────

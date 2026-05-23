@@ -253,7 +253,7 @@ def embed_chunks(chunks: list[dict]) -> list[dict]:
                     chunk["embedding"] = vector
                     embedded.append(chunk)
                 except Exception as e2:
-                    _log(f"  ERROR embedding {chunk[\'file_path\']}::chunk{chunk[\'chunk_index\']}: {e2}")
+                    _log(f"  ERROR embedding {chunk['file_path']}::chunk{chunk['chunk_index']}: {e2}")
 
         _log(f"  Embedded {len(embedded)}/{total} chunks")
 

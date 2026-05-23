@@ -125,7 +125,7 @@ class VectorStore:
             end = min(start + CHROMA_BATCH, total)
             batch = chunks[start:end]
             self.collection.upsert(
-                ids=[f"{chunk[\'file_path\']}::chunk{chunk[\'chunk_index\']}" for chunk in batch],
+                ids=[f"{chunk['file_path']}::chunk{chunk['chunk_index']}" for chunk in batch],
                 embeddings=[chunk["embedding"] for chunk in batch],
                 documents=[chunk["text"] for chunk in batch],
                 metadatas=[

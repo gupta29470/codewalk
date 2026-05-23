@@ -19,6 +19,8 @@ HOW IT WORKS:
        (dependencies before dependents - like a build order)
     2. Add "why" explanations for each file's position
     3. Optionally tag files as "must-read" / "optional" / "skip" using LLM
+    4. Strip <think>...</think> tags from DeepSeek responses before JSON parsing
+       (DeepSeek reasoning models emit thinking blocks that break JSON extraction)
 
 REAL-WORLD ANALOGY:
     Like a course prerequisite system:

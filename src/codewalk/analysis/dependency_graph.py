@@ -15,7 +15,8 @@ HOW IT WORKS (THREE STAGES):
     STAGE 1 — Extract Raw Imports (tree-sitter)
         Each language has different import syntax in the AST:
           Python: import_statement, import_from_statement → "os", "src.codewalk.config"
-          JS/TS: import_statement → "./auth_service", "express"
+          JS/TS: import_statement, call_expression → "./auth_service", "express"
+                 (call_expression handles CommonJS require() calls)
           Dart: import_or_export → "package:flutter/material.dart"
           Java: import_declaration → "com.example.service.AuthService"
 

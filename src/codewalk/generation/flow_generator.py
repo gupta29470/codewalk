@@ -11,6 +11,9 @@ WHAT THIS FILE DOES:
     this uses LLM intelligence to identify the MAIN execution path
     and narrate it in plain English.
 
+    Strips <think>...</think> tags from DeepSeek responses before returning
+    (reasoning models emit thinking blocks that pollute the Mermaid output).
+
 WHERE IT'S CALLED:
     - server.py -> codewalk_get_execution_flow() MCP tool
 

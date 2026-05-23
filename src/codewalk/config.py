@@ -21,6 +21,12 @@ WHY THIS DESIGN?
     - Factory pattern: get_llm() hides provider complexity — callers just
       say "give me an LLM" without caring if it's Ollama, OpenAI, etc.
 
+DEEPSEEK NOTE:
+    DeepSeek models have a "thinking" mode that outputs <think>...</think>
+    reasoning blocks. This breaks tool-calling flows (second LLM call fails
+    with 400 "reasoning_content must be passed back"). We disable it via
+    extra_body={"thinking": {"type": "disabled"}} in the factory.
+
 DEPENDENCIES:
     - pydantic_settings: Auto-loads from .env files + validates types
     - langchain: Provides the BaseChatModel interface all LLMs implement
