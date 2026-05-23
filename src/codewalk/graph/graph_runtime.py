@@ -60,8 +60,7 @@ from typing import Optional
 # in milliseconds. We use it for traversal, not storage.
 import igraph as ig
 
-# GraphStore: Our DuckDB layer — provides the edges we load into igraph
-from codewalk.graph.graph_store import GraphStore
+from src.codewalk.graph.graph_store import GraphStore
 
 logger = logging.getLogger("codewalk")
 
@@ -218,7 +217,9 @@ class GraphRuntime:
             # in-degree: A=1, B=1, C=1 → sorted by degree (all equal)
         """
         if self.file_graph.vcount() == 0:
-            return []
+            # No import edges in igraph — return all files from DuckDB
+            rows = self.store.conn.execute("SELECT path FROM files ORDER BY path").fetchall()
+            return [row[0] for row in rows]
         if not self.file_graph.is_dag():
             logger.warning("[GraphRuntime] Cycle detected — using in-degree sort fallback")
             degrees = self.file_graph.indegree()

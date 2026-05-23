@@ -113,9 +113,10 @@ def get_graph_runtime() -> GraphRuntime:
     return _graph_runtime
 
 
-# =============================================================================
-# Setters
-# =============================================================================
+def get_graph_store() -> GraphStore | None:
+    """Get the GraphStore (DuckDB). Returns None if not initialized."""
+    return _graph_store
+
 
 def initialize(store: VectorStore, agent, modules_result: dict, analyze_result: dict,
                files: list[dict] | None = None, deps: dict | None = None,
@@ -158,7 +159,7 @@ def initialize(store: VectorStore, agent, modules_result: dict, analyze_result: 
         _graph_runtime = GraphRuntime(_graph_store)
 
         # Recreate agent with graph_runtime so tools get igraph speed
-        _agent = create_agent(_store, _modules_result, files=_files, deps=_deps, graph_runtime=_graph_runtime)
+        _agent = create_agent(_store, _modules_result, files=_files, deps=_deps, graph_runtime=_graph_runtime, graph_store=_graph_store)
 
 
 def refresh(files: list[dict], deps: dict, modules_result: dict):
@@ -270,6 +271,6 @@ def ensure_initialized():
     _analyze_result = {"repo_path": get_repo_path(), "skipped": True}
 
     if _agent is None and _store is not None and _modules_result is not None:
-        _agent = create_agent(_store, _modules_result, files=_files, deps=_deps, graph_runtime=_graph_runtime)
+        _agent = create_agent(_store, _modules_result, files=_files, deps=_deps, graph_runtime=_graph_runtime, graph_store=_graph_store)
         _log("[ensure_initialized] Agent recreated")
         

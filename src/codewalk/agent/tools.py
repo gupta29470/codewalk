@@ -51,7 +51,7 @@ from src.codewalk.config import settings
 
 def create_tools(store: VectorStore, modules_result: dict,
                  files: list[dict] = None, deps: dict = None,
-                 graph_runtime=None) -> list:
+                 graph_runtime=None, graph_store=None) -> list:
     """Build agent tools with access to the indexed codebase data.
 
     Args:
@@ -103,7 +103,7 @@ def create_tools(store: VectorStore, modules_result: dict,
         Args:
             function_name: e.g. "scan_directory", "VectorStore"
         """
-        return explain_function_text(store, function_name, deps, graph_runtime)
+        return explain_function_text(store, function_name, deps, graph_runtime, graph_store)
 
     # ─── TOOL 4: get_overview ────────────────────────────────────
     @tool
@@ -173,6 +173,7 @@ def create_tools(store: VectorStore, modules_result: dict,
             use_llm=True,
             store=store,
             deps=deps,
+            graph_store=graph_store,
         )
 
         if not result.issues:

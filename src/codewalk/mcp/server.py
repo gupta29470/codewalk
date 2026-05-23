@@ -392,7 +392,7 @@ def codewalk_explain_function(function_name: str) -> str:
         return "Error: No codebase indexed yet. Call codewalk_analyze_codebase first."
 
     _log(f"[codewalk_explain_function] Looking up: {function_name}")
-    return explain_function_text(state._store, function_name, state._deps, state._graph_runtime)
+    return explain_function_text(state._store, function_name, state._deps, state._graph_runtime, state._graph_store)
 
 # ─── TOOL 5 [QUERY · user+AI]: codewalk_get_overview ─────────────────
 @mcp.tool()
@@ -767,6 +767,7 @@ def codewalk_review_diff(
         store=state._store,
         deps=state._deps,
         repo_path=settings.repo_path,
+        graph_store=state._graph_store,
     )
 
     if ctx is None:

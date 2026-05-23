@@ -107,8 +107,40 @@ def _get_file_content(diff_file: DiffFile, repo_path: str | None) -> str:
         return ""
 
 
-def _get_caller_context(diff_file: DiffFile, deps: dict | None) -> str:
-    """Find which files import this file (reverse dependency lookup)."""
+def _get_caller_context(diff_file: DiffFile, deps: dict | None = None, graph_store=None) -> str:
+    """Symbol-level caller context for code review."""
+    if graph_store:
+        symbols = graph_store.get_symbols_in_file(diff_file.file_path)
+        if symbols:
+            changed_lines = set()
+            for hunk in diff_file.hunks:
+                for line in hunk.lines:
+                    if line.change_type in ("added", "removed"):
+                        if line.line_number is not None:
+                            changed_lines.add(line.line_number)
+            
+            sections = []
+            for symbol in symbols:
+                sym_range = set(range(symbol["start_line"], symbol["end_line"] + 1))
+                if not changed_lines or changed_lines & sym_range:
+                    callers = graph_store.get_callers_of_symbol(symbol["qualified_name"])
+                    if callers:
+                        caller_lines = []
+                        for caller in callers[:15]: # Cap at 15 per symbol
+                            caller_lines.append(
+                                f"  - {caller['caller']}() at {caller['file']}:{caller['line']}"
+                            )
+                        sections.append(
+                            f"### {symbol['name']}() — called by {len(callers)} symbol(s):\n"
+                            + "\n".join(caller_lines)
+                        )
+            
+            if sections:
+                return (
+                    f"## Caller context for {diff_file.file_path}\n"
+                    + "\n\n".join(sections)
+                )
+            
     if not deps or "graph" not in deps:
         return ""
 
@@ -221,6 +253,7 @@ def prepare_review_context(
     store=None,
     deps: dict | None = None,
     repo_path: str | None = None,
+    graph_store = None,
 ) -> ReviewContext | None:
     """Common preparation for both MCP and LLM review flows.
 
@@ -264,7 +297,7 @@ def prepare_review_context(
             diff_file=df,
             file_diff_text=_build_file_diff_text(df),
             file_content=_get_file_content(df, repo_path),
-            caller_context=_get_caller_context(df, deps),
+            caller_context=_get_caller_context(df, deps, graph_store),
             security_context=_get_security_context_for_file(df, store),
         )
         file_contexts.append(fc)
@@ -324,6 +357,7 @@ def _review_single_file(
     store,
     deps: dict | None,
     guidelines_context: str,
+    graph_store = None,
 ) -> list[Issue]:
     """Review ONE file with a focused LLM call."""
     llm = get_llm(temperature=0)
@@ -337,7 +371,8 @@ def _review_single_file(
             f"## Full file content ({diff_file.file_path})\n```\n{file_content}\n```"
         )
 
-    caller_ctx = _get_caller_context(diff_file, deps)
+    # Caller context
+    caller_ctx = _get_caller_context(diff_file, deps, graph_store)
     if caller_ctx:
         context_parts.append(caller_ctx)
 
@@ -455,6 +490,7 @@ def review_diff(
     store=None,
     deps: dict | None = None,
     repo_path: str | None = None,
+    graph_store = None,
 ) -> ReviewResult:
     """Full review pipeline: git diff -> checks -> LLM -> ReviewResult.
 
@@ -492,6 +528,7 @@ def review_diff(
         store=store,
         deps=deps,
         repo_path=repo_path,
+        graph_store=graph_store,
     )
 
     if ctx is None:
@@ -510,6 +547,7 @@ def review_diff(
                     executor.submit(
                         _review_single_file,
                         df, repo_path, store, deps, ctx.guidelines_context,
+                        graph_store,
                     )
                     for df in ctx.diff_files
                 ]

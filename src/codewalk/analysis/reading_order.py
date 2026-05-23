@@ -53,7 +53,7 @@ from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import StrOutputParser
 
 from src.codewalk.config import get_llm
-from codewalk.graph.graph_runtime import GraphRuntime
+from src.codewalk.graph.graph_runtime import GraphRuntime
 
 
 RELEVANCE_SYSTEM_PROMPT = """You are a code onboarding expert. Given a list of files
@@ -356,6 +356,9 @@ def tag_reading_relevance(order: list[dict]) -> list[dict]:
 
     # Parse JSON response (strip markdown fences if present)
     text = result.strip()
+    # Strip <think>...</think> tags (DeepSeek reasoning models)
+    import re
+    text = re.sub(r"<think>[\s\S]*?</think>", "", text).strip()
     if text.startswith("```"):
         lines = text.split("\n")
         text = "\n".join(lines[1:-1])

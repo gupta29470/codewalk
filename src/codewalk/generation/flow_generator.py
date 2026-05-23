@@ -116,8 +116,13 @@ def generate_execution_flow(reading_order: dict, deps: dict) -> str:
     llm = get_llm()
     chain = prompt | llm | StrOutputParser()
 
-    return chain.invoke({
+    result = chain.invoke({
         "reading_order": _format_reading_order(reading_order["order"]),
         "total_files": reading_order["total_files"],
         "dependency_summary": _format_dependency_summary(deps["graph"]),
     })
+
+    # Strip <think>...</think> tags (DeepSeek reasoning models)
+    import re
+    result = re.sub(r"<think>[\s\S]*?</think>", "", result).strip()
+    return result

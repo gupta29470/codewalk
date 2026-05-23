@@ -242,26 +242,9 @@ def module_info_text(modules_result: dict, module_name: str) -> str:
 
 
 def explain_function_text(store, function_name: str,
-                          deps: dict = None, graph_runtime=None) -> str:
-    """Look up a function/class in ChromaDB and explain with blast radius.
-
-    EXAMPLE TRACE (searching for "get_blast_radius"):
-        store.search("get_blast_radius", n_results=10) returns 10 results
-        matches = [r for r in results if "get_blast_radius" in r["metadata"]["symbol_name"]]
-              # 2 matches: blast_radius.py:get_blast_radius, query.py:get_blast_radius
-        to_show = matches[:3] → those 2 matches
-
-        context = format_context(to_show)  # markdown with source code
-
-        file_path = "src/codewalk/analysis/blast_radius.py"  (first match)
-        radius = get_blast_radius("blast_radius.py", runtime)
-            = {"risk_level": "low", "affected_files": 2,
-               "direct": ["query.py"], "transitive": ["server.py"]}
-
-        context += "\n\n### Blast Radius\n"
-                   "**Risk:** LOW — 2 files affected\n"
-                   "**Direct: query.py | Transitive: server.py**"
-    """
+                          deps: dict = None, graph_runtime=None,
+                          graph_store=None) -> str:
+    """Look up a function/class in ChromaDB and explain with blast radius."""
     results = store.search(function_name, n_results=10)
     matches = [
         r for r in results
@@ -289,6 +272,32 @@ def explain_function_text(store, function_name: str,
             f"**Risk:** {risk} — {affected} files affected\n"
             f"**{breaks}**"
         )
+
+    if graph_store and file_path:
+        symbol_name = to_show[0]["metadata"].get("symbol_name", function_name)
+        qualified_name = f"{file_path}:{symbol_name}"
+
+        callers = graph_store.get_callers_of_symbol(qualified_name)
+        callees = graph_store.get_callees_of_symbol(qualified_name)
+
+        if callers:
+            caller_lines = [
+                f"  - {c['caller']}() at {c['file']}:{c['line']}"
+                for c in callers[:10]
+            ]
+            context += (
+                f"\n\n### Called by ({len(callers)} caller{'s' if len(callers) != 1 else ''}):\n"
+                + "\n".join(caller_lines)
+            )
+        if callees:
+            callee_lines = [
+                f"  - {c['callee']}() at {c['file']}:{c['line']}"
+                for c in callees[:10]
+            ]
+            context += (
+                f"\n\n### Calls ({len(callees)} function{'s' if len(callees) != 1 else ''}):\n"
+                + "\n".join(callee_lines)
+            )
 
     return context
 
