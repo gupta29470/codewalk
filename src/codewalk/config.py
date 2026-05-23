@@ -119,7 +119,8 @@ def get_llm(temperature: float = 0, **kwargs) -> BaseChatModel:
             model=settings.llm_model, 
             temperature=temperature, 
             api_key=settings.deepseek_api_key, 
-            base_url="https://api.deepseek.com", 
+            base_url="https://api.deepseek.com",
+            extra_body={"thinking": {"type": "disabled"}},
             **filtered,
         )
 

@@ -15,8 +15,8 @@ from src.codewalk.analysis.code_parser import (
 
 IMPORT_NODE_TYPES = {
     "python":     ["import_statement", "import_from_statement"],
-    "javascript": ["import_statement"],
-    "typescript": ["import_statement"],
+    "javascript": ["import_statement", "call_expression"],
+    "typescript": ["import_statement", "call_expression"],
     "dart":       ["import_or_export"],
     "java":       ["import_declaration"],
     "go":         ["import_declaration", "import_spec"],
@@ -67,7 +67,13 @@ def extract_imports(file_path: str, language: str) -> list[str]:
 def _walk_for_imports(node, target_types):
     """Walk the AST and yield nodes whose type is in target_types."""
     if node.type in target_types:
-        yield node
+        # For call_expression, only yield require() calls
+        if node.type == "call_expression":
+            func = node.child_by_field_name("function")
+            if func and func.text.decode("utf-8") == "require":
+                yield node
+        else:
+            yield node
     
     for child in node.children:
         yield from _walk_for_imports(child, target_types)  
@@ -102,9 +108,23 @@ def _extract_raw_import(node, language) -> str:
         return ""
     
     if language in ("javascript", "typescript"):
-        for child in node.children:
-            if child.type == "string":
-                return child.text.decode("utf-8").strip("'\"")
+        # ES module: import_statement → string child
+        if node.type == "import_statement":
+            for child in node.children:
+                if child.type == "string":
+                    return child.text.decode("utf-8").strip("'\"")
+            return ""
+        
+        # CommonJS: require('./path') — call_expression with "require" function
+        if node.type == "call_expression":
+            func = node.child_by_field_name("function")
+            if func and func.text.decode("utf-8") == "require":
+                args = node.child_by_field_name("arguments")
+                if args:
+                    for arg in args.children:
+                        if arg.type == "string":
+                            return arg.text.decode("utf-8").strip("'\"")
+            return ""
         
         return ""
     

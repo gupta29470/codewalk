@@ -48,6 +48,11 @@ export default function ExecutionFlowPage() {
         );
     }
 
+    // Extract mermaid block and narration from LLM response
+    const mermaidMatch = flow?.flow?.match(/```mermaid\s*\n([\s\S]*?)\n```/);
+    const mermaidChart = mermaidMatch ? mermaidMatch[1] : null;
+    const narration = flow?.flow?.replace(/```mermaid[\s\S]*?```/, "").trim() || "";
+
     return (
         <div className="space-y-6">
             <div className="flex items-center justify-between">
@@ -63,13 +68,24 @@ export default function ExecutionFlowPage() {
                 </Button>
             </div>
 
-            {flow?.flow && (
+            {mermaidChart && (
                 <Card>
                     <CardHeader>
                         <CardTitle>Execution Flow Diagram</CardTitle>
                     </CardHeader>
                     <CardContent>
-                        <MermaidDiagram chart={flow.flow} />
+                        <MermaidDiagram chart={mermaidChart} />
+                    </CardContent>
+                </Card>
+            )}
+
+            {narration && (
+                <Card>
+                    <CardHeader>
+                        <CardTitle>How This Code Runs</CardTitle>
+                    </CardHeader>
+                    <CardContent>
+                        <div className="prose prose-sm max-w-none whitespace-pre-wrap">{narration}</div>
                     </CardContent>
                 </Card>
             )}

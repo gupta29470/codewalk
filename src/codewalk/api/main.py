@@ -412,6 +412,9 @@ def get_reading_order():
            item["affected_files"] = risk.get("affected_files", 0)
            item["direct"] = risk.get("direct", [])
            item["transitive"] = risk.get("transitive", [])
+           # Map backend fields to frontend expectations
+           item["priority"] = item.get("relevance", "optional")
+           item["reason"] = item.get("why", "")
            
        return order
     except RuntimeError as e:
@@ -493,6 +496,8 @@ async def review_endpoint(request: ReviewRequest):
     try:
         from src.codewalk.review.reviewer import review_diff
 
+        state.ensure_initialized()
+
         store = None
         deps = None
         try:
@@ -507,6 +512,8 @@ async def review_endpoint(request: ReviewRequest):
             use_llm=True,
             store=store,
             deps=deps,
+            graph_store=state.get_graph_store(),
+            repo_path=state.get_repo_path(),
         )
 
         issues = [

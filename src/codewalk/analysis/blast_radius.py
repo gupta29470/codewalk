@@ -1,6 +1,6 @@
 from collections import deque
 
-from codewalk.graph.graph_runtime import GraphRuntime
+from src.codewalk.graph.graph_runtime import GraphRuntime
 
 def build_reverse_graph(graph: dict[str, list[str]]) -> dict[str, list[str]]:
     """Reverse the dependency graph: edges go from 'imported' → 'importer'.
