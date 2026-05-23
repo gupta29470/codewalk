@@ -133,7 +133,8 @@ def module_info_text(modules_result: dict, module_name: str) -> str:
 
 
 def explain_function_text(store, function_name: str,
-                          deps: dict = None, graph_runtime=None) -> str:
+                          deps: dict = None, graph_runtime=None,
+                          graph_store=None) -> str:
     """Look up a function/class in ChromaDB and explain with blast radius."""
     results = store.search(function_name, n_results=10)
     matches = [
@@ -162,6 +163,32 @@ def explain_function_text(store, function_name: str,
             f"**Risk:** {risk} — {affected} files affected\n"
             f"**{breaks}**"
         )
+
+    if graph_store and file_path:
+        symbol_name = to_show[0]["metadata"].get("symbol_name", function_name)
+        qualified_name = f"{file_path}:{symbol_name}"
+
+        callers = graph_store.get_callers_of_symbol(qualified_name)
+        callees = graph_store.get_callees_of_symbol(qualified_name)
+
+        if callers:
+            caller_lines = [
+                f"  - {c['caller']}() at {c['file']}:{c['line']}"
+                for c in callers[:10]
+            ]
+            context += (
+                f"\n\n### Called by ({len(callers)} caller{'s' if len(callers) != 1 else ''}):\n"
+                + "\n".join(caller_lines)
+            )
+        if callees:
+            callee_lines = [
+                f"  - {c['callee']}() at {c['file']}:{c['line']}"
+                for c in callees[:10]
+            ]
+            context += (
+                f"\n\n### Calls ({len(callees)} function{'s' if len(callees) != 1 else ''}):\n"
+                + "\n".join(callee_lines)
+            )
 
     return context
 

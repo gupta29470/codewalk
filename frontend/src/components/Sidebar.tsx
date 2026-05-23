@@ -29,7 +29,7 @@ const NAV_ITEMS = [
     { href: "/execution-flow", label: "Execution Flow", icon: GitBranch, locked: true },
     { href: "/chat", label: "Chat", icon: MessageCircle, locked: true },
     { href: "/voice", label: "Voice", icon: Mic, locked: true },
-    { href: "/review", label: "Code Review", icon: ShieldCheck, locked: false },
+    { href: "/review", label: "Code Review", icon: ShieldCheck, locked: true },
     { href: "/incremental-reindex", label: "Smart Reindex", icon: RefreshCw, locked: true },
 ];
 

@@ -98,6 +98,14 @@ class GraphStore:
             deps: From build_dependency_graph() — {"graph": {"a.py": ["b.py"]}}
             module_results: From detect_modules() — {"modules": {...}, "module_graph": {...}}
         """
+        # Clear in reverse FK order: children before parents
+        self.conn.execute("DELETE FROM symbol_calls")
+        self.conn.execute("DELETE FROM symbols")
+        self.conn.execute("DELETE FROM imports")
+        self.conn.execute("DELETE FROM module_deps")
+        self.conn.execute("DELETE FROM modules")
+        self.conn.execute("DELETE FROM files")
+
         self._populate_files(files, module_results)
         self._populate_imports(deps)
         self._populate_symbols(files)
@@ -118,8 +126,6 @@ class GraphStore:
             for file_path in module_info.get("files", []):
                 file_to_module[file_path] = module_name
 
-        self.conn.execute("DELETE FROM files")
-
         self.conn.executemany(
             "INSERT INTO files (file_id, path, module, language) VALUES (?, ?, ?, ?)",
             [
@@ -138,7 +144,6 @@ class GraphStore:
         """Insert file-level import edges using file hash IDs."""
 
         graph = deps.get("graph", {})
-        self.conn.execute("DELETE FROM imports")
 
         # Only insert edges where both source and target exist in the files table
         known_ids = {row[0] for row in self.conn.execute("SELECT file_id FROM files").fetchall()}
@@ -172,7 +177,6 @@ class GraphStore:
 
         from src.codewalk.analysis.code_parser import parse_file, GRAMMAR_MAP
 
-        self.conn.execute("DELETE FROM symbols")
         rows = []
 
         for file in files:
@@ -213,8 +217,6 @@ class GraphStore:
     def _populate_symbol_calls(self, files: list[dict]):
         """Resolve call_extractor results against the symbols table."""
         from src.codewalk.graph.call_extractor import extract_calls_batch
-
-        self.conn.execute("DELETE FROM symbol_calls")
 
         all_calls = extract_calls_batch(files)
         if not all_calls:
@@ -279,9 +281,6 @@ class GraphStore:
         """Insert module records and module-level dependency edges."""
         modules = module_results.get("modules", {})
         module_graph = module_results.get("module_graph", {})
-
-        self.conn.execute("DELETE FROM modules")
-        self.conn.execute("DELETE FROM module_deps")
 
         if modules:
             self.conn.executemany(
@@ -398,6 +397,67 @@ class GraphStore:
             "chunks": self.conn.execute("SELECT COUNT(*) FROM chunks").fetchone()[0],
             "modules": self.conn.execute("SELECT COUNT(*) FROM modules").fetchone()[0],
         }
+    
+    def get_callers_of_symbol(self, qualified_name: str) -> list[dict]:
+        """Who calls this symbol? Returns caller name, file, and call site line.
+
+        Args:
+            qualified_name: e.g. "color.go:Fprint" or "config.py:Settings"
+        """
+        result = self.conn.execute(
+            "SELECT symbol_id FROM symbols WHERE qualified_name = ?",
+            [qualified_name]
+        ).fetchone()
+        if not result:
+            return []
+        callee_id = result[0]
+        rows = self.conn.execute(
+            "SELECT s.name, s.qualified_name, f.path, sc.line "
+            "FROM symbol_calls sc "
+            "JOIN symbols s ON sc.caller_symbol_id = s.symbol_id "
+            "JOIN files f ON s.file_id = f.file_id "
+            "WHERE sc.callee_symbol_id = ? "
+            "ORDER BY f.path, sc.line",
+            [callee_id]
+        ).fetchall()
+
+        return [
+            {
+                "caller": row[0],           # "login"
+                "caller_qualified": row[1],  # "views.py:login"
+                "file": row[2],              # "views.py"
+                "line": row[3],              # 32
+            }
+            for row in rows
+        ]
+    
+    def get_callees_of_symbol(self, qualified_name: str) -> list[dict]:
+        """What does this symbol call? Returns callee name, file, and line."""
+        result = self.conn.execute(
+            "SELECT symbol_id FROM symbols WHERE qualified_name = ?",
+            [qualified_name]
+        ).fetchone()
+        if not result:
+            return []
+        caller_id = result[0]
+        rows = self.conn.execute(
+            "SELECT s.name, s.qualified_name, f.path, sc.line "
+            "FROM symbol_calls sc "
+            "JOIN symbols s ON sc.callee_symbol_id = s.symbol_id "
+            "JOIN files f ON s.file_id = f.file_id "
+            "WHERE sc.caller_symbol_id = ? "
+            "ORDER BY sc.line",
+            [caller_id]
+        ).fetchall()
+        return [
+            {
+                "callee": row[0],            # "setWriter"
+                "callee_qualified": row[1],   # "color.go:setWriter"
+                "file": row[2],               # "color.go"
+                "line": row[3],               # 289
+            }
+            for row in rows
+        ]
     
     def close(self):
         """Close the DuckDB connection."""

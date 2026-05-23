@@ -3,7 +3,7 @@ from typing import Optional
 
 import igraph as ig
 
-from codewalk.graph.graph_store import GraphStore
+from src.codewalk.graph.graph_store import GraphStore
 
 logger = logging.getLogger("codewalk")
 
@@ -71,7 +71,9 @@ class GraphRuntime:
     def topological_sort(self) -> list[str]:
         """Files in dependency order (leaf dependencies first)."""
         if self.file_graph.vcount() == 0:
-            return []
+            # No import edges in igraph — return all files from DuckDB
+            rows = self.store.conn.execute("SELECT path FROM files ORDER BY path").fetchall()
+            return [row[0] for row in rows]
         if not self.file_graph.is_dag():
             logger.warning("[GraphRuntime] Cycle detected — using in-degree sort fallback")
             degrees = self.file_graph.indegree()
