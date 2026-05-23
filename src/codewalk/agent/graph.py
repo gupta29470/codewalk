@@ -29,19 +29,22 @@ class AgentState(TypedDict):
 
 
 # ─── FACTORY FUNCTION ────────────────────────────────────────────────
-def create_agent(store: VectorStore, modules_result: dict, files: list[dict] = None, deps: dict = None):
+def create_agent(store: VectorStore, modules_result: dict, files: list[dict] = None, deps: dict = None, graph_runtime=None):
     _log("[agent] Creating agent with tools...")
     """Build and compile a LangGraph agent with tools and memory.
 
     Args:
         store: VectorStore with indexed codebase (for search tools).
         modules_result: Output of detect_modules() (for module info tool).
+        files: scan_directory() result (for reading order).
+        deps: build_dependency_graph() result (for blast radius).
+        graph_runtime: Optional GraphRuntime for igraph fast path.
 
     Returns:
         Compiled StateGraph — call it with .invoke() or .stream().
     """
     # ── Step 1: Create tools ─────────────────────────────────────
-    tools = create_tools(store, modules_result, files=files, deps=deps)
+    tools = create_tools(store, modules_result, files=files, deps=deps, graph_runtime=graph_runtime)
 
     # ── Step 2: Create LLM with tools bound ──────────────────────
     llm = get_llm(temperature=0, reasoning=False)
