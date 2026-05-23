@@ -1,0 +1,207 @@
+%%{init: {'theme': 'base', 'themeVariables': {'primaryColor': '#0d1117', 'primaryTextColor': '#f0f6fc', 'primaryBorderColor': '#58a6ff', 'lineColor': '#58a6ff', 'secondaryColor': '#161b22', 'tertiaryColor': '#21262d', 'fontSize': '14px', 'fontFamily': 'monospace', 'edgeLabelBackground': '#0d1117'}}}%%
+
+graph TD
+    %% ══════════════════════════════════════
+    %% USER (top of diagram — this is START)
+    %% ══════════════════════════════════════
+    USER(("👤 User"))
+
+    USER --> UI
+    USER --> MCPE
+    USER --> REST
+    USER --> VCLI
+
+    %% ── ENTRY POINTS ──
+    UI["🌐 Next.js Frontend<br/>localhost:3000"]
+    MCPE["🧩 MCP Server<br/>18 tools · stdio"]
+    REST["📡 FastAPI REST<br/>localhost:8000"]
+    VCLI["🎙️ Voice CLI<br/>mic → answer → speak"]
+
+    UI --> API
+    REST --> API
+    MCPE --> MCP
+    VCLI --> VOICE
+
+    %% ── INTERFACE LAYERS ──
+    subgraph API["FastAPI · 17 endpoints"]
+        direction LR
+        A1["Setup<br/>/analyze · /analyze/stream"]
+        A2["Query<br/>/chat · /overview · /modules<br/>/blast-radius · /reading-order<br/>/execution-flow"]
+        A3["Review<br/>/review · /review/file<br/>/review/guidelines"]
+        A4["Voice<br/>/voice/ask"]
+        A5["Maintenance<br/>/refresh · /incremental-reindex"]
+    end
+
+    subgraph MCP["MCP Server · 18 tools"]
+        direction LR
+        M1["Setup<br/>analyze · scan<br/>submit · index"]
+        M2["Query<br/>search · modules · explain<br/>overview · blast-radius<br/>reading-order · execution-flow"]
+        M3["Review<br/>review-diff · review-file<br/>load-guidelines"]
+        M4["Voice<br/>voice-ask · speak"]
+        M5["Maintenance<br/>reindex · refresh"]
+    end
+
+    API --> STATE
+    MCP --> STATE
+
+    %% ── CENTRALIZED STATE ──
+    STATE["🗄️ State Singleton · api/state.py<br/>store · agent · modules · files · deps<br/>initialize() · ensure_initialized() · refresh()"]
+
+    STATE --> PIPELINE
+    STATE --> AGENT
+
+    %% ── PIPELINE ──
+    PIPELINE["⚙️ Pipeline · pipeline.py<br/>full_index · full_index_parallel<br/>index_from_paths · incremental_reindex<br/>Producer-consumer threads · MD5 delta"]
+
+    PIPELINE --> INGEST
+    PIPELINE --> EMBED
+    PIPELINE --> ANALYSIS
+
+    %% ── INGESTION ──
+    subgraph INGEST["📂 Ingestion"]
+        direction LR
+        I1["scanner.py<br/>scan_directory<br/>30+ extensions"]
+        I2["file_filter.py<br/>~80 skip dirs<br/>~200 skip exts"]
+        I3["tech_detect.py<br/>16 config files"]
+    end
+
+    %% ── ANALYSIS ──
+    subgraph ANALYSIS["🔬 Analysis"]
+        direction LR
+        AN1["code_parser.py<br/>tree-sitter AST<br/>14 languages"]
+        AN2["dependency_graph.py<br/>import extraction<br/>+ resolution"]
+        AN3["module_detector.py<br/>auto-grouping<br/>module dep graph"]
+        AN4["blast_radius.py<br/>reverse BFS<br/>risk levels"]
+        AN5["reading_order.py<br/>topological sort<br/>LLM relevance"]
+    end
+
+    AN1 --> AN2
+    AN2 --> AN3
+    AN2 --> AN4
+    AN2 --> AN5
+
+    %% ── EMBEDDINGS ──
+    subgraph EMBED["📐 Embeddings"]
+        direction LR
+        E1["chunker.py<br/>AST-aware chunks<br/>13 lang splitters<br/>MD5 hashing"]
+        E2["embedder.py<br/>Jina Code v2<br/>CUDA / MPS / CPU"]
+        E3["vector_store.py<br/>ChromaDB<br/>cosine search<br/>batch upsert"]
+    end
+
+    E1 --> AN1
+    E1 --> E2
+    E2 --> E3
+
+    %% ── RAG + AGENT ──
+    subgraph AGENT["🤖 LangGraph Agent"]
+        direction LR
+        AG1["graph.py<br/>StateGraph<br/>MemorySaver"]
+        AG2["tools.py<br/>8 agent tools"]
+    end
+
+    subgraph RAG_MOD["🔎 RAG"]
+        direction LR
+        R1["chain.py<br/>retrieve → prompt → LLM"]
+    end
+
+    AG2 --> R1
+    AG2 --> AN4
+    AG2 --> AN5
+    AG2 --> REVIEWER
+    R1 --> E3
+
+    %% ── GENERATION ──
+    subgraph GEN["📝 Generation"]
+        direction LR
+        G1["overview_generator"]
+        G2["module_explainer"]
+        G3["diagram_generator<br/>Mermaid output"]
+        G4["flow_generator"]
+    end
+
+    %% ── REVIEW ──
+    subgraph REVIEW["🔬 Code Review"]
+        direction LR
+        REVIEWER["reviewer.py<br/>single-pass or<br/>per-file parallel"]
+        RV1["diff_parser.py<br/>git diff → DiffFile"]
+        RV2["test_coverage.py<br/>14-lang test detection"]
+        RV3["guidelines_loader.py<br/>RAG on team standards"]
+        RV4["review_prompts.py<br/>OWASP · 14 languages"]
+    end
+
+    REVIEWER --> RV1
+    REVIEWER --> RV2
+    REVIEWER --> RV3
+    REVIEWER --> RV4
+    REVIEWER --> AN4
+    RV3 --> E3
+
+    %% ── VOICE ──
+    subgraph VOICE["🎙️ Voice"]
+        direction LR
+        V1["stt.py<br/>faster-whisper<br/>small · int8"]
+        V2["router.py<br/>intent → tool<br/>Ollama or LLM"]
+        V3["backends.py<br/>direct · MCP · API"]
+        V4["tts.py<br/>edge-tts<br/>AriaNeural"]
+        V5["companion.py<br/>voice loop + LLM<br/>response formatting"]
+    end
+
+    V1 --> V2
+    V2 --> V3
+    V3 --> MCP
+    V5 --> V1
+    V5 --> V4
+
+    %% ══════════════════════════════════════
+    %% BOTTOM LAYER — Storage + LLMs (END)
+    %% ══════════════════════════════════════
+
+    %% ── STORAGE ──
+    CHROMA[("💾 ChromaDB<br/>.codewalk/chroma/<br/>code chunks · guidelines")]
+    E3 --> CHROMA
+
+    %% ── LLM PROVIDERS ──
+    LLM["🧠 LLM Providers · config.py<br/>Ollama · OpenAI · Anthropic<br/>Groq · Gemini · OpenRouter"]
+
+    GEN --> LLM
+    R1 --> LLM
+    REVIEWER --> LLM
+    AN5 --> LLM
+    V2 --> LLM
+
+    %% ══════════════════════════════════════
+    %% STYLES — each section a distinct color
+    %% ══════════════════════════════════════
+    classDef user fill:#58a6ff,stroke:#58a6ff,stroke-width:3px,color:#0d1117,font-weight:bold
+    classDef entry fill:#0d1117,stroke:#58a6ff,stroke-width:2px,color:#f0f6fc
+    classDef api fill:#0d2818,stroke:#3fb950,stroke-width:2px,color:#3fb950
+    classDef mcp fill:#1a0d2e,stroke:#bc8cff,stroke-width:2px,color:#d2a8ff
+    classDef state fill:#2d1600,stroke:#f78166,stroke-width:3px,color:#ffa657
+    classDef pipe fill:#0d2818,stroke:#3fb950,stroke-width:2px,color:#3fb950
+    classDef ingest fill:#00202e,stroke:#39d2f5,stroke-width:1px,color:#79e8ff
+    classDef analysis fill:#2d2200,stroke:#e3b341,stroke-width:1px,color:#f9e2af
+    classDef embed fill:#002d1a,stroke:#2ea043,stroke-width:1px,color:#56d364
+    classDef agent fill:#1a0d2e,stroke:#bc8cff,stroke-width:1px,color:#d2a8ff
+    classDef rag fill:#2d0022,stroke:#f778ba,stroke-width:1px,color:#ff9bce
+    classDef gen fill:#00202e,stroke:#39d2f5,stroke-width:1px,color:#79e8ff
+    classDef review fill:#2d0000,stroke:#f85149,stroke-width:1px,color:#ff7b72
+    classDef voice fill:#1a002d,stroke:#a371f7,stroke-width:1px,color:#d2a8ff
+    classDef store fill:#1a0d2e,stroke:#bc8cff,stroke-width:3px,color:#d2a8ff
+    classDef llmbox fill:#2d2200,stroke:#e3b341,stroke-width:2px,color:#f9e2af
+
+    class USER user
+    class UI,MCPE,REST,VCLI entry
+    class A1,A2,A3,A4,A5 api
+    class M1,M2,M3,M4,M5 mcp
+    class STATE state
+    class PIPELINE pipe
+    class I1,I2,I3 ingest
+    class AN1,AN2,AN3,AN4,AN5 analysis
+    class E1,E2,E3 embed
+    class AG1,AG2 agent
+    class R1 rag
+    class G1,G2,G3,G4 gen
+    class REVIEWER,RV1,RV2,RV3,RV4 review
+    class V1,V2,V3,V4,V5 voice
+    class CHROMA store
+    class LLM llmbox

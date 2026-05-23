@@ -2,9 +2,12 @@ import json
 
 from collections import deque
 
-from src.codewalk.config import get_llm
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import StrOutputParser
+
+from src.codewalk.config import get_llm
+from codewalk.graph.graph_runtime import GraphRuntime
+
 
 RELEVANCE_SYSTEM_PROMPT = """You are a code onboarding expert. Given a list of files
 from a software project with their dependency information, classify each file's
@@ -46,18 +49,15 @@ Example:
 
 
 
-def topological_sort(graph: dict[str, list[str]]) -> list[str]:
+def topological_sort(graph) -> list[str]:
     """Sort files so dependencies come before dependents.
 
-    Args:
-        graph: file-level dependency graph from build_dependency_graph()
-               {"path/a.py": ["path/b.py", "os"], "path/b.py": []}
-
-    Returns:
-        List of file paths in reading order (dependencies first).
-        Files with no dependencies come first.
-        External imports (not in graph) are ignored.
+    graph: GraphRuntime (igraph, C-speed) or dict (legacy Kahn's).
     """
+
+    if isinstance(graph, GraphRuntime):
+        return graph.topological_sort()
+
     # Step 1: Filter to only internal files (keys of the graph)
     internal_files = set(graph.keys())
 
@@ -96,7 +96,7 @@ def topological_sort(graph: dict[str, list[str]]) -> list[str]:
 
     return result
 
-def generate_reading_order(files: list[dict], deps: dict) -> dict:
+def generate_reading_order(files: list[dict], deps: dict, graph_runtime=None) -> dict:
     """Generate a complete reading order from scanned files and dependency graph.
 
     Args:
@@ -115,7 +115,7 @@ def generate_reading_order(files: list[dict], deps: dict) -> dict:
         }
     """
     graph = deps["graph"]
-    sorted_files = topological_sort(graph)
+    sorted_files = topological_sort(graph_runtime or graph)
 
     # Internal file set for cycle detection
     internal_files = set(graph.keys())
@@ -158,13 +158,13 @@ def generate_reading_order(files: list[dict], deps: dict) -> dict:
         "has_cycles": has_cycles,
     }
 
-def generate_reading_order_raw(files: list[dict], deps: dict) -> dict:
+def generate_reading_order_raw(files: list[dict], deps: dict, graph_runtime=None) -> dict:
     """Generate reading order WITHOUT LLM relevance tagging.
 
     Used by MCP tools where the host LLM (Copilot) does the reasoning.
     """
     graph = deps["graph"]
-    sorted_files = topological_sort(graph)
+    sorted_files = topological_sort(graph_runtime or graph)
 
     internal_files = set(graph.keys())
     has_cycles = len(sorted_files) < len(internal_files)
