@@ -56,3 +56,7 @@ faster-whisper
 edge-tts
 sounddevice
 numpy
+
+# Graph
+duckdb
+igraph

@@ -81,6 +81,17 @@ def format_voice_response(raw_result: str) -> dict:
 
     Short results (<300 chars) are just cleaned for speech.
     Long results go through LLM to produce a teaching narrative.
+
+    EXAMPLE TRACE (short result, 120 chars):
+        raw_result = "## scan_directory\nScans a directory recursively..."  (120 chars < 300)
+        speech     = _clean_for_speech(raw_result)  → "scan_directory. Scans a directory recursively..."
+        return → {"technical": "## scan_directory\n...", "speech": "scan_directory. Scans a directory..."}
+
+    EXAMPLE TRACE (long result, 2400 chars):
+        raw_result = "## Module: analysis\n**Files:** 7\n**Languages:** python(7)\n..."  (2400 chars > 300)
+        llm.invoke([...])  → "The analysis module is the structural brain..."
+        speech = _clean_for_speech("The analysis module...")  → "The analysis module is the structural brain..."
+        return → {"technical": "## Module: analysis\n...", "speech": "The analysis module is..."}
     """
     from src.codewalk.config import get_llm
 

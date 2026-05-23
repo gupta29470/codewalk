@@ -21,7 +21,12 @@ from pydantic import BaseModel
 # =============================================================================
 
 class AnalyzeRequest(BaseModel):
-    """POST /analyze - request body."""
+    """POST /analyze - request body.
+
+    EXAMPLE:
+        {"repo_path": "data/repos/fatih/color", "collection_name": "color", "index_mode": "auto"}
+        {"repo_path": "", "collection_name": "", "index_mode": "full"}  # uses settings.repo_path
+    """
     repo_path: str = ""
     collection_name: str = ""
     index_mode: str = "auto"  # "auto" | "reindex" | "full"
@@ -54,7 +59,12 @@ class GuidelinesRequest(BaseModel):
 # =============================================================================
 
 class AnalyzeResponse(BaseModel):
-    """POST /analyze - response body."""
+    """POST /analyze - response body.
+
+    EXAMPLE:
+        {"status": "complete", "repo_path": "data/repos/fatih/color",
+         "files_scanned": 9, "chunks_created": 348, "modules": ["color"]}
+    """
     status: str
     repo_path: str
     files_scanned: int
@@ -81,7 +91,14 @@ class ModuleResponse(BaseModel):
 
 
 class OverviewResponse(BaseModel):
-    """GET /overview - response body."""
+    """GET /overview - response body.
+
+    EXAMPLE:
+        {"tech_stack": ["Go (9 files)"], "total_files": 9, "total_modules": 1,
+         "modules": ["color"], "diagram": "graph TD\n  color",
+         "overview_text": "A Go color library...",
+         "riskiest_files": [{"file": "color.go", "risk": "high", "dependents": 5}]}
+    """
     tech_stack: list[str]
     total_files: int
     total_modules: int

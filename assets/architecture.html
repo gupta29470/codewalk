@@ -1,0 +1,1131 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Codewalk — Interactive Architecture</title>
+    <style>
+        :root {
+            --bg: #0d1117;
+            --surface: #161b22;
+            --surface2: #21262d;
+            --border: #30363d;
+            --text: #e6edf3;
+            --text-muted: #8b949e;
+            --blue: #58a6ff;
+            --green: #3fb950;
+            --purple: #bc8cff;
+            --orange: #f78166;
+            --yellow: #e3b341;
+            --cyan: #39d2f5;
+            --pink: #f778ba;
+            --red: #f85149;
+            --teal: #2ea043;
+        }
+
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            background: var(--bg);
+            color: var(--text);
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif;
+            overflow: hidden;
+            height: 100vh;
+            width: 100vw;
+        }
+
+        /* ── Header ── */
+        #header {
+            position: fixed;
+            top: 0;
+            left: 0;
+            right: 0;
+            height: 52px;
+            background: var(--surface);
+            border-bottom: 1px solid var(--border);
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 0 20px;
+            z-index: 100;
+        }
+
+        #header h1 {
+            font-size: 16px;
+            font-weight: 600;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        #header h1 span {
+            color: var(--blue);
+        }
+
+        .header-stats {
+            display: flex;
+            gap: 16px;
+            font-size: 12px;
+            color: var(--text-muted);
+        }
+
+        .header-stats .stat {
+            display: flex;
+            align-items: center;
+            gap: 4px;
+        }
+
+        .header-stats .stat-val {
+            color: var(--text);
+            font-weight: 600;
+        }
+
+        .controls {
+            display: flex;
+            gap: 8px;
+        }
+
+        .controls button {
+            background: var(--surface2);
+            border: 1px solid var(--border);
+            color: var(--text-muted);
+            padding: 4px 12px;
+            border-radius: 6px;
+            font-size: 12px;
+            cursor: pointer;
+            transition: all 0.15s;
+        }
+
+        .controls button:hover {
+            background: var(--border);
+            color: var(--text);
+        }
+
+        .controls button.active {
+            background: var(--blue);
+            color: var(--bg);
+            border-color: var(--blue);
+        }
+
+        /* ── Canvas ── */
+        #canvas-container {
+            position: fixed;
+            top: 52px;
+            left: 0;
+            right: 0;
+            bottom: 0;
+        }
+
+        svg {
+            width: 100%;
+            height: 100%;
+        }
+
+        /* ── Tooltip ── */
+        #tooltip {
+            position: fixed;
+            pointer-events: none;
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            padding: 12px 16px;
+            font-size: 12px;
+            max-width: 380px;
+            box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
+            opacity: 0;
+            transition: opacity 0.15s;
+            z-index: 200;
+            line-height: 1.5;
+        }
+
+        #tooltip.visible {
+            opacity: 1;
+        }
+
+        #tooltip h3 {
+            font-size: 14px;
+            margin-bottom: 6px;
+        }
+
+        #tooltip .tt-file {
+            color: var(--text-muted);
+            font-size: 11px;
+        }
+
+        #tooltip .tt-sep {
+            height: 1px;
+            background: var(--border);
+            margin: 6px 0;
+        }
+
+        #tooltip .tt-fn {
+            color: var(--cyan);
+            font-family: 'SF Mono', Consolas, monospace;
+            font-size: 11px;
+        }
+
+        #tooltip .tt-badge {
+            display: inline-block;
+            padding: 1px 6px;
+            border-radius: 10px;
+            font-size: 10px;
+            font-weight: 600;
+            margin-right: 4px;
+        }
+
+        /* ── Detail Panel (right side) ── */
+        #detail-panel {
+            position: fixed;
+            top: 52px;
+            right: 0;
+            bottom: 0;
+            width: 340px;
+            background: var(--surface);
+            border-left: 1px solid var(--border);
+            transform: translateX(100%);
+            transition: transform 0.25s ease;
+            z-index: 90;
+            overflow-y: auto;
+            padding: 20px;
+        }
+
+        #detail-panel.open {
+            transform: translateX(0);
+        }
+
+        #detail-panel .dp-close {
+            position: absolute;
+            top: 12px;
+            right: 12px;
+            background: none;
+            border: none;
+            color: var(--text-muted);
+            font-size: 18px;
+            cursor: pointer;
+        }
+
+        #detail-panel .dp-close:hover {
+            color: var(--text);
+        }
+
+        #detail-panel h2 {
+            font-size: 18px;
+            margin-bottom: 4px;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        #detail-panel .dp-sub {
+            color: var(--text-muted);
+            font-size: 12px;
+            margin-bottom: 16px;
+        }
+
+        #detail-panel .dp-section {
+            margin-bottom: 16px;
+        }
+
+        #detail-panel .dp-section h4 {
+            font-size: 11px;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            color: var(--text-muted);
+            margin-bottom: 8px;
+        }
+
+        .dp-file-list {
+            list-style: none;
+        }
+
+        .dp-file-list li {
+            font-family: 'SF Mono', Consolas, monospace;
+            font-size: 12px;
+            padding: 4px 8px;
+            border-radius: 4px;
+            margin-bottom: 2px;
+            cursor: default;
+            display: flex;
+            align-items: center;
+            gap: 6px;
+        }
+
+        .dp-file-list li:hover {
+            background: var(--surface2);
+        }
+
+        .dp-file-list .file-icon {
+            font-size: 10px;
+            opacity: 0.5;
+        }
+
+        .dp-dep-list {
+            list-style: none;
+        }
+
+        .dp-dep-list li {
+            font-size: 12px;
+            padding: 3px 8px;
+            border-radius: 4px;
+            margin-bottom: 2px;
+            display: flex;
+            align-items: center;
+            gap: 6px;
+        }
+
+        .dp-dep-list .dep-arrow {
+            color: var(--text-muted);
+            font-size: 10px;
+        }
+
+        .dp-keys {
+            font-size: 12px;
+            color: var(--text-muted);
+            line-height: 1.7;
+        }
+
+        .dp-keys code {
+            font-family: 'SF Mono', Consolas, monospace;
+            background: var(--surface2);
+            padding: 1px 5px;
+            border-radius: 3px;
+            color: var(--cyan);
+            font-size: 11px;
+        }
+
+        /* ── Legend ── */
+        #legend {
+            position: fixed;
+            bottom: 16px;
+            left: 16px;
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            padding: 12px 16px;
+            font-size: 11px;
+            z-index: 80;
+            display: flex;
+            flex-direction: column;
+            gap: 6px;
+        }
+
+        #legend h4 {
+            font-size: 10px;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            color: var(--text-muted);
+            margin-bottom: 2px;
+        }
+
+        .legend-item {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .legend-dot {
+            width: 10px;
+            height: 10px;
+            border-radius: 50%;
+            flex-shrink: 0;
+        }
+
+        .legend-line {
+            width: 20px;
+            height: 2px;
+            flex-shrink: 0;
+            border-radius: 1px;
+        }
+
+        /* ── Minimap ── */
+        #minimap {
+            position: fixed;
+            bottom: 16px;
+            right: 16px;
+            width: 160px;
+            height: 120px;
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            z-index: 80;
+            overflow: hidden;
+        }
+
+        #minimap .viewport-rect {
+            fill: none;
+            stroke: var(--blue);
+            stroke-width: 1.5;
+            stroke-dasharray: 3 2;
+        }
+
+        /* ── Flow Animation ── */
+        @keyframes flowDash {
+            to {
+                stroke-dashoffset: -20;
+            }
+        }
+
+        .link-animated {
+            animation: flowDash 1s linear infinite;
+        }
+    </style>
+</head>
+
+<body>
+
+    <div id="header">
+        <h1>🔍 <span>Codewalk</span> Architecture</h1>
+        <div class="header-stats">
+            <div class="stat"><span class="stat-val">10</span> modules</div>
+            <div class="stat"><span class="stat-val">51</span> files</div>
+            <div class="stat"><span class="stat-val">18</span> MCP tools</div>
+            <div class="stat"><span class="stat-val">17</span> API endpoints</div>
+            <div class="stat"><span class="stat-val">14</span> languages</div>
+        </div>
+        <div class="controls">
+            <button id="btn-reset">Reset View</button>
+            <button id="btn-flow" class="flow-toggle">Animate Flow</button>
+            <button id="btn-labels">Labels</button>
+        </div>
+    </div>
+
+    <div id="canvas-container">
+        <svg id="svg"></svg>
+    </div>
+
+    <div id="tooltip"></div>
+
+    <div id="detail-panel">
+        <button class="dp-close" onclick="closePanel()">&times;</button>
+        <div id="dp-content"></div>
+    </div>
+
+    <div id="legend">
+        <h4>Nodes</h4>
+        <div class="legend-item">
+            <div class="legend-dot" style="background:#58a6ff"></div> Entry Point
+        </div>
+        <div class="legend-item">
+            <div class="legend-dot" style="background:#39d2f5"></div> Ingestion
+        </div>
+        <div class="legend-item">
+            <div class="legend-dot" style="background:#e3b341"></div> Analysis
+        </div>
+        <div class="legend-item">
+            <div class="legend-dot" style="background:#3fb950"></div> Embeddings
+        </div>
+        <div class="legend-item">
+            <div class="legend-dot" style="background:#bc8cff"></div> Agent / RAG
+        </div>
+        <div class="legend-item">
+            <div class="legend-dot" style="background:#39d2f5"></div> Generation
+        </div>
+        <div class="legend-item">
+            <div class="legend-dot" style="background:#f85149"></div> Review
+        </div>
+        <div class="legend-item">
+            <div class="legend-dot" style="background:#a371f7"></div> Voice
+        </div>
+        <div class="legend-item">
+            <div class="legend-dot" style="background:#f78166"></div> Orchestration
+        </div>
+        <div class="legend-item">
+            <div class="legend-dot" style="background:#bc8cff;border:2px solid #d2a8ff"></div> External
+        </div>
+        <h4 style="margin-top:8px">Edges</h4>
+        <div class="legend-item">
+            <div class="legend-line" style="background:var(--text-muted)"></div> Dependency
+        </div>
+        <div class="legend-item">
+            <div class="legend-line" style="background:var(--blue)"></div> Data flow
+        </div>
+    </div>
+
+    <div id="minimap"><svg id="minimap-svg"></svg></div>
+
+    <script>
+        // ════════════════════════════════════════════════════════════
+        //  DATA MODEL — modules, files, connections
+        // ════════════════════════════════════════════════════════════
+
+        const modules = {
+            user: { label: '👤 User', group: 'entry', color: '#58a6ff', tier: 0, x: 0, y: -380, files: [], desc: 'End user — developer or team member onboarding to a codebase.' },
+            frontend: { label: '🌐 Next.js Frontend', group: 'entry', color: '#58a6ff', tier: 1, x: -300, y: -260, files: ['layout.tsx', 'page.tsx', 'Sidebar.tsx', 'MermaidDiagram.tsx', 'api.ts'], desc: 'React/Next.js UI — localhost:3000. Module browser, chat, blast radius viz, voice recorder.' },
+            mcp_entry: { label: '🧩 MCP Server', group: 'entry', color: '#58a6ff', tier: 1, x: -100, y: -260, files: [], desc: 'Model Context Protocol entry — 18 tools exposed to Copilot/Claude via stdio.' },
+            api_entry: { label: '📡 FastAPI REST', group: 'entry', color: '#58a6ff', tier: 1, x: 100, y: -260, files: [], desc: 'HTTP API server — 17 endpoints at localhost:8000. Serves the frontend.' },
+            voice_cli: { label: '🎙️ Voice CLI', group: 'entry', color: '#58a6ff', tier: 1, x: 300, y: -260, files: [], desc: 'CLI voice companion — mic → transcribe → route → execute → speak.' },
+
+            api: {
+                label: 'API · 17 endpoints', group: 'api', color: '#3fb950', tier: 2, x: 50, y: -130,
+                files: ['main.py — 8 routes: /analyze, /chat, /overview, /modules, /blast-radius, /reading-order, /execution-flow, /review', 'models.py — Pydantic schemas: AnalyzeRequest, ChatRequest, OverviewResponse'],
+                desc: 'FastAPI HTTP layer. Streaming SSE for /analyze/stream progress. CORS for frontend.',
+                functions: ['/analyze (POST)', '  → modes: full, reindex, auto', '/analyze/stream (POST, SSE)', '/chat (POST) → invoke agent', '/overview (GET)', '/modules/{name} (GET)', '/blast-radius (GET)', '/reading-order (GET)', '/execution-flow (GET)', '/review (POST)', '/review/file (POST)', '/review/guidelines (POST)', '/refresh (POST)', '/incremental-reindex (POST)', '/voice/ask (POST)', '/voice/transcribe (POST)']
+            },
+
+            mcp: {
+                label: 'MCP · 18 tools', group: 'mcp', color: '#bc8cff', tier: 2, x: -150, y: -130,
+                files: ['server.py — FastMCP server, 18 @mcp.tool() functions, 80-line system prompt'],
+                desc: 'Model Context Protocol server. Auto-init with codewalk_analyze_codebase. Progressive batch filtering. Tool categories: SETUP, QUERY, MAINT, VOICE.',
+                functions: ['SETUP: analyze_codebase, scan_files, submit_filtered_files, index_filtered_files', 'QUERY: search_codebase, get_module_info, explain_function, get_overview, get_blast_radius_map, get_reading_order, get_execution_flow', 'MAINT: incremental_reindex, refresh_analysis, review_diff, review_file, load_guidelines', 'VOICE: voice_ask, speak']
+            },
+
+            state: {
+                label: '🗄️ State Singleton', group: 'state', color: '#f78166', tier: 3, x: -50, y: -10,
+                files: ['state.py — Module-level globals: _store, _agent, _modules_result, _files, _deps'],
+                desc: 'Shared state for API + MCP. ensure_initialized() auto-loads from disk on restart. Per-repo ChromaDB at .codewalk/chroma/. Collection name derived from repo path.',
+                functions: ['initialize()', 'ensure_initialized() — lazy load from disk', 'rebuild_analysis_cache()', 'refresh() — update analysis without re-embed', 'get_collection_name()', 'chroma_path() → {repo}/.codewalk/chroma/']
+            },
+
+            pipeline: {
+                label: '⚙️ Pipeline', group: 'pipeline', color: '#f78166', tier: 3, x: -250, y: 40,
+                files: ['pipeline.py — 440 lines, 5 pipeline functions, producer-consumer threading'],
+                desc: 'Orchestrates scan → chunk → embed → store. Full index, parallel index, path-scoped index, incremental reindex (MD5 hash delta). Producer-consumer threads: CPU chunking overlaps with I/O embedding.',
+                functions: ['full_index()', 'full_index_parallel()', 'index_from_paths()', 'index_from_paths_parallel()', 'incremental_reindex() — MD5 hash-based skip', 'chunk_and_embed_parallel() — producer/consumer threads']
+            },
+
+            ingestion: {
+                label: '📂 Ingestion', group: 'ingestion', color: '#39d2f5', tier: 4, x: -370, y: 160,
+                files: ['scanner.py — scan_directory(), 30+ extensions, language detection', 'file_filter.py — should_skip(), ~80 skip dirs, ~200 skip extensions', 'tech_detect.py — detect_tech_stack(), 16 config file patterns', '__init__.py'],
+                desc: 'Repository scanning layer. Walks file tree, detects languages by extension, identifies tech stack via config files (package.json, pyproject.toml, Cargo.toml, etc.), filters noise (node_modules, __pycache__, build artifacts).',
+                functions: ['scan_directory(repo_path) → list[file_info]', 'should_skip(path) → bool', 'detect_tech_stack(repo_path) → dict']
+            },
+
+            analysis: {
+                label: '🔬 Analysis', group: 'analysis', color: '#e3b341', tier: 4, x: -120, y: 160,
+                files: ['code_parser.py — tree-sitter AST parsing, 14 grammars, FUNCTION_NODE_TYPES registry', 'dependency_graph.py — 310 lines, extract + resolve imports, 5 language-specific handlers', 'module_detector.py — 195 lines, source root stripping, cross-parent repetition heuristic', 'blast_radius.py — reversed BFS, dual-threshold risk scoring (CRITICAL/HIGH/MODERATE/LOW/SAFE)', 'reading_order.py — Kahn\'s algorithm topological sort, LLM relevance tagging', 'relevance_filter.py — filter_files_with_llm() for indexing', 'python_parser.py — Python-specific AST helpers', '__init__.py'],
+                desc: 'Core code intelligence. Tree-sitter parses 14 languages, extracts functions/classes. Dependency graph resolves imports (Python dots, Rust crate::, Dart package:, TS .js→.ts swap, Go last-segment). Module detector uses cross-parent child repetition at 50% threshold. Blast radius: reversed BFS with absolute + ratio thresholds.',
+                functions: ['parse_file(path, lang) → [functions/classes]', 'build_dependency_graph(files) → {graph, stats}', 'resolve_import_to_file()', 'detect_modules(files, deps) → {modules, module_graph}', 'get_blast_radius(target, graph) → {direct, transitive, risk}', 'calculate_full_blast_map(graph)', 'topological_sort(graph) → ordered files', 'generate_reading_order() / _raw()']
+            },
+
+            embeddings: {
+                label: '📐 Embeddings', group: 'embeddings', color: '#3fb950', tier: 4, x: 130, y: 160,
+                files: ['chunker.py — 180 lines, AST-aware chunking, leftover detection via line-set-difference, MD5 hashing', 'embedder.py — Jina Code v2, CUDA/MPS/CPU auto-detect, batch embedding', 'vector_store.py — 160 lines, ChromaDB wrapper, cosine search, batch upsert (500), file hash registry', '__init__.py'],
+                desc: 'Chunking → embedding → storage. Parser-first chunking uses tree-sitter boundaries; falls back to LangChain language-aware splitter. Each chunk carries: symbol_name, type, start_line, end_line, file_hash. ChromaDB with HNSW cosine similarity. Content hashes enable incremental reindex.',
+                functions: ['chunk_file(file_info) → [chunks]', 'chunk_file_with_parser() — AST boundaries', 'get_leftover_code() — line-number set difference', 'embed_chunks(chunks) → [embedded]', 'VectorStore.add_chunks()', 'VectorStore.search(query, n)', 'VectorStore.get_file_hash()', 'VectorStore.delete_by_file()', 'VectorStore.get_symbols_by_files()']
+            },
+
+            generation: {
+                label: '📝 Generation', group: 'generation', color: '#39d2f5', tier: 5, x: -320, y: 310,
+                files: ['overview_generator.py — LLM-generated project overview from tech stack + modules', 'diagram_generator.py — Mermaid flowcharts from module dependency graph', 'flow_generator.py — LLM-generated execution flow diagrams', 'module_explainer.py — module explanation generator', '__init__.py'],
+                desc: 'LLM-powered content generation. Overview combines tech stack, module list, and architecture description. Diagrams output Mermaid syntax. Execution flow traces code paths from entry points.',
+                functions: ['generate_overview(tech, modules, deps)', 'generate_module_diagram(modules, graph)', 'generate_execution_flow(modules, deps)']
+            },
+
+            rag: {
+                label: '🔎 RAG', group: 'rag', color: '#f778ba', tier: 5, x: -80, y: 310,
+                files: ['chain.py — retrieve → format → prompt → LLM answer', 'prompts.py — SYSTEM_PROMPT + QUESTION_PROMPT (strict: answer only from chunks)', '__init__.py'],
+                desc: 'Retrieval-Augmented Generation. Searches ChromaDB for relevant chunks, formats with file paths + line numbers, sends to LLM with strict "answer only from retrieved context" rules.',
+                functions: ['ask(query, store) → answer string', 'format_context(results) → formatted text']
+            },
+
+            agent: {
+                label: '🤖 LangGraph Agent', group: 'agent', color: '#bc8cff', tier: 5, x: 160, y: 310,
+                files: ['graph.py — LangGraph StateGraph + MemorySaver, compiled agent', 'tools.py — create_tools() factory, 8 agent tools wrapping codewalk capabilities', 'prompts.py — AGENT_SYSTEM_PROMPT', '__init__.py'],
+                desc: 'LangGraph-based conversational agent. StateGraph with tool nodes. MemorySaver for persistent conversation threads. Tools wrap: search, explain, overview, modules, blast radius, reading order, execution flow.',
+                functions: ['create_agent(store, deps, modules) → compiled graph', 'create_tools(store, deps, modules) → [Tool]', 'Tools: search_codebase, get_module_info, explain_function, get_overview, get_blast_radius_map, get_reading_order, get_execution_flow']
+            },
+
+            review: {
+                label: '🔬 Code Review', group: 'review', color: '#f85149', tier: 5, x: 360, y: 310,
+                files: ['reviewer.py — 5 context sources, adaptive chunking (200-line threshold)', 'diff_parser.py — git diff → DiffFile with hunks/lines', 'test_coverage.py — 14-language test file detection, _guess_test_file()', 'review_prompts.py — OWASP encyclopedia system prompt (14 categories)', 'guidelines_loader.py — load team standards into ChromaDB for RAG', 'models.py — ReviewResult, Issue, Severity, Category, DiffFile', '__init__.py'],
+                desc: 'AI code review with 5 context sources: full file content (500-line cap), caller context (reversed dep graph), security context (keyword→RAG query mapping), blast radius warnings, team guidelines RAG. Adaptive: <200 added lines = single pass, >200 = per-file parallel. Pre-checks: test coverage without LLM.',
+                functions: ['prepare_review_context()', 'review_code() — orchestrator', '_review_single_file() — per-file LLM call', '_review_all_at_once() — single-pass', '_get_security_context_for_file() — keyword→query mapping', 'TestCoverage.analyze() — no LLM needed']
+            },
+
+            voice: {
+                label: '🎙️ Voice', group: 'voice', color: '#a371f7', tier: 5, x: 130, y: 440,
+                files: ['stt.py — silence-gated recording (heard_speech flag), faster-whisper small/int8', 'router.py — 16-tool registry, dual-backend routing (Ollama + cloud LLM), disambiguation rules', 'backends.py — 3 execution strategies: direct, MCP, HTTP. Argument sanitization via inspect.signature', 'tts.py — edge-tts synthesis, afplay playback, Escape-key interruption, event loop detection', 'companion.py — voice loop: record→transcribe→route→execute→narrate→speak. 7-step markdown cleanup', '__init__.py'],
+                desc: 'Full voice pipeline. Silence-gated mic recording (100ms chunks, RMS threshold). Whisper transcription. Dual routing (Ollama for speed, cloud LLM fallback). Direct tool execution with hallucinated-arg sanitization. Markdown→speech cleanup (7 regex passes). LLM narrative overlay for long results. Edge-TTS with Escape interruption.',
+                functions: ['record_audio() — silence-gated, heard_speech flag', 'transcribe(audio) → text', 'route(transcript) → {tool, args}', 'execute_direct(tool, args) — same-process', 'synthesize(text) → MP3 bytes', 'speak(text) — afplay + Escape listener', '_clean_for_speech() — 7-step regex', 'format_voice_response() — dual: technical + speech']
+            },
+
+            chromadb: { label: '💾 ChromaDB', group: 'external', color: '#bc8cff', tier: 6, x: 70, y: 560, files: ['.codewalk/chroma/ — per-repo persistent storage', 'HNSW index, cosine similarity', 'Chunk metadata: file_path, symbol_name, start_line, end_line, file_hash'], desc: 'Persistent vector database. Stored inside each analyzed repo at .codewalk/chroma/. Collection name = repo directory name. Stores code chunks + embeddings + metadata. Used as document registry (file hashes) for incremental reindex.' },
+            llm: { label: '🧠 LLM Providers', group: 'external', color: '#e3b341', tier: 6, x: -200, y: 560, files: ['Ollama (default) — qwen3.5:27b, local', 'OpenAI — GPT models', 'Anthropic — Claude models', 'Google Gemini', 'Groq — fast inference', 'OpenRouter — model aggregator'], desc: 'Configurable LLM backend via config.py get_llm() factory. Provider set by LLM_PROVIDER env var. Temperature 0 for deterministic analysis, 0.3 for narrative generation.' },
+            treesitter: { label: '🌳 Tree-sitter', group: 'external', color: '#e3b341', tier: 6, x: -370, y: 440, files: ['14 language grammars', 'Python, JS, TS, Dart, Java, Go, Rust, Ruby, PHP, C, C++, C#, Kotlin, Swift'], desc: 'Incremental parsing library. Produces ASTs for function/class extraction and import resolution. Each grammar is a compiled .so loaded at runtime.' },
+            jina: { label: '🔢 Jina Embeddings', group: 'external', color: '#e3b341', tier: 6, x: 340, y: 560, files: ['jina-code-embeddings-1.5b', 'HuggingFace model', 'CUDA / MPS / CPU auto-detect'], desc: 'Code-specialized embedding model. 1.5B parameters, optimized for code similarity search. Auto-detects GPU (CUDA/MPS) or falls back to CPU.' },
+        };
+
+        const connections = [
+            // User → entry points
+            { from: 'user', to: 'frontend', type: 'flow', label: '' },
+            { from: 'user', to: 'mcp_entry', type: 'flow', label: '' },
+            { from: 'user', to: 'api_entry', type: 'flow', label: '' },
+            { from: 'user', to: 'voice_cli', type: 'flow', label: '' },
+            // Entry → interface layers
+            { from: 'frontend', to: 'api', type: 'flow', label: 'HTTP' },
+            { from: 'api_entry', to: 'api', type: 'flow', label: '' },
+            { from: 'mcp_entry', to: 'mcp', type: 'flow', label: 'stdio' },
+            { from: 'voice_cli', to: 'voice', type: 'flow', label: '' },
+            // Interface → state
+            { from: 'api', to: 'state', type: 'dep', label: '' },
+            { from: 'mcp', to: 'state', type: 'dep', label: '' },
+            // State → pipeline & agent
+            { from: 'state', to: 'pipeline', type: 'dep', label: '' },
+            { from: 'state', to: 'agent', type: 'dep', label: '' },
+            // Pipeline → lower modules
+            { from: 'pipeline', to: 'ingestion', type: 'dep', label: 'scan' },
+            { from: 'pipeline', to: 'embeddings', type: 'dep', label: 'chunk+embed' },
+            { from: 'pipeline', to: 'analysis', type: 'dep', label: 'deps' },
+            // Analysis internals
+            { from: 'analysis', to: 'treesitter', type: 'dep', label: '14 grammars' },
+            // Embeddings internals
+            { from: 'embeddings', to: 'analysis', type: 'dep', label: 'parse_file()' },
+            { from: 'embeddings', to: 'chromadb', type: 'flow', label: 'store' },
+            { from: 'embeddings', to: 'jina', type: 'dep', label: 'encode' },
+            // Agent → tools
+            { from: 'agent', to: 'rag', type: 'dep', label: '' },
+            { from: 'agent', to: 'analysis', type: 'dep', label: 'blast radius' },
+            { from: 'agent', to: 'generation', type: 'dep', label: '' },
+            { from: 'agent', to: 'review', type: 'dep', label: '' },
+            // RAG → storage
+            { from: 'rag', to: 'chromadb', type: 'flow', label: 'search' },
+            { from: 'rag', to: 'llm', type: 'dep', label: 'generate' },
+            // Generation → LLM
+            { from: 'generation', to: 'llm', type: 'dep', label: '' },
+            { from: 'generation', to: 'analysis', type: 'dep', label: 'modules+deps' },
+            // Review → deps
+            { from: 'review', to: 'analysis', type: 'dep', label: 'callers+blast' },
+            { from: 'review', to: 'chromadb', type: 'flow', label: 'security RAG' },
+            { from: 'review', to: 'llm', type: 'dep', label: '' },
+            // Voice → tools
+            { from: 'voice', to: 'mcp', type: 'dep', label: 'execute tools' },
+            { from: 'voice', to: 'llm', type: 'dep', label: 'route + narrate' },
+            // MCP → many
+            { from: 'mcp', to: 'pipeline', type: 'dep', label: '' },
+            { from: 'mcp', to: 'analysis', type: 'dep', label: '' },
+            { from: 'mcp', to: 'embeddings', type: 'dep', label: '' },
+            { from: 'mcp', to: 'generation', type: 'dep', label: '' },
+            { from: 'mcp', to: 'review', type: 'dep', label: '' },
+            { from: 'mcp', to: 'voice', type: 'dep', label: '' },
+            { from: 'mcp', to: 'rag', type: 'dep', label: '' },
+            // API → many
+            { from: 'api', to: 'pipeline', type: 'dep', label: '' },
+            { from: 'api', to: 'analysis', type: 'dep', label: '' },
+            { from: 'api', to: 'generation', type: 'dep', label: '' },
+            { from: 'api', to: 'review', type: 'dep', label: '' },
+            { from: 'api', to: 'voice', type: 'dep', label: '' },
+            // Analysis → LLM (reading order relevance)
+            { from: 'analysis', to: 'llm', type: 'dep', label: 'relevance' },
+        ];
+
+        // ════════════════════════════════════════════════════════════
+        //  SVG SETUP + ZOOM
+        // ════════════════════════════════════════════════════════════
+
+        const svg = document.getElementById('svg');
+        const NS = 'http://www.w3.org/2000/svg';
+        const container = document.getElementById('canvas-container');
+        const W = container.clientWidth;
+        const H = container.clientHeight;
+        svg.setAttribute('viewBox', `${-W / 2} ${-H / 2} ${W} ${H}`);
+
+        // Zoom/pan state
+        let viewBox = { x: -W / 2, y: -H / 2, w: W, h: H };
+        let isPanning = false;
+        let panStart = { x: 0, y: 0 };
+        let showLabels = true;
+        let animateFlow = false;
+
+        // Defs
+        const defs = document.createElementNS(NS, 'defs');
+
+        // Arrow markers
+        ['#8b949e', '#58a6ff'].forEach((color, i) => {
+            const marker = document.createElementNS(NS, 'marker');
+            marker.setAttribute('id', `arrow-${i}`);
+            marker.setAttribute('viewBox', '0 0 10 6');
+            marker.setAttribute('refX', '10');
+            marker.setAttribute('refY', '3');
+            marker.setAttribute('markerWidth', '8');
+            marker.setAttribute('markerHeight', '6');
+            marker.setAttribute('orient', 'auto');
+            const path = document.createElementNS(NS, 'path');
+            path.setAttribute('d', 'M0,0 L10,3 L0,6 Z');
+            path.setAttribute('fill', color);
+            marker.appendChild(path);
+            defs.appendChild(marker);
+        });
+
+        // Glow filter
+        const filter = document.createElementNS(NS, 'filter');
+        filter.setAttribute('id', 'glow');
+        filter.setAttribute('x', '-50%'); filter.setAttribute('y', '-50%');
+        filter.setAttribute('width', '200%'); filter.setAttribute('height', '200%');
+        const blur = document.createElementNS(NS, 'feGaussianBlur');
+        blur.setAttribute('stdDeviation', '4');
+        blur.setAttribute('result', 'blur');
+        const merge = document.createElementNS(NS, 'feMerge');
+        const mn1 = document.createElementNS(NS, 'feMergeNode'); mn1.setAttribute('in', 'blur');
+        const mn2 = document.createElementNS(NS, 'feMergeNode'); mn2.setAttribute('in', 'SourceGraphic');
+        merge.appendChild(mn1); merge.appendChild(mn2);
+        filter.appendChild(blur); filter.appendChild(merge);
+        defs.appendChild(filter);
+
+        svg.appendChild(defs);
+
+        // Groups
+        const gLinks = document.createElementNS(NS, 'g'); gLinks.id = 'g-links';
+        const gNodes = document.createElementNS(NS, 'g'); gNodes.id = 'g-nodes';
+        svg.appendChild(gLinks);
+        svg.appendChild(gNodes);
+
+        // ════════════════════════════════════════════════════════════
+        //  RENDER NODES
+        // ════════════════════════════════════════════════════════════
+
+        const nodeElements = {};
+        const NODE_W = 170;
+        const NODE_H = 48;
+
+        Object.entries(modules).forEach(([id, mod]) => {
+            const g = document.createElementNS(NS, 'g');
+            g.setAttribute('transform', `translate(${mod.x}, ${mod.y})`);
+            g.setAttribute('data-id', id);
+            g.style.cursor = 'pointer';
+
+            // Background rect
+            const isExternal = mod.group === 'external';
+            const isEntry = mod.group === 'entry' && id !== 'user';
+            const w = isEntry ? 140 : (isExternal ? 150 : NODE_W);
+            const h = isEntry ? 36 : (isExternal ? 42 : NODE_H);
+
+            if (id === 'user') {
+                // Circle for user
+                const circle = document.createElementNS(NS, 'circle');
+                circle.setAttribute('r', '28');
+                circle.setAttribute('fill', '#0d1117');
+                circle.setAttribute('stroke', mod.color);
+                circle.setAttribute('stroke-width', '2.5');
+                g.appendChild(circle);
+
+                const text = document.createElementNS(NS, 'text');
+                text.setAttribute('text-anchor', 'middle');
+                text.setAttribute('dy', '6');
+                text.setAttribute('fill', '#f0f6fc');
+                text.setAttribute('font-size', '22');
+                text.textContent = '👤';
+                g.appendChild(text);
+
+                const label = document.createElementNS(NS, 'text');
+                label.setAttribute('text-anchor', 'middle');
+                label.setAttribute('dy', '48');
+                label.setAttribute('fill', mod.color);
+                label.setAttribute('font-size', '12');
+                label.setAttribute('font-weight', '600');
+                label.textContent = 'User';
+                label.classList.add('node-label');
+                g.appendChild(label);
+            } else {
+                const rect = document.createElementNS(NS, 'rect');
+                rect.setAttribute('x', -w / 2); rect.setAttribute('y', -h / 2);
+                rect.setAttribute('width', w); rect.setAttribute('height', h);
+                rect.setAttribute('rx', isExternal ? '20' : '10');
+                rect.setAttribute('fill', '#0d1117');
+                rect.setAttribute('stroke', mod.color);
+                rect.setAttribute('stroke-width', isExternal ? '2' : '1.5');
+                if (isExternal) {
+                    rect.setAttribute('stroke-dasharray', '6 3');
+                }
+                g.appendChild(rect);
+
+                // Icon + text
+                const parts = mod.label.split(' ');
+                const icon = parts[0];
+                const name = parts.slice(1).join(' ');
+
+                const text = document.createElementNS(NS, 'text');
+                text.setAttribute('text-anchor', 'middle');
+                text.setAttribute('dy', '1');
+                text.setAttribute('fill', mod.color);
+                text.setAttribute('font-size', isEntry ? '11' : '12');
+                text.setAttribute('font-weight', '600');
+
+                const tIcon = document.createElementNS(NS, 'tspan');
+                tIcon.textContent = icon + ' ';
+                const tName = document.createElementNS(NS, 'tspan');
+                tName.textContent = name;
+                tName.setAttribute('fill', '#e6edf3');
+                text.appendChild(tIcon);
+                text.appendChild(tName);
+                g.appendChild(text);
+
+                // File count badge
+                if (mod.files.length > 0 && !isExternal && !isEntry) {
+                    const badge = document.createElementNS(NS, 'text');
+                    badge.setAttribute('text-anchor', 'middle');
+                    badge.setAttribute('dy', h / 2 + 14);
+                    badge.setAttribute('fill', '#8b949e');
+                    badge.setAttribute('font-size', '10');
+                    badge.textContent = `${mod.files.length} file${mod.files.length > 1 ? 's' : ''}`;
+                    badge.classList.add('node-label');
+                    g.appendChild(badge);
+                }
+            }
+
+            // Events
+            g.addEventListener('mouseenter', (e) => showTooltip(e, id));
+            g.addEventListener('mouseleave', hideTooltip);
+            g.addEventListener('mousemove', moveTooltip);
+            g.addEventListener('click', () => openPanel(id));
+
+            gNodes.appendChild(g);
+            nodeElements[id] = { el: g, mod, w: id === 'user' ? 56 : (isEntry ? 140 : (isExternal ? 150 : NODE_W)), h: id === 'user' ? 56 : h };
+        });
+
+        // ════════════════════════════════════════════════════════════
+        //  RENDER LINKS
+        // ════════════════════════════════════════════════════════════
+
+        const linkElements = [];
+
+        connections.forEach(conn => {
+            const from = modules[conn.from];
+            const to = modules[conn.to];
+            if (!from || !to) return;
+
+            const fromNode = nodeElements[conn.from];
+            const toNode = nodeElements[conn.to];
+
+            // Compute edge points (center-to-center, clipped to rect boundary)
+            let x1 = from.x, y1 = from.y;
+            let x2 = to.x, y2 = to.y;
+
+            const line = document.createElementNS(NS, 'path');
+            const isFlow = conn.type === 'flow';
+            const color = isFlow ? '#58a6ff' : '#8b949e';
+
+            // Curved path
+            const dx = x2 - x1, dy = y2 - y1;
+            const dist = Math.sqrt(dx * dx + dy * dy);
+            const curve = Math.min(dist * 0.15, 40);
+
+            // Offset start/end from node edge
+            const angle = Math.atan2(dy, dx);
+            const sx = x1 + Math.cos(angle) * (fromNode.h / 2 + 4);
+            const sy = y1 + Math.sin(angle) * (fromNode.h / 2 + 4);
+            const ex = x2 - Math.cos(angle) * (toNode.h / 2 + 10);
+            const ey = y2 - Math.sin(angle) * (toNode.h / 2 + 10);
+
+            // Control point perpendicular offset
+            const mx = (sx + ex) / 2 - Math.sin(angle) * curve;
+            const my = (sy + ey) / 2 + Math.cos(angle) * curve;
+
+            line.setAttribute('d', `M${sx},${sy} Q${mx},${my} ${ex},${ey}`);
+            line.setAttribute('fill', 'none');
+            line.setAttribute('stroke', color);
+            line.setAttribute('stroke-width', isFlow ? '1.8' : '1');
+            line.setAttribute('stroke-opacity', isFlow ? '0.7' : '0.3');
+            line.setAttribute('marker-end', `url(#arrow-${isFlow ? 1 : 0})`);
+            line.setAttribute('data-from', conn.from);
+            line.setAttribute('data-to', conn.to);
+
+            if (isFlow) {
+                line.setAttribute('stroke-dasharray', '6 4');
+                line.classList.add('flow-line');
+            }
+
+            gLinks.appendChild(line);
+
+            // Edge label
+            if (conn.label && showLabels) {
+                const labelText = document.createElementNS(NS, 'text');
+                labelText.setAttribute('x', mx);
+                labelText.setAttribute('y', my - 6);
+                labelText.setAttribute('text-anchor', 'middle');
+                labelText.setAttribute('fill', '#8b949e');
+                labelText.setAttribute('font-size', '9');
+                labelText.setAttribute('font-family', 'monospace');
+                labelText.classList.add('edge-label');
+                labelText.textContent = conn.label;
+                gLinks.appendChild(labelText);
+            }
+
+            linkElements.push({ el: line, conn });
+        });
+
+        // ════════════════════════════════════════════════════════════
+        //  TOOLTIP
+        // ════════════════════════════════════════════════════════════
+
+        const tooltip = document.getElementById('tooltip');
+
+        function showTooltip(e, id) {
+            const mod = modules[id];
+            if (!mod) return;
+
+            // Highlight node
+            const node = nodeElements[id].el;
+            const rect = node.querySelector('rect') || node.querySelector('circle');
+            if (rect) rect.setAttribute('filter', 'url(#glow)');
+
+            // Highlight connected links
+            linkElements.forEach(({ el, conn }) => {
+                if (conn.from === id || conn.to === id) {
+                    el.setAttribute('stroke-opacity', '1');
+                    el.setAttribute('stroke-width', conn.type === 'flow' ? '2.5' : '2');
+                } else {
+                    el.setAttribute('stroke-opacity', '0.08');
+                }
+            });
+
+            // Dim other nodes
+            Object.entries(nodeElements).forEach(([nid, n]) => {
+                if (nid === id) return;
+                const isConnected = connections.some(c => (c.from === id && c.to === nid) || (c.to === id && c.from === nid));
+                n.el.style.opacity = isConnected ? '1' : '0.2';
+            });
+
+            // Build tooltip
+            const colorDot = `<span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:${mod.color};margin-right:4px"></span>`;
+            let html = `<h3>${colorDot}${mod.label}</h3>`;
+            html += `<div style="color:#8b949e;font-size:11px;margin-bottom:6px">${mod.desc}</div>`;
+
+            if (mod.files && mod.files.length > 0 && mod.group !== 'external') {
+                html += `<div class="tt-sep"></div>`;
+                html += `<div style="font-size:10px;color:#8b949e;margin-bottom:3px">FILES</div>`;
+                mod.files.slice(0, 6).forEach(f => {
+                    const name = f.split(' — ')[0];
+                    const desc = f.split(' — ')[1] || '';
+                    html += `<div class="tt-fn">📄 ${name}</div>`;
+                    if (desc) html += `<div class="tt-file">&nbsp;&nbsp;&nbsp;${desc}</div>`;
+                });
+                if (mod.files.length > 6) html += `<div class="tt-file">+ ${mod.files.length - 6} more...</div>`;
+            }
+
+            if (mod.group === 'external') {
+                html += `<div class="tt-sep"></div>`;
+                mod.files.forEach(f => {
+                    html += `<div class="tt-file" style="color:#e6edf3">• ${f}</div>`;
+                });
+            }
+
+            html += `<div style="margin-top:8px;font-size:10px;color:#58a6ff">Click for details →</div>`;
+
+            tooltip.innerHTML = html;
+            tooltip.classList.add('visible');
+            moveTooltip(e);
+        }
+
+        function moveTooltip(e) {
+            const x = e.clientX + 16;
+            const y = e.clientY + 16;
+            const tw = tooltip.offsetWidth;
+            const th = tooltip.offsetHeight;
+            tooltip.style.left = (x + tw > window.innerWidth ? e.clientX - tw - 16 : x) + 'px';
+            tooltip.style.top = (y + th > window.innerHeight ? e.clientY - th - 16 : y) + 'px';
+        }
+
+        function hideTooltip() {
+            tooltip.classList.remove('visible');
+            // Reset highlights
+            linkElements.forEach(({ el, conn }) => {
+                el.setAttribute('stroke-opacity', conn.type === 'flow' ? '0.7' : '0.3');
+                el.setAttribute('stroke-width', conn.type === 'flow' ? '1.8' : '1');
+            });
+            Object.values(nodeElements).forEach(n => {
+                n.el.style.opacity = '1';
+                const rect = n.el.querySelector('rect') || n.el.querySelector('circle');
+                if (rect) rect.removeAttribute('filter');
+            });
+        }
+
+        // ════════════════════════════════════════════════════════════
+        //  DETAIL PANEL
+        // ════════════════════════════════════════════════════════════
+
+        const panel = document.getElementById('detail-panel');
+        const dpContent = document.getElementById('dp-content');
+
+        function openPanel(id) {
+            const mod = modules[id];
+            if (!mod) return;
+
+            let html = `<h2><span style="color:${mod.color}">${mod.label.split(' ')[0]}</span> ${mod.label.split(' ').slice(1).join(' ')}</h2>`;
+            html += `<div class="dp-sub">${mod.group.toUpperCase()}</div>`;
+            html += `<div class="dp-section"><p style="font-size:13px;line-height:1.6;color:#c9d1d9">${mod.desc}</p></div>`;
+
+            // Files
+            if (mod.files && mod.files.length > 0) {
+                html += `<div class="dp-section"><h4>Files</h4><ul class="dp-file-list">`;
+                mod.files.forEach(f => {
+                    const name = f.split(' — ')[0];
+                    const desc = f.split(' — ')[1] || '';
+                    html += `<li><span class="file-icon">${mod.group === 'external' ? '🔗' : '📄'}</span><div><div style="color:#e6edf3">${name}</div>${desc ? `<div style="font-size:10px;color:#8b949e">${desc}</div>` : ''}</div></li>`;
+                });
+                html += `</ul></div>`;
+            }
+
+            // Functions
+            if (mod.functions && mod.functions.length > 0) {
+                html += `<div class="dp-section"><h4>Key Functions / Endpoints</h4><div class="dp-keys">`;
+                mod.functions.forEach(fn => {
+                    if (fn.startsWith('  ')) {
+                        html += `<div style="padding-left:16px;color:#8b949e;font-size:11px">${fn.trim()}</div>`;
+                    } else {
+                        html += `<div><code>${fn}</code></div>`;
+                    }
+                });
+                html += `</div></div>`;
+            }
+
+            // Dependencies
+            const deps = connections.filter(c => c.from === id).map(c => ({ id: c.to, label: c.label, mod: modules[c.to] }));
+            const dependents = connections.filter(c => c.to === id).map(c => ({ id: c.from, label: c.label, mod: modules[c.from] }));
+
+            if (deps.length > 0) {
+                html += `<div class="dp-section"><h4>Depends On (${deps.length})</h4><ul class="dp-dep-list">`;
+                const seen = new Set();
+                deps.forEach(d => {
+                    if (seen.has(d.id)) return;
+                    seen.add(d.id);
+                    html += `<li><span class="dep-arrow">→</span><span style="color:${d.mod.color}">${d.mod.label}</span>${d.label ? `<span style="font-size:10px;color:#8b949e">(${d.label})</span>` : ''}</li>`;
+                });
+                html += `</ul></div>`;
+            }
+
+            if (dependents.length > 0) {
+                html += `<div class="dp-section"><h4>Depended On By (${dependents.length})</h4><ul class="dp-dep-list">`;
+                const seen = new Set();
+                dependents.forEach(d => {
+                    if (seen.has(d.id)) return;
+                    seen.add(d.id);
+                    html += `<li><span class="dep-arrow">←</span><span style="color:${d.mod.color}">${d.mod.label}</span>${d.label ? `<span style="font-size:10px;color:#8b949e">(${d.label})</span>` : ''}</li>`;
+                });
+                html += `</ul></div>`;
+            }
+
+            dpContent.innerHTML = html;
+            panel.classList.add('open');
+        }
+
+        function closePanel() {
+            panel.classList.remove('open');
+        }
+
+        // ════════════════════════════════════════════════════════════
+        //  ZOOM & PAN
+        // ════════════════════════════════════════════════════════════
+
+        function updateViewBox() {
+            svg.setAttribute('viewBox', `${viewBox.x} ${viewBox.y} ${viewBox.w} ${viewBox.h}`);
+            updateMinimap();
+        }
+
+        svg.addEventListener('wheel', (e) => {
+            e.preventDefault();
+            const scale = e.deltaY > 0 ? 1.08 : 0.92;
+            const rect = container.getBoundingClientRect();
+            const mx = (e.clientX - rect.left) / rect.width;
+            const my = (e.clientY - rect.top) / rect.height;
+
+            const newW = viewBox.w * scale;
+            const newH = viewBox.h * scale;
+            viewBox.x += (viewBox.w - newW) * mx;
+            viewBox.y += (viewBox.h - newH) * my;
+            viewBox.w = newW;
+            viewBox.h = newH;
+            updateViewBox();
+        }, { passive: false });
+
+        svg.addEventListener('mousedown', (e) => {
+            if (e.target === svg || e.target.tagName === 'path' || e.target.parentElement === gLinks) {
+                isPanning = true;
+                panStart = { x: e.clientX, y: e.clientY };
+                svg.style.cursor = 'grabbing';
+            }
+        });
+
+        window.addEventListener('mousemove', (e) => {
+            if (!isPanning) return;
+            const rect = container.getBoundingClientRect();
+            const dx = (e.clientX - panStart.x) * (viewBox.w / rect.width);
+            const dy = (e.clientY - panStart.y) * (viewBox.h / rect.height);
+            viewBox.x -= dx;
+            viewBox.y -= dy;
+            panStart = { x: e.clientX, y: e.clientY };
+            updateViewBox();
+        });
+
+        window.addEventListener('mouseup', () => {
+            isPanning = false;
+            svg.style.cursor = 'default';
+        });
+
+        // ════════════════════════════════════════════════════════════
+        //  CONTROLS
+        // ════════════════════════════════════════════════════════════
+
+        document.getElementById('btn-reset').addEventListener('click', () => {
+            viewBox = { x: -W / 2, y: -H / 2, w: W, h: H };
+            updateViewBox();
+        });
+
+        document.getElementById('btn-flow').addEventListener('click', function () {
+            animateFlow = !animateFlow;
+            this.classList.toggle('active', animateFlow);
+            document.querySelectorAll('.flow-line').forEach(el => {
+                el.classList.toggle('link-animated', animateFlow);
+            });
+        });
+
+        document.getElementById('btn-labels').addEventListener('click', function () {
+            showLabels = !showLabels;
+            this.classList.toggle('active', showLabels);
+            document.querySelectorAll('.edge-label').forEach(el => {
+                el.style.display = showLabels ? '' : 'none';
+            });
+            document.querySelectorAll('.node-label').forEach(el => {
+                el.style.display = showLabels ? '' : 'none';
+            });
+        });
+
+        // ════════════════════════════════════════════════════════════
+        //  MINIMAP
+        // ════════════════════════════════════════════════════════════
+
+        const minimapSvg = document.getElementById('minimap-svg');
+        const mmW = 160, mmH = 120;
+        minimapSvg.setAttribute('viewBox', '-500 -450 1000 1100');
+
+        // Draw minimap dots
+        Object.entries(modules).forEach(([id, mod]) => {
+            const dot = document.createElementNS(NS, 'circle');
+            dot.setAttribute('cx', mod.x);
+            dot.setAttribute('cy', mod.y);
+            dot.setAttribute('r', '12');
+            dot.setAttribute('fill', mod.color);
+            dot.setAttribute('fill-opacity', '0.6');
+            minimapSvg.appendChild(dot);
+        });
+
+        // Viewport rectangle
+        const vpRect = document.createElementNS(NS, 'rect');
+        vpRect.classList.add('viewport-rect');
+        minimapSvg.appendChild(vpRect);
+
+        function updateMinimap() {
+            vpRect.setAttribute('x', viewBox.x);
+            vpRect.setAttribute('y', viewBox.y);
+            vpRect.setAttribute('width', viewBox.w);
+            vpRect.setAttribute('height', viewBox.h);
+        }
+        updateMinimap();
+
+        // ── Keyboard shortcuts ──
+        document.addEventListener('keydown', (e) => {
+            if (e.key === 'Escape') closePanel();
+        });
+
+        // ── Close panel on click outside ──
+        svg.addEventListener('click', (e) => {
+            if (e.target === svg) closePanel();
+        });
+    </script>
+</body>
+
+</html>

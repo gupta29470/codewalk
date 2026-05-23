@@ -162,6 +162,18 @@ def route_with_ollama(transcript: str, model: str = "qwen2.5:1.5b") -> dict:
 
     Uses a tiny model (398MB) that's fast enough for routing.
     Falls back to {"tool": None} on any error.
+
+    EXAMPLE TRACE (transcript="what does scan directory do"):
+        system_prompt  = ROUTER_SYSTEM_PROMPT.format(tools_description=_build_tools_description())
+        response       = httpx.post("http://localhost:11434/api/chat", json={...})  → 200
+        content        = '{"tool": "codewalk_explain_function", "arguments": {"function_name": "scan_directory"}}'
+        result         = json.loads(content)  → {"tool": "codewalk_explain_function", "arguments": {"function_name": "scan_directory"}}
+        result["tool"] in TOOL_REGISTRY  → True  ✓
+        return → {"tool": "codewalk_explain_function", "arguments": {"function_name": "scan_directory"}}
+
+    EXAMPLE TRACE (transcript="what's the weather today" → non-code):
+        content = '{"tool": null, "arguments": {}}'
+        return → {"tool": None, "arguments": {}}
     """
     system_prompt = ROUTER_SYSTEM_PROMPT.format(
         tools_description=_build_tools_description()

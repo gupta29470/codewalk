@@ -97,6 +97,20 @@ def extract_imports(file_path: str, language: str) -> list[str]:
         Dart:    ["package:flutter/material.dart", "../models/user.dart"]
         Java:    ["com.example.service.AuthService"]
         Go:      ["fmt", "github.com/gin-gonic/gin"]
+
+    EXAMPLE TRACE (fatih/color, file "color.go", language "go"):
+        IMPORT_NODE_TYPES["go"] = ["import_declaration", "import_spec"]
+        parser = get_parser_for_language("go") → Parser with Go grammar
+        source = Path("color.go").read_bytes()
+        tree = parser.parse(source)
+
+        _walk_for_imports(root, {"import_declaration", "import_spec"}):
+          yields 3 import_spec nodes:
+            node.text = '"fmt"'          → _extract_raw_import → "fmt"
+            node.text = '"os"'           → _extract_raw_import → "os"
+            node.text = '"strconv"'      → _extract_raw_import → "strconv"
+
+        returns ["fmt", "os", "strconv"]
     """
     if language not in IMPORT_NODE_TYPES:
         return []
@@ -150,7 +164,7 @@ def _extract_dart_import(node) -> str:
                         if part.type == "configurable_uri":
                             for uri_node in part.children:
                                 if uri_node.type == "uri":
-                                    return uri_node.text.decode("utf-8").strip("\'"\""\")
+                                    return uri_node.text.decode("utf-8").strip("'\"")
     return ""
 
 
@@ -176,7 +190,7 @@ def _extract_raw_import(node, language) -> str:
         # JS/TS: import x from "module-path" → string node contains the path
         for child in node.children:
             if child.type == "string":
-                return child.text.decode("utf-8").strip("\'"\""\")
+                return child.text.decode("utf-8").strip("'\"")
         return ""
 
     if language == "dart":
@@ -193,14 +207,10 @@ def _extract_raw_import(node, language) -> str:
         # Go: import "github.com/gin-gonic/gin" → interpreted_string_literal
         for child in node.children:
             if child.type == "interpreted_string_literal":
-                return child.text.decode("utf-8").strip(\'"\')
-        return ""
-
-    if language in ("c", "cpp"):
-        # C/C++: #include "header.h" or #include <stdio.h>
+                return child.text.decode("utf-8").strip('"')
         for child in node.children:
             if child.type in ("string_literal", "system_lib_string"):
-                return child.text.decode("utf-8").strip(\'"<>\')
+                return child.text.decode("utf-8").strip('"<>')
         return ""
 
     if language == "rust":
@@ -235,7 +245,7 @@ def _extract_raw_import(node, language) -> str:
                     if child.type == "argument_list":
                         for arg in child.children:
                             if arg.type == "string":
-                                return arg.text.decode("utf-8").strip("\'"\""\")
+                                return arg.text.decode("utf-8").strip("'\"")
         return ""
 
     if language == "kotlin":
@@ -322,6 +332,25 @@ def resolve_import_to_file(raw_import: str, language: str, all_files: list[str],
 
     Returns the resolved file path if found, otherwise the raw import string.
     (Unresolved imports are treated as external dependencies.)
+
+    EXAMPLE TRACE (Python):
+        raw_import = "src.codewalk.config"
+        language = "python"
+        all_files = ["src/codewalk/config.py", "src/codewalk/log.py", ...]
+
+        as_path = "src.codewalk.config".replace(".", "/") = "src/codewalk/config"
+        candidates = ["src/codewalk/config.py", "src/codewalk/config/__init__.py"]
+        "src/codewalk/config.py" in all_files → True
+        returns "src/codewalk/config.py"
+
+    EXAMPLE TRACE (Go):
+        raw_import = "fmt"
+        language = "go"
+        all_files = ["color.go", "color_test.go", "doc.go"]
+
+        parts = ["fmt"], last_part = "fmt"
+        No file in all_files has "/fmt/" in its path
+        Falls through all language checks → returns "fmt" (unresolved = stdlib)
     """
     if language == "python":
         as_path = raw_import.replace(".", "/")
@@ -526,6 +555,29 @@ def build_dependency_graph(files: list[dict]) -> dict:
                 "unresolved": 12      ← imports that couldn't be mapped to files (external packages)
             }
         }
+
+    EXAMPLE TRACE (fatih/color repo, 9 files):
+        files = [
+            {"file_path": "color.go", "language": "go", "absolute_path": "/repos/color/color.go"},
+            {"file_path": "doc.go",   "language": "go", "absolute_path": "/repos/color/doc.go"},
+            ...  (9 total)
+        ]
+        all_file_paths = ["color.go", "doc.go", "color_test.go", ...]
+
+        For file "color.go":
+            raw_imports = extract_imports("/repos/color/color.go", "go")
+                        = ["fmt", "os", "strconv"]
+            Resolving each:
+                resolve_import_to_file("fmt", "go", all_file_paths) = "fmt"         (unresolved — stdlib)
+                resolve_import_to_file("os", "go", all_file_paths)  = "os"          (unresolved — stdlib)
+                resolve_import_to_file("strconv", ...) = "strconv"                   (unresolved — stdlib)
+            graph["color.go"] = ["fmt", "os", "strconv"]
+            unresolved_count += 3
+
+        Final result:
+            graph = {"color.go": ["fmt","os","strconv"], "doc.go": [], ...}
+            stats = {"total_files": 9, "total_edges": 12, "unresolved": 12}
+            # All 12 edges are unresolved because fatih/color only imports stdlib
     """
     all_file_paths = [file["file_path"] for file in files]
     dart_package_name = _detect_dart_package_name(all_file_paths, files)

@@ -26,6 +26,7 @@ DEPENDENCIES:
     - prompts.py: system prompt
     - config.py: get_llm()
     - langgraph: StateGraph, ToolNode, MemorySaver
+    - graph/graph_runtime.py: optional igraph engine (passed through to tools)
 
 =============================================================================
 """
@@ -64,26 +65,44 @@ class AgentState(TypedDict):
     messages: Annotated[list, add_messages]
 
 
-# =============================================================================
-# create_agent() - Factory Function
-# =============================================================================
-
-def create_agent(store: VectorStore, modules_result: dict, files: list[dict] = None, deps: dict = None):
+# ─── FACTORY FUNCTION ────────────────────────────────────────────────
+def create_agent(store: VectorStore, modules_result: dict, files: list[dict] = None, deps: dict = None, graph_runtime=None):
+    _log("[agent] Creating agent with tools...")
     """Build and compile a LangGraph agent with tools and memory.
 
     Args:
-        store: VectorStore with indexed codebase
-        modules_result: Output of detect_modules()
-        files: scan_directory() result (for reading order tool)
-        deps: build_dependency_graph() result (for blast radius tool)
+        store: VectorStore with indexed codebase (for search tools).
+        modules_result: Output of detect_modules() (for module info tool).
+        files: scan_directory() result (for reading order).
+        deps: build_dependency_graph() result (for blast radius).
+        graph_runtime: Optional GraphRuntime for igraph fast path.
 
     Returns:
         Compiled StateGraph - call with .invoke() or .stream()
-    """
-    _log("[agent] Creating agent with tools...")
 
-    # 1. Create the 8 tools
-    tools = create_tools(store, modules_result, files=files, deps=deps)
+    EXAMPLE TRACE:
+        tools = create_tools(store, modules_result, ...)
+            → 8 @tool functions: [search_codebase, get_module_info, ...]
+
+        llm = get_llm(temperature=0, reasoning=False)
+            → ChatOllama(model="qwen3.5:27b", temperature=0)
+        llm_with_tools = llm.bind_tools(tools)
+            → LLM now knows about 8 tools in its system prompt
+
+        graph = StateGraph(AgentState)
+        graph.add_node("agent", agent_node)    → calls LLM
+        graph.add_node("tools", ToolNode(tools))  → executes tool calls
+        graph.add_edge(START, "agent")
+        graph.add_conditional_edges("agent", should_continue)
+            → if LLM response has tool_calls → go to "tools"
+            → if no tool_calls → go to END
+        graph.add_edge("tools", "agent")  → after tools, back to LLM
+
+        compiled = graph.compile(checkpointer=MemorySaver())
+        returns compiled  (call with .invoke({"messages": [...]}))
+    """
+    # ── Step 1: Create tools ─────────────────────────────────────
+    tools = create_tools(store, modules_result, files=files, deps=deps, graph_runtime=graph_runtime)
 
     # 2. Bind tools to LLM (so it knows what's available)
     llm = get_llm(temperature=0, reasoning=False)

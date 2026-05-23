@@ -39,6 +39,10 @@ DEPENDENCIES:
 
 from collections import deque
 
+from codewalk.graph.graph_runtime import GraphRuntime
+
+def build_reverse_graph(graph: dict[str, list[str]]) -> dict[str, list[str]]:
+    """Reverse the dependency graph: edges go from 'imported' → 'importer'."""
 
 # =============================================================================
 # build_reverse_graph() - Flip Edge Directions
@@ -79,83 +83,140 @@ def build_reverse_graph(graph: dict[str, list[str]]) -> dict[str, list[str]]:
 def get_blast_radius(target_file: str, graph: dict[str, list[str]]) -> dict:
     """Calculate blast radius for a single file.
 
-    ALGORITHM (BFS through reversed dependency graph):
-        1. Reverse the graph
-        2. Start at target_file
-        3. BFS: visit all files that import target (depth 1 = direct)
-        4. Then visit files that import THOSE files (depth 2 = transitive)
-        5. Continue until no more reachable files
+    source: GraphRuntime (igraph, C-speed) or dict (legacy Python BFS).
 
-    DEPTH INTERPRETATION:
-        depth 1: "Direct dependents" - they import the target file
-        depth 2: "Transitive" - they import a direct dependent
-        depth 3+: "Transitive" - further downstream
+    EXAMPLE (igraph path — codewalk's own src, target = "config.py"):
+        target_file = "config.py"
+        graph = GraphRuntime instance
 
-    RISK LEVELS (based on % of total codebase affected):
-        critical: >50% OR 20+ files affected
-        high:     >25% OR 10+ files affected
-        moderate: >10% OR 4+ files affected
-        low:      everything else
+        idx = graph._find_vertex(file_graph, "config.py") = 5
 
-    Returns:
-        {
+        distances = file_graph.shortest_paths(source=5, mode="in")[0]
+        # distances is a list of 56 floats, one per vertex:
+        # distances = [3.0, 2.0, inf, inf, 1.0, 0.0, 1.0, inf, ...]
+        #              ^^^   ^^^               ^^^  ^^^  ^^^
+        #              |     |                 |    |    embedder.py (depth 1)
+        #              |     |                 |    config.py itself (depth 0)
+        #              |     |                 scanner.py (depth 1)
+        #              |     pipeline.py (depth 2)
+        #              state.py (depth 3)
+
+        impact_tree = {
+            "scanner.py": 1,     # depth 1 = direct importer
+            "embedder.py": 1,    # depth 1 = direct importer
+            "pipeline.py": 2,    # depth 2 = transitive (imports scanner)
+            "state.py": 3,       # depth 3 = transitive (imports pipeline)
+        }
+
+        direct = ["embedder.py", "scanner.py"]          # distance == 1
+        transitive = ["pipeline.py", "state.py"]         # distance > 1
+        total_affected = 4
+        risk_level = _calculate_risk(4, 56) = "low"     # 4/56 = 7% < 10%
+
+        returns {
             "file": "config.py",
-            "direct": ["embedder.py", "scanner.py"],       <- depth 1
-            "transitive": ["pipeline.py", "server.py"],    <- depth 2+
+            "direct": ["embedder.py", "scanner.py"],
+            "transitive": ["pipeline.py", "state.py"],
             "affected_files": 4,
-            "risk_level": "high",
-            "impact_tree": {"embedder.py": 1, "scanner.py": 1, "pipeline.py": 2, "server.py": 2}
+            "risk_level": "low",
+            "impact_tree": {"scanner.py": 1, "embedder.py": 1, ...}
         }
     """
-    reverse = build_reverse_graph(graph)
-    internal_files = set(graph.keys())
+    if isinstance(graph, GraphRuntime):
+        file_graph = graph.file_graph
+        idx = graph._find_vertex(file_graph, target_file)
+        if idx is None:
+            return {
+                "file": target_file,
+                "direct": [],
+                "transitive": [],
+                "affected_files": 0,
+                "risk_level": "none",
+                "impact_tree": {},
+            }
+        
+        # distances = list of floats, one per vertex in the graph.
+        # distances[i] = shortest path distance from config.py to vertex i.
+        # mode="in" = reverse direction (who imports me, not who I import).
+        # float("inf") = unreachable (no import chain connects them).
+        distances = file_graph.shortest_paths(source=idx, mode="in")[0]
 
-    if target_file not in internal_files:
+        # Build impact_tree: {filename: distance} for all reachable vertices
+        # e.g. {"scanner.py": 1, "pipeline.py": 2, "state.py": 3}
+        impact_tree = {}
+
+        for vertex_index, distance in enumerate(distances):
+            # vertex_index = integer position in the graph (0, 1, 2, ...)
+            # distance = how many import hops away (1.0 = direct, 2.0 = transitive)
+            # Skip self (vertex_index == idx) and unreachable (inf)
+            if vertex_index == idx or distance == float("inf"):
+                continue
+            # file_graph.vs[vertex_index]["name"] = actual filename like "scanner.py"
+            impact_tree[file_graph.vs[vertex_index]["name"]] = int(distance)
+        
+        # Split into direct (depth 1) and transitive (depth 2+)
+        direct = sorted(file for file, distance in impact_tree.items() if distance == 1)
+        transitive = sorted(file for file, distance in impact_tree.items() if distance > 1)
+        total_affected = len(impact_tree)
+        risk_level = _calculate_risk(total_affected, file_graph.vcount())
+
         return {
             "file": target_file,
-            "direct": [],
-            "transitive": [],
-            "affected_files": 0,
-            "risk_level": "none",
-            "impact_tree": {},
+            "direct": direct,
+            "transitive": transitive,
+            "affected_files": total_affected,
+            "risk_level": risk_level,
+            "impact_tree": impact_tree,
         }
+    
+    else:
+        reverse = build_reverse_graph(graph)
+        internal_files = set(graph.keys())
 
-    # BFS from target through reversed graph
-    visited = {target_file}
-    queue = deque()
-    impact_tree = {}  # file -> depth (how many hops from target)
+        if target_file not in internal_files:
+            return {
+                "file": target_file,
+                "direct": [],
+                "transitive": [],
+                "affected_files": 0,
+                "risk_level": "none",
+                "impact_tree": {},
+            }
 
-    # Seed with direct dependents (depth 1)
-    for dependent in reverse.get(target_file, []):
-        if dependent not in visited:
-            queue.append((dependent, 1))
-            visited.add(dependent)
+        visited = {target_file}
+        queue = deque()
+        impact_tree = {}
 
-    # BFS traversal
-    while queue:
-        current_file, depth = queue.popleft()
-        impact_tree[current_file] = depth
-
-        for dependent in reverse.get(current_file, []):
+        for dependent in reverse.get(target_file, []):
             if dependent not in visited:
-                queue.append((dependent, depth + 1))
+                queue.append((dependent, 1))
                 visited.add(dependent)
 
-    # Separate direct vs transitive
-    direct = [file for file, depth in impact_tree.items() if depth == 1]
-    transitive = [file for file, depth in impact_tree.items() if depth > 1]
-    total_affected = len(impact_tree)
-    total_files = len(internal_files)
-    risk_level = _calculate_risk(total_affected, total_files)
+        while queue:
+            current_file, depth = queue.popleft()
+            impact_tree[current_file] = depth
 
-    return {
-        "file": target_file,
-        "direct": sorted(direct),
-        "transitive": sorted(transitive),
-        "affected_files": total_affected,
-        "risk_level": risk_level,
-        "impact_tree": impact_tree,
-    }
+            for dependent in reverse.get(current_file, []):
+                if dependent not in visited:
+                    queue.append((dependent, depth + 1))
+                    visited.add(dependent)
+
+        direct = [file for file, depth in impact_tree.items() if depth == 1]
+        transitive = [file for file, depth in impact_tree.items() if depth > 1]
+        total_affected = len(impact_tree)
+        total_files = len(internal_files)
+        risk_level = _calculate_risk(total_affected, total_files)
+
+        return {
+            "file": target_file,
+            "direct": sorted(direct),
+            "transitive": sorted(transitive),
+            "affected_files": total_affected,
+            "risk_level": risk_level,
+            "impact_tree": impact_tree,
+        }
+
+
 
 
 # =============================================================================
@@ -170,6 +231,18 @@ def _calculate_risk(affected: int, total: int) -> str:
         high:     >25% of codebase OR 10+ files
         moderate: >10% of codebase OR 4+ files
         low:      everything else
+
+    EXAMPLES:
+        _calculate_risk(4, 56)   # ratio = 0.07 (7%), affected = 4
+                                 # 4 >= 4 → "moderate"
+
+        _calculate_risk(25, 100) # ratio = 0.25 (25%), affected = 25
+                                 # 25 >= 20 → "critical"
+
+        _calculate_risk(2, 50)   # ratio = 0.04 (4%), affected = 2
+                                 # 2 < 4 → "low"
+
+        _calculate_risk(0, 50)   # ratio = 0.0, affected = 0 → "low"
     """
     if total == 0:
         return "none"
@@ -189,79 +262,114 @@ def _calculate_risk(affected: int, total: int) -> str:
 # =============================================================================
 
 def calculate_full_blast_map(graph: dict[str, list[str]]) -> dict:
-    """Calculate blast radius for EVERY file, ranked by risk.
+    """Blast radius for EVERY file. Ranked by risk.
 
-    OPTIMIZATION:
-        Builds the reverse graph ONCE, then runs BFS for each file.
-        Time complexity: O(V * (V + E)) where V=files, E=import edges.
-        For a 100-file repo with 300 edges: ~30,000 operations (instant).
-
-    USE CASE:
-        "Which files are the riskiest to change?" - answered by sorting
-        all files by their affected_files count.
-
-    Returns:
-        {
-            "blast_map": [
-                {"file": "config.py", "affected_files": 12, "risk_level": "critical", ...},
-                {"file": "scanner.py", "affected_files": 5, "risk_level": "moderate", ...},
-                ...
-            ],
-            "stats": {"total_files": 28, "critical_files": 2, "high_files": 3, ...},
-            "highest_risk": "config.py"
-        }
+    source: GraphRuntime (igraph) or dict (legacy BFS).
     """
-    # Build reverse graph ONCE (shared by all BFS runs)
-    reverse = build_reverse_graph(graph)
-    internal_files = set(graph.keys())
-    total_files = len(internal_files)
+    if isinstance(graph, GraphRuntime):
+        file_graph = graph.file_graph
+        total_files = file_graph.vcount()
+        if total_files == 0:
+            return {
+                "blast_map": [],
+                "stats": {
+                    "total_files": 0, "critical_files": 0,
+                    "high_files": 0, "moderate_files": 0, "low_files": 0,
+                },
+                "highest_risk": "",
+            }
+        
+        all_distance = file_graph.shortest_paths(mode="in")
+        results = []
+        risk_counts = {"critical": 0, "high": 0, "moderate": 0, "low": 0, "none": 0}
 
-    results = []
-    risk_counts = {"critical": 0, "high": 0, "moderate": 0, "low": 0, "none": 0}
+        for index in range(total_files):
+            distances = all_distance[index]
+            direct_count = 0
+            total_affected = 0
 
-    for target_file in graph:
-        # BFS from this file through reversed graph
-        visited = {target_file}
-        queue_bfs = deque()
-        impact_tree = {}
+            for vertex_index, distance in enumerate(distances):
+                if vertex_index == index or distance == float("inf"):
+                    continue
+                total_affected += 1
+                if distance == 1:
+                    direct_count += 1
+            
+            risk_level = _calculate_risk(total_affected, total_files)
+            results.append({
+                "file": file_graph.vs[index]["name"],
+                "affected_files": total_affected,
+                "risk_level": risk_level,
+                "direct_count": direct_count,
+                "transitive_count": total_affected - direct_count,
+            })
+            risk_counts[risk_level] += 1
+        
+        results.sort(key=lambda x: x["affected_files"], reverse=True)
+        highest_risk = results[0]["file"] if results else ""
 
-        for dependent in reverse.get(target_file, []):
-            if dependent not in visited:
-                queue_bfs.append((dependent, 1))
-                visited.add(dependent)
+        return {
+            "blast_map": results,
+            "stats": {
+                "total_files": total_files,
+                "critical_files": risk_counts["critical"],
+                "high_files": risk_counts["high"],
+                "moderate_files": risk_counts["moderate"],
+                "low_files": risk_counts["low"],
+            },
+            "highest_risk": highest_risk,
+        }
+    
+    else:
+        reverse = build_reverse_graph(graph)
+        internal_files = set(graph.keys())
+        total_files = len(internal_files)
 
-        while queue_bfs:
-            current_file, depth = queue_bfs.popleft()
-            impact_tree[current_file] = depth
-            for dependent in reverse.get(current_file, []):
+        results = []
+        risk_counts = {"critical": 0, "high": 0, "moderate": 0, "low": 0, "none": 0}
+
+        for target_file in graph:
+            # BFS from target_file through the pre-built reverse graph
+            visited = {target_file}
+            queue_bfs = deque()
+            impact_tree = {}
+
+            for dependent in reverse.get(target_file, []):
                 if dependent not in visited:
-                    queue_bfs.append((dependent, depth + 1))
+                    queue_bfs.append((dependent, 1))
                     visited.add(dependent)
 
-        total_affected = len(impact_tree)
-        risk_level = _calculate_risk(total_affected, total_files)
+            while queue_bfs:
+                current_file, depth = queue_bfs.popleft()
+                impact_tree[current_file] = depth
+                for dependent in reverse.get(current_file, []):
+                    if dependent not in visited:
+                        queue_bfs.append((dependent, depth + 1))
+                        visited.add(dependent)
 
-        results.append({
-            "file": target_file,
-            "affected_files": total_affected,
-            "risk_level": risk_level,
-            "direct_count": sum(1 for d in impact_tree.values() if d == 1),
-            "transitive_count": sum(1 for d in impact_tree.values() if d > 1),
-        })
-        risk_counts[risk_level] = risk_counts.get(risk_level, 0) + 1
+            total_affected = len(impact_tree)
+            risk_level = _calculate_risk(total_affected, total_files)
 
-    # Sort by impact (most dangerous files first)
-    results.sort(key=lambda x: x["affected_files"], reverse=True)
-    highest_risk = results[0]["file"] if results else ""
+            results.append({
+                "file": target_file,
+                "affected_files": total_affected,
+                "risk_level": risk_level,
+                "direct_count": sum(1 for d in impact_tree.values() if d == 1),
+                "transitive_count": sum(1 for d in impact_tree.values() if d > 1),
+            })
+            risk_counts[risk_level] = risk_counts.get(risk_level, 0) + 1
 
-    return {
-        "blast_map": results,
-        "stats": {
-            "total_files": len(graph),
-            "critical_files": risk_counts.get("critical", 0),
-            "high_files": risk_counts.get("high", 0),
-            "moderate_files": risk_counts.get("moderate", 0),
-            "low_files": risk_counts.get("low", 0),
-        },
-        "highest_risk": highest_risk,
-    }
+        results.sort(key=lambda x: x["affected_files"], reverse=True)
+        highest_risk = results[0]["file"] if results else ""
+
+        return {
+            "blast_map": results,
+            "stats": {
+                "total_files": len(graph),
+                "critical_files": risk_counts.get("critical", 0),
+                "high_files": risk_counts.get("high", 0),
+                "moderate_files": risk_counts.get("moderate", 0),
+                "low_files": risk_counts.get("low", 0),
+            },
+            "highest_risk": highest_risk,
+        }

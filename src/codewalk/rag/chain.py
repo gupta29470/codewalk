@@ -44,6 +44,19 @@ def format_context(results: list[dict]) -> str:
     Each result gets a header showing file path, symbol name, and line numbers,
     followed by the actual code text. This gives the LLM enough context to
     reference specific files and functions in its answer.
+
+    EXAMPLE TRACE (fatih/color, 2 results):
+        results = [
+            {"text": "func (c *Color) Add(value ...Attribute) {...}",
+             "metadata": {"file_path": "color.go", "symbol_name": "Add", "symbol_type": "function", "start_line": 72, "end_line": 89}},
+            {"text": "const (Reset Attribute = iota...)",
+             "metadata": {"file_path": "color.go", "symbol_name": "", "symbol_type": "", "start_line": 14, "end_line": 38}},
+        ]
+
+        # Iteration 1: symbol_name="Add" → header = "--- color.go | function: Add (lines 72-89) ---"
+        # Iteration 2: symbol_name=""   → header = "--- color.go (lines 14-38) ---"
+
+        return → "--- color.go | function: Add (lines 72-89) ---\nfunc (c *Color) Add(...)\n\n--- color.go (lines 14-38) ---\nconst (Reset...)"
     """
     parts = []
     for result in results:
@@ -75,6 +88,12 @@ def ask(question: str, store: VectorStore, n_results: int = 5) -> str:
         3. Build prompt: system instructions + context + question
         4. Send to LLM -> get natural language answer
         5. Return the answer string
+
+    EXAMPLE TRACE (fatih/color, question="How do I add bold text?"):
+        results = store.search("How do I add bold text?", n_results=5)  → 5 chunks
+        context = format_context(results)  → "--- color.go | function: Add (lines 72-89) ---\n..."
+        chain.invoke({"context": "--- color.go ...", "question": "How do I add bold text?"})
+        return → "Use color.New(color.Bold).Println(\"your text\") to print bold text."
 
     Args:
         question: Natural language question about the codebase

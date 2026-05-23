@@ -98,6 +98,25 @@ def chunk_and_embed_parallel(files: list[dict]) -> tuple[list[dict], int]:
 
         Consumer thread:
           - Waits for batches on the queue
+
+    EXAMPLE TRACE (codewalk's own src, 56 files):
+        Producer:
+            file 1: config.py → 3 chunks (small file, 1 function + 1 class + module)
+            file 2: pipeline.py → 12 chunks (large file, many functions)
+            ...
+            Accumulates until batch = 256 chunks
+            chunk_queue.put(batch_of_256)
+            Continues...
+            Final: total ~900 chunks across all 56 files
+
+        Consumer (GPU thread):
+            Gets batch_of_256 from queue
+            embed_chunks(batch) → 256 vectors (each 768 floats)
+            all_chunks += 256, embedded_count += 256
+            Gets next batch...
+
+        Returns: (all_900_chunks, 900)
+    """
           - Embeds each batch (GPU)
           - Collects results
 
@@ -194,6 +213,24 @@ def full_index(repo_path: str = "", collection_name: str = "codebase",
     Args:
         use_llm_filter: If True, uses LLM to filter files. If False,
                         only uses pattern matching (for MCP mode).
+
+    EXAMPLE TRACE (fatih/color repo):
+        repo_path = "/repos/fatih/color"
+
+        Step 1: tech_stack = ["go"]
+        Step 2: files = scan_directory(repo_path) → 9 files
+                files[0] = {"file_path": "color.go", "language": "go",
+                             "absolute_path": "/repos/fatih/color/color.go",
+                             "size": 12847}
+        Step 3: chunks = chunk_all_files(files) → 348 chunks
+                chunks[0] = {"id": "abc123", "content": "func New(value ...Attribute) *Color...",
+                             "metadata": {"file_path": "color.go", "symbol_name": "New"}}
+        Step 4: embedded = embed_chunks(chunks) → 348 chunks with vectors
+                embedded[0]["embedding"] = [0.032, -0.081, 0.142, ...]  (768 floats)
+        Step 5: store.add_chunks(embedded) → 348 vectors in ChromaDB
+
+        returns {"repo_path": "/repos/fatih/color", "tech_stack": ["go"],
+                 "files_scanned": 9, "chunks_created": 348, "chunks_embedded": 348}
     """
     repo_path = repo_path or settings.repo_path
     _log(f"[full_index] Starting: {repo_path}")

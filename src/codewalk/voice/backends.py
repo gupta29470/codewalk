@@ -56,6 +56,14 @@ def execute_direct(tool_name: str, arguments: dict) -> str:
 
     Cleans up arguments to only pass valid params (routing models
     sometimes hallucinate extra parameters).
+
+    EXAMPLE TRACE:
+        tool_name  = "codewalk_explain_function"
+        arguments  = {"function_name": "scan_directory", "extra_param": "junk"}
+        fn         = codewalk_explain_function   # from _TOOL_MAP
+        valid_params = {"function_name"}          # from inspect.signature
+        clean_args   = {"function_name": "scan_directory"}  # "extra_param" dropped
+        return → fn(function_name="scan_directory")  → "## scan_directory\n..."
     """
     fn = _TOOL_FUNCTIONS.get(tool_name)
     if not fn:
@@ -94,6 +102,15 @@ def execute_api(tool_name: str, arguments: dict, base_url: str = "http://localho
 
     Substitutes path parameters (e.g. {module_name}) and routes
     to the correct HTTP method/path.
+
+    EXAMPLE TRACE:
+        tool_name  = "codewalk_get_module_info"
+        arguments  = {"module_name": "analysis"}
+        route_info = ("GET", "/modules/{module_name}")
+        path       = "/modules/analysis"              # {module_name} substituted
+        url        = "http://localhost:8000/modules/analysis"
+        response   = client.get(url, params={"module_name": "analysis"})  → 200
+        return     → '{"name": "analysis", "file_count": 7, ...}'
     """
     route_info = _TOOL_TO_ROUTE.get(tool_name)
     if route_info is None:

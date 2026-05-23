@@ -321,7 +321,7 @@ def detect_modules(files: list[dict], dep_graph: dict = None) -> dict:
         module_depth = 1
         modules = _assign_modules(files, source_root, module_depth)
 
-    _log(f"[modules] Module depth: {module_depth} (root: {source_root or \'none\'}, {len(modules)} modules)")
+    _log(f"[modules] Module depth: {module_depth} (root: {source_root or 'none'}, {len(modules)} modules)")
 
     # Convert Counter → dict for JSON serialization
     for mod in modules.values():
@@ -355,7 +355,7 @@ def detect_modules(files: list[dict], dep_graph: dict = None) -> dict:
         for module_name in modules:
             module_graph[module_name] = []
 
-    _log(f"[modules] Detected {len(modules)} modules from {len(files)} files (root: {source_root or \'none\'})")
+    _log(f"[modules] Detected {len(modules)} modules from {len(files)} files (root: {source_root or 'none'})")
     return {
         "source_root": source_root,
         "modules": dict(modules),
@@ -365,3 +365,4 @@ def detect_modules(files: list[dict], dep_graph: dict = None) -> dict:
             "total_files": len(files),
         },
     }
+    

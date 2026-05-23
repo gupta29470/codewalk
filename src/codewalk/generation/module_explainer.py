@@ -90,7 +90,19 @@ def _format_file_list(files: list[str]) -> str:
 # --- Main Function ---
 
 def explain_module(module_name: str, module_info: dict, module_graph: dict) -> str:
-    """Generate explanation for ONE module using LLM."""
+    """Generate explanation for ONE module using LLM.
+
+    EXAMPLE TRACE (codewalk src, module="analysis"):
+        module_name  = "analysis"
+        module_info  = {"files": ["analysis/blast_radius.py", "analysis/code_parser.py", ...], "file_count": 7, "languages": {"python": 7}}
+        module_graph  = {"analysis": ["ingestion"], "embeddings": ["analysis"], ...}
+        depends_on   = ["ingestion"]
+        depended_by  = ["embeddings", "generation", "mcp"]
+        languages    = "python(7)"
+        file_list    = "- blast_radius.py\n- code_parser.py\n- dependency_graph.py\n..."
+        chain.invoke({"module_name": "analysis", "file_count": 7, ...})
+        return → "## Purpose\nThe analysis module builds the structural understanding...\n## Key Files\n..."
+    """
     depends_on = module_graph.get(module_name, [])
     depended_by = _get_depended_by(module_name, module_graph)
 

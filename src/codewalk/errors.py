@@ -139,6 +139,23 @@ def classify_error(exception: Exception) -> str:
     Returns:
         Friendly message if a pattern matches.
         Generic "Something went wrong: <error>" otherwise.
+
+    EXAMPLES:
+        classify_error(ConnectionRefusedError("Connection refused"))
+          error_str = "connection refused"
+          error_type = "connectionrefusederror"
+          pattern "Connection refused" → "connection refused" in error_str → True
+          returns "Can't reach the LLM. If using Ollama, run `ollama serve`..."
+
+        classify_error(ValueError("No codebase indexed"))
+          error_str = "no codebase indexed"
+          pattern "No codebase indexed" → match
+          returns "No codebase analyzed yet. Run the analyze endpoint first..."
+
+        classify_error(RuntimeError("disk full"))
+          error_str = "disk full"
+          No pattern matches → fallback
+          returns "Something went wrong: disk full"
     """
     error_str = str(exception).lower()
     error_type = type(exception).__name__.lower()

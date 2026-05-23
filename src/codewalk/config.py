@@ -101,6 +101,7 @@ class Settings(BaseSettings):
     anthropic_api_key: str = os.getenv("ANTHROPIC_API_KEY", "")
     google_api_key: str = os.getenv("GOOGLE_API_KEY", "")
     openrouter_api_key: str = os.getenv("OPENROUTER_API_KEY", "")
+    deepseek_api_key: str = os.getenv("DEEPSEEK_API_KEY", "")
 
     # ── Repository Path ──────────────────────────────────────────────
 
@@ -193,6 +194,23 @@ def get_llm(temperature: float = 0, **kwargs) -> BaseChatModel:
             .stream([messages]) → chunks
         All providers implement BaseChatModel, so the rest of the app
         doesn't care which one is behind the scenes.
+
+    EXAMPLE TRACE (provider = "ollama"):
+        settings.llm_provider = "ollama"
+        settings.llm_model = "qwen3.5:27b"
+        provider = "ollama"
+
+        → from langchain_ollama import ChatOllama
+        → returns ChatOllama(model="qwen3.5:27b", temperature=0, reasoning=False)
+
+    EXAMPLE TRACE (provider = "openai"):
+        settings.llm_provider = "openai"
+        settings.llm_model = "gpt-4o"
+        settings.openai_api_key = "sk-abc123..."
+        provider = "openai"
+
+        → from langchain_openai import ChatOpenAI
+        → returns ChatOpenAI(model="gpt-4o", temperature=0, api_key="sk-abc123...")
     """
     # Read which provider was configured
     provider = settings.llm_provider.lower()  # .lower() handles "Ollama", "OLLAMA", "ollama"
@@ -286,6 +304,15 @@ def get_llm(temperature: float = 0, **kwargs) -> BaseChatModel:
             # KEY TRICK: Same ChatOpenAI class, but pointed at OpenRouter's URL
             # instead of OpenAI's. Works because OpenRouter mimics OpenAI's API format.
             base_url="https://openrouter.ai/api/v1",
+            **filtered,
+        )
+    elif provider == "deepseek": 
+        from langchain_openai import ChatOpenAI 
+        return ChatOpenAI(
+            model=settings.llm_model, 
+            temperature=temperature, 
+            api_key=settings.deepseek_api_key, 
+            base_url="https://api.deepseek.com", 
             **filtered,
         )
 

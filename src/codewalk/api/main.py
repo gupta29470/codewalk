@@ -69,9 +69,9 @@ from src.codewalk.agent.graph import create_agent
 from src.codewalk.analysis.reading_order import generate_reading_order
 from src.codewalk.generation.flow_generator import generate_execution_flow
 from src.codewalk.config import settings
-from src.codewalk.analysis.blast_radius import (
-    get_blast_radius,
-    calculate_full_blast_map,
+from src.codewalk.analysis.blast_radius import calculate_full_blast_map
+from src.codewalk.query import (
+    compute_file_risks, resolve_module_with_fallback, short_name,
 )
 from src.codewalk.voice.stt import transcribe_bytes
 from src.codewalk.voice.tts import synthesize
@@ -122,6 +122,20 @@ async def analyze(request: AnalyzeRequest):
         auto    - skip indexing if collection already has data (default)
         reindex - smart re-index (only changed/new/deleted files)
         full    - nuke everything and re-embed from scratch
+
+    EXAMPLE TRACE (fatih/color, index_mode="auto", empty index):
+        request.repo_path       = "data/repos/fatih/color"
+        request.collection_name = "color"     # derived from path
+        persist_dir             = "data/repos/fatih/color/.codewalk/chroma"
+        existing_count          = 0           # empty → full_index_parallel()
+        index_result            = {"files_scanned": 9, "chunks_created": 348}
+        modules_result["modules"] = {"color": {"file_count": 9}}
+        return → AnalyzeResponse(status="complete", files_scanned=9, chunks_created=348, modules=["color"])
+
+    EXAMPLE TRACE (codewalk src, index_mode="auto", existing index):
+        existing_count          = 1842        # non-zero → skip indexing
+        index_result            = {"files_scanned": 0, "chunks_created": 0, "skipped": True}
+        return → AnalyzeResponse(status="complete", files_scanned=0, chunks_created=0, modules=["analysis", "api", ...])
     """
     try:
         request.repo_path = request.repo_path or settings.repo_path
@@ -257,7 +271,15 @@ async def analyze_stream(request: AnalyzeRequest):
 
 @app.post("/chat", response_model=ChatResponse)
 async def chat(request: ChatRequest):
-    """Ask the LangGraph agent a question about the codebase."""
+    """Ask the LangGraph agent a question about the codebase.
+
+    EXAMPLE TRACE:
+        request.message    = "How does the color library handle ANSI codes?"
+        request.thread_id  = "default"
+        agent.invoke({"messages": [("human", "How does...")]}, config={"configurable": {"thread_id": "default"}})
+        answer = "The color library uses the Attribute type to represent ANSI codes..."
+        return → ChatResponse(answer="The color library uses...", thread_id="default")
+    """
     try:
         state.ensure_initialized()
         agent = state.get_agent()
@@ -289,15 +311,10 @@ async def overview():
         overview_text = generate_overview(tech, modules_result, diagram)
 
         deps = state.get_deps()
-        blast_map = calculate_full_blast_map(deps["graph"])
-        top_risky = []
-        for item in blast_map["blast_map"][:3]:
-            radius = get_blast_radius(item["file"], deps["graph"])
-            top_risky.append({
-                **item,
-                "direct": [f.split("/")[-1] for f in radius["direct"]],
-                "transitive": [f.split("/")[-1] for f in radius["transitive"]],
-            })
+        runtime = state._graph_runtime or deps["graph"]
+        blast_map = calculate_full_blast_map(runtime)
+        top_files = [item["file"] for item in blast_map["blast_map"][:30]]
+        top_risky, _ = compute_file_risks(top_files, runtime)
 
         return OverviewResponse(
             tech_stack=tech,
@@ -338,59 +355,23 @@ async def get_module(module_name: str):
         modules = module_result["modules"]
         module_graph = module_result["module_graph"]
 
-        # Case-insensitive lookup
-        actual_name = None
-        for name in modules:
-            if name.lower() == module_name.lower():
-                actual_name = name
-                break
-
-        # Fallback: search for sub-folder (e.g. "users" inside features/)
-        matched_as_feature = False
-        if not actual_name:
-            source_root = module_result.get("source_root", "")
-            for mod_name, mod_info in modules.items():
-                prefix = f"{source_root}/{mod_name}/{module_name.lower()}/" if source_root else f"{mod_name}/{module_name.lower()}/"
-                matching_files = [f for f in mod_info["files"] if f.lower().startswith(prefix.lower())]
-                if matching_files:
-                    actual_name = mod_name
-                    matched_as_feature = True
-                    from collections import Counter
-                    lang_counter = Counter()
-                    all_files = state.get_files()
-                    matching_set = set(matching_files)
-                    for f in all_files:
-                        if f["file_path"] in matching_set:
-                            lang_counter[f["language"]] += 1
-                    info = {"files": matching_files, "file_count": len(matching_files), "languages": dict(lang_counter)}
-                    break
+        actual_name, info, matched_as_feature = resolve_module_with_fallback(
+            module_name, module_result, files=state.get_files()
+        )
 
         if not actual_name:
             available = ", ".join(sorted(modules.keys()))
-            raise HTTPException(status_code=404, detail=f"Module '{module_name}' not found. Available: {available}")
+            raise HTTPException(
+                status_code=404,
+                detail=f"Module '{module_name}' not found. Available: {available}",
+            )
 
-        if not matched_as_feature:
-            info = modules[actual_name]
         depends_on = module_graph.get(actual_name, [])
         depended_by = [other for other, deps_list in module_graph.items() if actual_name in deps_list]
 
         deps = state.get_deps()
-        graph = deps["graph"]
-        file_risks = []
-        risk_order = {"critical": 4, "high": 3, "moderate": 2, "low": 1, "none": 0}
-        max_risk = "low"
-
-        for file_path in sorted(info["files"]):
-            radius = get_blast_radius(file_path, graph)
-            file_risks.append({
-                "file": file_path,
-                "affected_files": radius["affected_files"],
-                "risk_level": radius["risk_level"],
-                "direct": [f.split("/")[-1] for f in radius["direct"]],
-                "transitive": [f.split("/")[-1] for f in radius["transitive"]],
-            })
-            if risk_order.get(radius["risk_level"], 0) > risk_order.get(max_risk, 0):
-                max_risk = radius["risk_level"]
+        runtime = state._graph_runtime or deps["graph"]
+        file_risks, max_risk = compute_file_risks(sorted(info["files"]), runtime)
 
         return ModuleResponse(
             name=f"{module_name} (inside '{actual_name}')" if matched_as_feature else actual_name,
@@ -422,41 +403,21 @@ async def get_blast_radius_for_module(module_name: str = ""):
         state.ensure_initialized()
         modules_result = state.get_modules_result()
         deps = state.get_deps()
-        graph = deps["graph"]
+        runtime = state._graph_runtime or deps["graph"]
 
         if module_name:
             modules = modules_result["modules"]
-            actual_name = None
-            for name in modules:
-                if name.lower() == module_name.lower():
-                    actual_name = name
-                    break
+            actual_name, _, _ = resolve_module_with_fallback(module_name, modules_result)
             if not actual_name:
                 available = ", ".join(sorted(modules.keys()))
                 raise HTTPException(status_code=404, detail=f"Module '{module_name}' not found. Available: {available}")
             target_files = sorted(modules[actual_name]["files"])
             scope = actual_name
         else:
-            target_files = sorted(graph.keys())
+            target_files = sorted(deps["graph"].keys())
             scope = "all"
 
-        risk_order = {"critical": 4, "high": 3, "moderate": 2, "low": 1, "none": 0}
-        max_risk = "low"
-        file_results = []
-
-        for file_path in target_files:
-            radius = get_blast_radius(file_path, graph)
-            file_results.append({
-                "file": file_path,
-                "risk_level": radius["risk_level"],
-                "affected_files": radius["affected_files"],
-                "direct": [f.split("/")[-1] for f in radius["direct"]],
-                "transitive": [f.split("/")[-1] for f in radius["transitive"]],
-            })
-            if risk_order.get(radius["risk_level"], 0) > risk_order.get(max_risk, 0):
-                max_risk = radius["risk_level"]
-
-        file_results.sort(key=lambda x: x["affected_files"], reverse=True)
+        file_results, max_risk = compute_file_risks(target_files, runtime)
 
         return BlastRadiusResponse(module=scope, module_risk=max_risk, total_files=len(file_results), files=file_results)
     except HTTPException:
@@ -476,17 +437,35 @@ def get_reading_order_endpoint():
     """Get recommended reading order with blast radius info."""
     try:
         state.ensure_initialized()
-        files = state.get_files()
-        deps = state.get_deps()
-        order = generate_reading_order(files, deps)
-        graph = deps["graph"]
-        for item in order["order"]:
-            radius = get_blast_radius(item["file"], graph)
-            item["risk_level"] = radius["risk_level"]
-            item["affected_files"] = radius["affected_files"]
-            item["direct"] = [f.split("/")[-1] for f in radius["direct"]]
-            item["transitive"] = [f.split("/")[-1] for f in radius["transitive"]]
-        return order
+        modules_result = state.get_modules_result()
+        return {
+            "modules": list(modules_result["modules"].keys()),
+            "total": modules_result["stats"]["total_modules"],
+        }
+    except RuntimeError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    
+# ─── GET /reading-order ────────────────────────────────────────
+@app.get("/reading-order")
+def get_reading_order():
+    """Get the recommended reading order for the codebase."""
+    try:
+       state.ensure_initialized()
+       files = state.get_files()
+       deps = state.get_deps()
+       runtime = state._graph_runtime or deps["graph"]
+       order = generate_reading_order(files, deps, graph_runtime=runtime)
+       order_files = [item["file"] for item in order["order"]]
+       risks, _ = compute_file_risks(order_files, runtime)
+       risks_by_file = {r["file"]: r for r in risks}
+       for item in order["order"]:
+           risk = risks_by_file.get(item["file"], {})
+           item["risk_level"] = risk.get("risk_level", "none")
+           item["affected_files"] = risk.get("affected_files", 0)
+           item["direct"] = risk.get("direct", [])
+           item["transitive"] = risk.get("transitive", [])
+           
+       return order
     except RuntimeError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
@@ -500,7 +479,8 @@ def get_execution_flow_endpoint():
         state.ensure_initialized()
         files = state.get_files()
         deps = state.get_deps()
-        order = generate_reading_order(files, deps)
+        runtime = state._graph_runtime or deps["graph"]
+        order = generate_reading_order(files, deps, graph_runtime=runtime)
         flow = generate_execution_flow(order, deps)
         return {"flow": flow}
     except RuntimeError as e:
@@ -518,15 +498,13 @@ async def refresh_analysis():
     """Re-scan files and rebuild analysis. No re-embedding."""
     try:
         state.ensure_initialized()
-        analyze_result = state.get_analyze_result()
-        repo_path = analyze_result.get("repo_path", settings.repo_path)
+        state.rebuild_analysis_cache()
 
-        files = scan_directory(repo_path)
-        deps = build_dependency_graph(files)
-        modules_result = detect_modules(files, deps)
-        state.refresh(files, deps, modules_result)
-
-        return {"status": "refreshed", "files": len(files), "modules": list(modules_result["modules"].keys())}
+        return {
+            "status": "refreshed",
+            "files": len(state._files),
+            "modules": list(state._modules_result["modules"].keys()),
+        }
     except RuntimeError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
@@ -547,10 +525,8 @@ async def incremental_reindex_endpoint():
 
         result = incremental_reindex(indexed_files, repo_path, collection_name, persist_dir=persist_dir)
 
-        files = scan_directory(repo_path)
-        deps = build_dependency_graph(files)
-        modules_result = detect_modules(files, deps)
-        state.refresh(files, deps, modules_result)
+        # Refresh analysis cache (includes graph rebuild)
+        state.rebuild_analysis_cache()
 
         return result
     except RuntimeError as e:

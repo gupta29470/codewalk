@@ -89,6 +89,22 @@ def generate_execution_flow(reading_order: dict, deps: dict) -> str:
         reading_order: from generate_reading_order() - {"order": [...], ...}
         deps: from build_dependency_graph() - {"graph": {...}, ...}
 
+    EXAMPLE TRACE (fatih/color — 9 Go files):
+        reading_order = {
+            "order": [
+                {"position": 1, "file": "doc.go",   "why": "No dependencies (leaf)"},
+                {"position": 2, "file": "color.go", "why": "Depends on: doc.go"},
+                ...
+            ],
+            "total_files": 9,
+        }
+        deps["graph"] = {"color.go": ["doc.go"], "color_test.go": ["color.go"], ...}
+
+        _format_reading_order(...)  → "1. doc.go - No dependencies (leaf)\n2. color.go - Depends on: doc.go"
+        _format_dependency_summary(...) → "doc.go -> (no internal imports)\ncolor.go -> imports: doc.go"
+
+        chain.invoke({...}) → "```mermaid\ngraph TD\n  doc.go --> color.go\n```\n\n1. doc.go defines..."
+
     Returns:
         Markdown string with Mermaid diagram + numbered narration.
     """

@@ -46,6 +46,34 @@ def parse_python_file(file_path: str) -> list[dict]:
       - Classes: name, lines, code, base classes, method names
 
     Returns empty list if file can't be read or has syntax errors.
+
+    EXAMPLE TRACE (file: src/codewalk/config.py):
+        source = Path("src/codewalk/config.py").read_text()
+        tree = ast.parse(source)
+
+        ast.walk(tree) yields nodes in order:
+
+        node = <ClassDef: Settings> at line 15-45
+          items.append({
+              "type": "class",
+              "name": "Settings",
+              "start_line": 15, "end_line": 45,
+              "code": "class Settings(BaseSettings): ...",
+              "bases": ["BaseSettings"],
+              "methods": ["model_post_init"]
+          })
+
+        node = <FunctionDef: get_llm> at line 50-62
+          items.append({
+              "type": "function",
+              "name": "get_llm",
+              "start_line": 50, "end_line": 62,
+              "code": "def get_llm(model=None): ...",
+              "decorators": [],
+              "args": ["model"]
+          })
+
+        returns [{"type":"class","name":"Settings",...}, {"type":"function","name":"get_llm",...}]
     """
     try:
         source = Path(file_path).read_text(encoding="utf-8")

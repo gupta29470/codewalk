@@ -462,6 +462,19 @@ def review_diff(
         Small diffs (< 200 added lines): single LLM call
         Large diffs (>= 200 added lines): per-file parallel calls (4 workers)
 
+    EXAMPLE TRACE (staged changes: 1 file, 15 lines added):
+        ctx = prepare_review_context(staged=True)  → ReviewContext(
+            diff_files       = [DiffFile(file_path="color.go", added_lines=15, removed_lines=2)],
+            total_added      = 15,   # < CHUNK_THRESHOLD(200) → single-pass review
+            pre_check_issues = [Issue(title="No test updates for color.go", severity=WARNING)],
+            blast_radius_warnings = ["color.go - HIGH risk, 5 dependents"],
+            guidelines_context    = "",
+        )
+        # total_added(15) < CHUNK_THRESHOLD(200) → _review_all_at_once()
+        llm_issues = [Issue(title="Missing nil check", severity=ERROR, line_number=78)]
+        all_issues = pre_check_issues + llm_issues  → 2 issues total
+        return → ReviewResult(issues=[...], summary="Found 1 bug, 1 test gap")
+
     Args:
         staged: Review staged changes only (git diff --staged)
         target_branch: Compare against branch (branch...HEAD)

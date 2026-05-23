@@ -128,6 +128,35 @@ def _format_file_list(files: list[dict]) -> str:
 
 
 def _filter_batch(batch: list[dict]) -> dict:
+    """Send one batch of files to the LLM for relevance filtering.
+
+    EXAMPLE TRACE (batch of 5 files):
+        batch = [
+            {"file_path": "src/codewalk/config.py"},
+            {"file_path": "src/codewalk/pipeline.py"},
+            {"file_path": "tests/test_pipeline.py"},
+            {"file_path": "src/codewalk/__init__.py"},
+            {"file_path": "migrations/001_init.sql"},
+        ]
+
+        _format_file_list(batch) =
+            "  src/codewalk/config.py\n"
+            "  src/codewalk/pipeline.py\n"
+            "  tests/test_pipeline.py\n"
+            "  src/codewalk/__init__.py\n"
+            "  migrations/001_init.sql"
+
+        LLM response (after JSON parse):
+            {
+                "src/codewalk/config.py": "yes",
+                "src/codewalk/pipeline.py": "yes",
+                "tests/test_pipeline.py": "no",
+                "src/codewalk/__init__.py": "no",
+                "migrations/001_init.sql": "no"
+            }
+
+        returns that dict (caller uses it to filter the file list)
+    """
     """Send one batch of files to the LLM and return yes/no decisions.
 
     Returns: {"file_path": "yes" or "no", ...}

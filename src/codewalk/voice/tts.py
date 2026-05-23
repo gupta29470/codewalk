@@ -58,6 +58,15 @@ def synthesize(text: str, voice: str = DEFAULT_VOICE) -> bytes:
 
     Handles being called from within an existing event loop (MCP server)
     by running TTS in a separate thread.
+
+    EXAMPLE TRACE:
+        text   = "The analysis module builds structural understanding of the codebase."  (68 chars)
+        voice  = "en-US-AriaNeural"
+        # No running event loop → asyncio.run() path
+        audio_bytes = asyncio.run(_synthesize_async(text, voice))
+        # _synthesize_async: edge_tts.Communicate streams 12 audio chunks
+        # audio_chunks = [b'\xff\xfb...', b'\xff\xfb...', ...]  (12 chunks)
+        return → b'\xff\xfb\x90...'  (24576 bytes, ~1.5s of MP3 audio)
     """
     try:
         asyncio.get_running_loop()

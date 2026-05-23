@@ -59,11 +59,26 @@ def record_audio(
         5. Stop when silence lasts silence_duration seconds
         6. Hard cap at max_recording_duration
 
+    EXAMPLE TRACE (3.2 seconds of speech, then silence):
+        chunk_size              = int(16000 * 0.1)  = 1600 samples per chunk
+        max_chunks              = int(30.0 / 0.1)   = 300
+        silence_chunks_needed   = int(5.0 / 0.1)    = 50
+
+        Chunk loop:
+            chunk 1:  rms=0.003  < 0.01 → silent_chunks=1,  heard_speech=False
+            chunk 5:  rms=0.045  > 0.01 → silent_chunks=0,  heard_speech=True   # speech starts
+            chunk 37: rms=0.038  > 0.01 → silent_chunks=0,  heard_speech=True   # still talking
+            chunk 38: rms=0.002  < 0.01 → silent_chunks=1,  heard_speech=True   # silence begins
+            chunk 87: silent_chunks=50 >= 50 → break                             # 5s silence → stop
+
+        audio = np.concatenate(chunks).flatten()  → shape=(139200,) = 8.7 seconds
+        return → np.ndarray(shape=(139200,), dtype=float32)
+
     Returns:
         numpy array of audio samples (float32, mono, 16kHz).
         Empty array if no audio captured.
     """
-    print("Listening... (speak now, will stop after silence)", file=sys.stderr)
+    print("🎤 Recording... (will stop after 5 seconds of silence)", file=sys.stderr)
 
     chunks = []
     silent_chunks = 0
@@ -105,7 +120,15 @@ def record_audio(
 
 
 def transcribe(audio: np.ndarray, sample_rate: int = 16000) -> str:
-    """Transcribe audio numpy array to text using faster-whisper."""
+    """Transcribe audio numpy array to text using faster-whisper.
+
+    EXAMPLE TRACE:
+        audio     = np.ndarray(shape=(51200,), dtype=float32)  # 3.2s of speech
+        model     = _get_whisper_model()  → WhisperModel("small", compute_type="int8")
+        segments  = model.transcribe(audio, language="en")  → [Segment(text=" what does"), Segment(text=" the scanner do")]
+        text      = "what does" + " " + "the scanner do"  → "what does the scanner do"
+        return → "what does the scanner do"
+    """
     if len(audio) == 0:
         return ""
     model = _get_whisper_model()

@@ -49,16 +49,12 @@ DEPENDENCIES:
 import json
 from collections import deque
 
-from src.codewalk.config import get_llm
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import StrOutputParser
 
+from src.codewalk.config import get_llm
+from codewalk.graph.graph_runtime import GraphRuntime
 
-# =============================================================================
-# LLM Prompts for Relevance Tagging
-# =============================================================================
-# These prompts tell the LLM how to classify each file's reading priority.
-# Used by tag_reading_relevance() to add "must-read"/"optional"/"skip" tags.
 
 RELEVANCE_SYSTEM_PROMPT = """You are a code onboarding expert. Given a list of files
 from a software project with their dependency information, classify each file's
@@ -103,33 +99,51 @@ Example:
 # topological_sort() - Order Files by Dependencies
 # =============================================================================
 
-def topological_sort(graph: dict[str, list[str]]) -> list[str]:
-    """Sort files so dependencies come before dependents (Kahn's algorithm).
+def topological_sort(graph) -> list[str]:
+    """Sort files so dependencies come before dependents.
 
-    ALGORITHM (BFS-based topological sort):
-        1. Count in-degree for each file (how many internal files THIS file imports)
-           Files with 0 in-degree = they don't depend on any other internal file.
-        2. Start with all zero-in-degree files (no internal dependencies)
-        3. Remove them from the graph - this might make OTHER files have 0 in-degree
-        4. Repeat until all files are placed
+    graph: GraphRuntime (igraph, C-speed) or dict (legacy Kahn's).
 
-    WHY KAHN'S ALGORITHM (not DFS)?
-        - Deterministic output (sorted() makes it stable)
-        - Easy to detect cycles (remaining files after BFS = cyclic)
-        - Intuitive: "peel off" independent files layer by layer
+    EXAMPLE TRACE (dict path, codewalk's src):
+        graph = {
+            "config.py": [],
+            "log.py": ["config.py"],
+            "scanner.py": ["config.py", "log.py"],
+            "pipeline.py": ["scanner.py", "config.py", "log.py"],
+        }
+        internal_files = {"config.py", "log.py", "scanner.py", "pipeline.py"}
 
-    HANDLING CYCLES:
-        If file A imports B and B imports A (circular dependency),
-        neither reaches 0 in-degree. They get appended at the end.
+        in_degree = {"config.py": 0, "log.py": 1, "scanner.py": 2, "pipeline.py": 3}
+        # config.py has 0 internal deps → starts in queue
 
-    Args:
-        graph: {"file_a.py": ["file_b.py", "external_pkg"], ...}
-               Values may contain external imports (not in graph keys) - ignored.
+        queue = deque(["config.py"])  # only config.py has in_degree=0
 
-    Returns:
-        Ordered list of file paths (internal files only, external deps excluded).
+        Iteration 1: current = "config.py"
+          result = ["config.py"]
+          dependents["config.py"] = ["log.py", "scanner.py", "pipeline.py"]
+          in_degree["log.py"] -= 1 → 0 → add to queue
+          in_degree["scanner.py"] -= 1 → 1
+          in_degree["pipeline.py"] -= 1 → 2
+
+        Iteration 2: current = "log.py"
+          result = ["config.py", "log.py"]
+          in_degree["scanner.py"] -= 1 → 0 → add to queue
+          in_degree["pipeline.py"] -= 1 → 1
+
+        Iteration 3: current = "scanner.py"
+          result = ["config.py", "log.py", "scanner.py"]
+          in_degree["pipeline.py"] -= 1 → 0 → add to queue
+
+        Iteration 4: current = "pipeline.py"
+          result = ["config.py", "log.py", "scanner.py", "pipeline.py"]
+
+        returns ["config.py", "log.py", "scanner.py", "pipeline.py"]
     """
-    # Only consider internal files (ones that ARE in the graph as keys)
+
+    if isinstance(graph, GraphRuntime):
+        return graph.topological_sort()
+
+    # Step 1: Filter to only internal files (keys of the graph)
     internal_files = set(graph.keys())
 
     # in_degree[file] = number of INTERNAL files this file depends on
@@ -166,12 +180,11 @@ def topological_sort(graph: dict[str, list[str]]) -> list[str]:
 
     return result
 
-
 # =============================================================================
 # generate_reading_order() - Full Version (With LLM Tagging)
 # =============================================================================
 
-def generate_reading_order(files: list[dict], deps: dict) -> dict:
+def generate_reading_order(files: list[dict], deps: dict, graph_runtime=None) -> dict:
     """Generate reading order WITH LLM relevance tagging.
 
     EXECUTION FLOW:
@@ -189,9 +202,31 @@ def generate_reading_order(files: list[dict], deps: dict) -> dict:
             "total_files": 15,
             "has_cycles": False
         }
+
+    EXAMPLE TRACE (codewalk's src, 4 files for brevity):
+        sorted_files = ["config.py", "log.py", "scanner.py", "pipeline.py"]
+        has_cycles = False  (4 sorted == 4 total)
+
+        used_by = {
+            "config.py": ["log.py", "scanner.py", "pipeline.py"],
+            "log.py": ["scanner.py", "pipeline.py"],
+            "scanner.py": ["pipeline.py"],
+            "pipeline.py": []
+        }
+
+        order[0] = {"position": 1, "file": "config.py",
+                    "why": "No internal dependencies | Used by: log.py, scanner.py, pipeline.py"}
+        order[1] = {"position": 2, "file": "log.py",
+                    "why": "Depends on: config.py | Used by: scanner.py, pipeline.py"}
+        order[2] = {"position": 3, "file": "scanner.py",
+                    "why": "Depends on: config.py, log.py | Used by: pipeline.py"}
+        order[3] = {"position": 4, "file": "pipeline.py",
+                    "why": "Depends on: scanner.py, config.py, log.py"}
+
+        → tag_reading_relevance(order) adds "relevance" to each entry
     """
     graph = deps["graph"]
-    sorted_files = topological_sort(graph)
+    sorted_files = topological_sort(graph_runtime or graph)
 
     # Detect cycles: if toposort produced fewer files than expected
     internal_files = set(graph.keys())
@@ -234,19 +269,14 @@ def generate_reading_order(files: list[dict], deps: dict) -> dict:
         "has_cycles": has_cycles,
     }
 
-
-# =============================================================================
-# generate_reading_order_raw() - Without LLM (For MCP Tools)
-# =============================================================================
-
-def generate_reading_order_raw(files: list[dict], deps: dict) -> dict:
+def generate_reading_order_raw(files: list[dict], deps: dict, graph_runtime=None) -> dict:
     """Generate reading order WITHOUT LLM relevance tagging.
 
     Used by MCP tools where the host LLM (Copilot) does its own reasoning.
     Same as generate_reading_order() but skips the tag_reading_relevance() call.
     """
     graph = deps["graph"]
-    sorted_files = topological_sort(graph)
+    sorted_files = topological_sort(graph_runtime or graph)
 
     internal_files = set(graph.keys())
     has_cycles = len(sorted_files) < len(internal_files)

@@ -206,6 +206,22 @@ def get_language(language: str):
         - PHP: package uses language_php() instead of language()
 
     Returns None if grammar not installed (pip package missing).
+
+    EXAMPLE:
+        get_language("go")
+          model_name = GRAMMAR_MAP["go"] = "tree_sitter_go"
+          grammar_module = importlib.import_module("tree_sitter_go")
+          lang = Language(grammar_module.language())  # compiled C grammar object
+          _language_cache["go"] = lang
+          returns <Language: go>
+
+        get_language("go")  # second call
+          "go" in _language_cache → True
+          returns cached <Language: go> instantly
+
+        get_language("brainfuck")
+          GRAMMAR_MAP.get("brainfuck") = None
+          returns None
     """
     if language in _language_cache:
         return _language_cache[language]
@@ -269,6 +285,21 @@ def extract_name(node, name_field: str) -> str:
         The actual name is one level deeper.
 
     Returns "<anonymous>" if name can't be found (rare edge case).
+
+    EXAMPLES:
+        Go: func Fprint(w io.Writer, ...)
+          node = <function_declaration>
+          name_field = "name"
+          node.child_by_field_name("name") = <identifier: "Fprint">
+          returns "Fprint"
+
+        C: int main(int argc, char** argv) { ... }
+          node = <function_definition>
+          name_field = "declarator"
+          node.child_by_field_name("declarator") = None (nested)
+          Fallback 1: child.type == "function_declarator" → YES
+            inner = child.child_by_field_name("declarator") = <identifier: "main">
+          returns "main"
     """
     # Standard: direct child field
     name_node = node.child_by_field_name(name_field)
@@ -416,6 +447,30 @@ def parse_file(file_path: str, language: str) -> list[dict]:
         - Language not supported (no grammar)
         - File can't be read (permission denied, not found)
         - No functions/classes found (file is just imports/constants)
+
+    EXAMPLE TRACE (fatih/color, file "color.go", language "go"):
+        parser = get_parser_for_language("go") → Parser with Go grammar
+        node_types = NODE_TYPES["go"] = {
+            "function": ["function_declaration", "method_declaration"],
+            "class": [],
+            "name_field": "name",
+            "params_field": "parameters"
+        }
+        source = Path("color.go").read_bytes() → 12,847 bytes
+        tree = parser.parse(source) → full AST
+
+        Walk tree looking for function_declaration / method_declaration nodes:
+            node = <function_declaration: "New"> at line 60-75
+              item_type = "function", name = "New"
+              start_line = 60, end_line = 75
+              code = "func New(value ...Attribute) *Color { ... }"
+              args = ["value"]
+
+            node = <method_declaration: "Add"> at line 80-85
+              item_type = "function", name = "Add"
+              start_line = 80, end_line = 85
+
+        returns 24 items (24 functions, 0 classes — Go has no classes)
     """
     # Step 1: Get parser (returns None if language unsupported)
     parser = get_parser_for_language(language)

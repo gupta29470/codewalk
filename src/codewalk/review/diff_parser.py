@@ -57,6 +57,22 @@ def get_parsed_diff(diff_text: str) -> list[DiffFile]:
 
     Uses the `unidiff` library which handles all the @@ parsing.
     Returns empty list if diff is empty.
+
+    EXAMPLE TRACE (2-line change in color.go):
+        diff_text = "--- a/color.go\n+++ b/color.go\n@@ -72,3 +72,4 @@\n func (c *Color) Add(...)\n+    // new comment\n ..."
+
+        patch = PatchSet(diff_text)          → 1 patched_file
+        patched_file.path                   = "color.go"
+        patched_file.is_added_file          = False
+        patched_file.added                  = 1
+        patched_file.removed                = 0
+        hunk.target_start                   = 72
+        hunk.target_length                  = 4
+        lines = [
+            ChangedLine(line_number=72, content="func (c *Color) Add(...)",  change_type="context"),
+            ChangedLine(line_number=73, content="    // new comment\n",      change_type="added"),
+        ]
+        return → [DiffFile(file_path="color.go", language="go", hunks=[DiffHunk(...)], added_lines=1, removed_lines=0)]
     """
     from unidiff import PatchSet
 

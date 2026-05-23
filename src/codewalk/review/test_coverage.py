@@ -44,7 +44,26 @@ class TestCoverage:
     }
 
     def analyze(self, diff_files: list) -> list[Issue]:
-        """Flag source files changed without corresponding test updates."""
+        """Flag source files changed without corresponding test updates.
+
+        EXAMPLE TRACE (3 files in diff: color.go changed, color_test.go NOT changed, doc.go changed):
+            diff_files = [
+                DiffFile(file_path="color.go", ...),
+                DiffFile(file_path="doc.go", ...),
+                DiffFile(file_path="README.md", ...),
+            ]
+            changed_source = {"color.go", "doc.go", "README.md"}
+            changed_tests  = set()   # no test files in diff
+
+            # color.go → _guess_test_file → ["color_test.go"]  → not in changed_tests → Issue!
+            # doc.go   → _guess_test_file → ["doc_test.go"]    → not in changed_tests → Issue!
+            # README.md → suffix not matched → [] → skipped
+
+            return → [
+                Issue(severity=WARNING, title="No test updates for color.go", file_path="color.go"),
+                Issue(severity=WARNING, title="No test updates for doc.go",   file_path="doc.go"),
+            ]
+        """
         changed_source = set()
         changed_tests = set()
 

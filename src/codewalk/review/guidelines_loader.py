@@ -38,6 +38,18 @@ def load_guidelines(guidelines_path: str) -> list[dict]:
     """Read all guideline files from the guidelines folder.
 
     Returns list of {"text": content, "metadata": {"source": filename}}
+
+    EXAMPLE TRACE (guidelines_path="docs/guidelines/", 2 files):
+        path = Path("docs/guidelines/")  → exists
+        doc_file iterations:
+            1. "docs/guidelines/go-style.md"      → suffix=".md" ✓
+               content = "## Go Style\n- Use gofmt..."  (248 chars)
+               docs.append({"text": "## Go Style...", "metadata": {"source": "go-style.md", "type": "guideline"}})
+            2. "docs/guidelines/security.txt"     → suffix=".txt" ✓
+               content = "Always validate URL domains..."  (180 chars)
+               docs.append({"text": "Always validate...", "metadata": {"source": "security.txt", "type": "guideline"}})
+            3. "docs/guidelines/logo.png"          → suffix=".png" ✗ (skipped)
+        return → [{"text": "## Go Style...", ...}, {"text": "Always validate...", ...}]  (2 docs)
     """
     path = Path(guidelines_path)
     if not path.exists():
@@ -108,6 +120,14 @@ def search_guidelines(store: VectorStore, diff_files: list, n_results: int = 3) 
 
     Builds a query from languages + file paths, retrieves matching guidelines.
     Returns formatted text ready for injection into the review prompt.
+
+    EXAMPLE TRACE (2 Go files changed):
+        languages   = {"go"}
+        file_paths  = ["color.go", "doc.go"]
+        query       = "coding guidelines for go files: color.go, doc.go"
+        results     = store.search(query, n_results=3)  → 1 result
+        results[0]  = {"text": "## Go Style\n- Use gofmt...", "metadata": {"source": "go-style.md"}}
+        return → "## Team Coding Guidelines\n\n### From: go-style.md\n## Go Style\n- Use gofmt..."
     """
     if not store:
         return ""
