@@ -88,7 +88,7 @@ async def analyze(request: AnalyzeRequest):
         persist_dir = f"{request.repo_path.rstrip('/')}/.codewalk/chroma"
         store = VectorStore(persist_dir=persist_dir)
         store.create_collection(request.collection_name)
-        existing_count = store.collection.count()
+        existing_count = store.chunk_count()
 
         # ── Decide whether to index ──────────────────────────────
         if request.index_mode == "full" or existing_count == 0:
@@ -115,7 +115,14 @@ async def analyze(request: AnalyzeRequest):
 
         # ── Save state (including files/deps cache) ─────────────
         state.initialize(store, agent, modules_result, index_result,
-                         files=files, deps=deps, repo_path=request.repo_path)
+                         files=files, deps=deps, repo_path=request.repo_path,
+                         embedded_chunks=index_result.get("embedded_chunks"))
+
+        # ── Embed guidelines if REVIEW_GUIDELINES_PATH is set ──
+        from src.codewalk.review.guidelines_loader import get_guidelines_store
+        gl_store = get_guidelines_store()
+        if gl_store:
+            _log(f"[api] Guidelines embedded: {gl_store.chunk_count()} chunks")
 
         return AnalyzeResponse(
             status="complete",
@@ -143,7 +150,7 @@ async def analyze_stream(request: AnalyzeRequest):
             persist_dir = f"{request.repo_path.rstrip('/')}/.codewalk/chroma"
             store = VectorStore(persist_dir=persist_dir)
             store.create_collection(request.collection_name)
-            existing_count = store.collection.count()
+            existing_count = store.chunk_count()
 
             # Step 2: Indexing
             if request.index_mode == "full" or existing_count == 0:
@@ -169,7 +176,7 @@ async def analyze_stream(request: AnalyzeRequest):
 
                 yield f"data: {json.dumps({'step': 'store', 'message': 'Storing in vector database...'})}\n\n"
                 store.clear_collection()
-                store.add_chunks(embedded)
+                store.add_parent_child_chunks(embedded)
                 yield f"data: {json.dumps({'step': 'store', 'message': f'Stored {len(embedded)} chunks in ChromaDB'})}\n\n"
 
                 index_result = {
@@ -210,7 +217,15 @@ async def analyze_stream(request: AnalyzeRequest):
 
             # Step 5: Save state (including files/deps cache)
             state.initialize(store, agent, modules_result, index_result,
-                             files=files, deps=deps, repo_path=request.repo_path)
+                             files=files, deps=deps, repo_path=request.repo_path,
+                             embedded_chunks=index_result.get("embedded_chunks"))
+
+            # Step 6: Embed guidelines if REVIEW_GUIDELINES_PATH is set
+            from src.codewalk.review.guidelines_loader import get_guidelines_store
+            gl_store = get_guidelines_store()
+            if gl_store:
+                gl_count = gl_store.chunk_count()
+                yield f"data: {json.dumps({'step': 'guidelines', 'message': f'Embedded {gl_count} guideline chunks'})}\n\n"
 
             # Final event — includes full result
             yield f"data: {json.dumps({'step': 'done', 'message': 'Analysis complete!', 'result': {'status': 'complete', 'repo_path': request.repo_path, 'files_scanned': index_result.get('files_scanned', 0), 'chunks_created': index_result.get('chunks_created', 0), 'modules': list(modules_result['modules'].keys())}})}\n\n"
@@ -556,7 +571,9 @@ async def review_file_endpoint(request: ReviewFileRequest):
             content = f.read()
 
         results = store.search(f"code in {request.file_path}", n_results=5)
-        patterns = format_context(results) if results else "No indexed context."
+        from src.codewalk.rag.retrieval_quality import filter_by_distance
+        filtered, _ = filter_by_distance(results)
+        patterns = format_context(filtered) if filtered else "No indexed context."
 
         llm = get_llm(temperature=0)
         response = llm.invoke([
@@ -600,7 +617,7 @@ async def load_guidelines_endpoint(request: GuidelinesRequest):
         if not store:
             raise HTTPException(status_code=400, detail=f"No guideline files found in {path}")
 
-        count = store.collection.count()
+        count = store.chunk_count()
         return {"status": "loaded", "chunks": count, "path": path}
     except HTTPException:
         raise
@@ -675,6 +692,25 @@ async def voice_ask_endpoint(
         "speech": voice["speech"],
         "audio_base64": base64.b64encode(audio_response).decode(),
     })
+
+@app.get("/cycles")
+async def get_cycles():
+    """Detect circular dependencies."""
+    state.ensure_initialized()
+    runtime = state.get_graph_runtime()
+    return runtime.detect_cycles()
+
+
+@app.get("/architecture")
+async def get_architecture():
+    """Architecture health report: stats, centrality, cycles."""
+    state.ensure_initialized()
+    runtime = state.get_graph_runtime()
+    return {
+        "stats": runtime.get_graph_stats(),
+        "centrality": runtime.centrality(top_n=10),
+        "cycles": runtime.detect_cycles(),
+    }
 
 # ─── Health check ───────────────────────────────────────────────────
 

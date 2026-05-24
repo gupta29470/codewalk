@@ -33,3 +33,7 @@ SESSION_SUMMARY.md
 .DS_Store
 
 blogs/
+
+.codewalk/
+
+tests/

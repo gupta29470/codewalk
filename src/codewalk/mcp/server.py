@@ -1,10 +1,10 @@
-"""Codewalk MCP server — 18 tools for codebase onboarding, search, review, and voice.
+"""Codewalk MCP server — 20 tools for codebase onboarding, search, review, and voice.
 
 Tool categories:
-  SETUP  (1, 9-11): Analyze repo, scan/filter files, index embeddings.
-  QUERY  (2-8):     Search code, explain functions, blast radius, reading order, execution flow.
-  MAINT  (12-16):   Incremental reindex, refresh analysis, review diff/file, load guidelines.
-  VOICE  (17-18):   Mic record+transcribe (Copilot routes), TTS speak.
+  SETUP  (1, 9-11):    Analyze repo, scan/filter files, index embeddings.
+  QUERY  (2-8, 19-20): Search code, explain functions, blast radius, reading order, execution flow, architecture health.
+  MAINT  (12-16):      Incremental reindex, refresh analysis, review diff/file, load guidelines.
+  VOICE  (17-18):      Mic record+transcribe (Copilot routes), TTS speak.
 """
 
 import inspect
@@ -26,6 +26,7 @@ from src.codewalk.analysis.module_detector import detect_modules
 from src.codewalk.generation.diagram_generator import generate_module_diagram
 from src.codewalk.embeddings.vector_store import VectorStore
 from src.codewalk.rag.chain import format_context
+from src.codewalk.rag.retrieval_quality import filter_by_distance
 from src.codewalk.pipeline import full_index_parallel, index_from_paths_parallel, incremental_reindex
 from src.codewalk.ingestion.file_filter import should_skip
 from src.codewalk.config import settings
@@ -86,6 +87,10 @@ mcp = FastMCP(
         "- codewalk_review_file(path) — review one file against codebase patterns\n"
         "- codewalk_load_guidelines(path) — load team coding standards for reviews\n"
         "\n"
+        "## ARCHITECTURE ANALYSIS\n"
+        "- codewalk_get_architecture_health — bottlenecks, key files, circular dependencies, refactoring priorities\n"
+        "- call_chain(source, target) — trace the shortest import path between two files\n"
+        "\n"
         "## VOICE COMPANION\n"
         "- codewalk_voice_ask — record mic + transcribe, then YOU:\n"
         "    1. Call the right codewalk tool\n"
@@ -143,16 +148,24 @@ def codewalk_analyze_codebase() -> str:
     # Check if there's an existing index for search.
     state._store = VectorStore(persist_dir=state.chroma_path())
     state._store.create_collection(state.get_collection_name())
-    existing = state._store.collection.count()
+    existing = state._store.chunk_count()
 
     modules = list(state._modules_result["modules"].keys())
     _log(f"[codewalk_analyze_codebase] Modules: {modules} | Index: {existing} chunks")
     if existing > 0:
+        # ── Embed guidelines if REVIEW_GUIDELINES_PATH is set ──
+        guidelines_msg = ""
+        gl_store = get_guidelines_store()
+        if gl_store:
+            gl_count = gl_store.chunk_count()
+            guidelines_msg = f"Guidelines: {gl_count} chunks embedded\n"
+
         return (
             f"Codebase analyzed successfully.\n"
             f"Files found: {len(state._files)}\n"
             f"Modules found: {', '.join(modules)}\n"
-            f"Search index: INDEX READY — {existing} chunks available.\n\n"
+            f"Search index: INDEX READY — {existing} chunks available.\n"
+            f"{guidelines_msg}\n"
             f"✅ Index already exists. SKIP scan/filter/index steps.\n"
             f"Ready to answer questions — use query tools directly."
         )
@@ -184,12 +197,21 @@ def codewalk_analyze_codebase() -> str:
 
     _log(f"[codewalk_analyze_codebase] Indexed {result['chunks_embedded']} chunks in {result.get('total_time', 'N/A')}")
 
+    # ── Embed guidelines if REVIEW_GUIDELINES_PATH is set ──
+    guidelines_msg = ""
+    gl_store = get_guidelines_store()
+    if gl_store:
+        gl_count = gl_store.chunk_count()
+        guidelines_msg = f"Guidelines: {gl_count} chunks embedded\n"
+        _log(f"[codewalk_analyze_codebase] Guidelines embedded: {gl_count} chunks")
+
     return (
         f"Codebase analyzed and indexed successfully.\n"
         f"Files found: {len(state._files)}\n"
         f"Files indexed: {result['files_scanned']}\n"
         f"Chunks embedded: {result['chunks_embedded']}\n"
         f"Time: {result.get('total_time', 'N/A')}\n"
+        f"{guidelines_msg}"
         f"Modules found: {', '.join(modules)}\n\n"
         f"✅ Ready to answer questions — use query tools directly."
     )
@@ -221,10 +243,11 @@ def codewalk_search_codebase(query: str) -> str:
 
     _log(f"[codewalk_search_codebase] Query: {query}")
     results = state._store.search(query, n_results=5)
+    filtered, confidence = filter_by_distance(results)
     _log(f"[codewalk_search_codebase] Found {len(results)} results")
-    if not results:
+    if not filtered:
         return "No relevant code found for that query."
-    return format_context(results)
+    return format_context(filtered)
 
 # ─── TOOL 3 [QUERY · user+AI]: codewalk_get_module_info ──────────────
 @mcp.tool()
@@ -548,7 +571,7 @@ def codewalk_index_filtered_files() -> str:
     # Open (or create) the persistent collection WITHOUT wiping it first
     working_store = VectorStore(persist_dir=state.chroma_path())
     working_store.create_collection(state.get_collection_name())
-    existing_count = working_store.collection.count()
+    existing_count = working_store.chunk_count()
 
     if existing_count > 0:
         # ── Incremental path: existing index found ──────────────────────
@@ -630,7 +653,7 @@ def codewalk_incremental_reindex() -> str:
         state._store = VectorStore(persist_dir=state.chroma_path())
         state._store.create_collection(state.get_collection_name())
 
-    if state._store.collection.count() == 0:
+    if state._store.chunk_count() == 0:
         return "❌ No index exists. Run the full setup workflow first (scan → filter → index)."
 
     # Use previously selected paths if available, else fall back to all indexed files
@@ -849,9 +872,10 @@ def codewalk_review_file(file_path: str) -> str:
     # Codebase patterns (similar code elsewhere)
     if state._store:
         results = state._store.search(f"code in {file_path}", n_results=5)
-        if results:
+        filtered, _ = filter_by_distance(results)
+        if filtered:
             output_parts.append("## Similar patterns elsewhere in the codebase")
-            output_parts.append(format_context(results))
+            output_parts.append(format_context(filtered))
             output_parts.append("")
 
     # Guidelines
@@ -923,7 +947,7 @@ def codewalk_load_guidelines(docs_path: str | None = None) -> str:
     if not store:
         return f"❌ No guideline files found in {path}"
     
-    count = store.collection.count()
+    count = store.chunk_count()
 
     return (
         f"✅ Loaded {count} guideline chunks from {path}\n"
@@ -982,27 +1006,6 @@ def codewalk_load_guidelines(docs_path: str | None = None) -> str:
 #         return f"❌ osascript not found — this tool only works on macOS.\n\nRun manually:\n```\n{cmd}\n```"
 #     except subprocess.CalledProcessError as e:
 #         return f"❌ Failed to launch Terminal: {e}\n\nRun manually:\n```\n{cmd}\n```"
-
-
-# ─── Shared tool lookup map (used by voice_ask, backends.py) ──
-_TOOL_MAP = {
-    "codewalk_analyze_codebase": codewalk_analyze_codebase,
-    "codewalk_search_codebase": codewalk_search_codebase,
-    "codewalk_get_module_info": codewalk_get_module_info,
-    "codewalk_explain_function": codewalk_explain_function,
-    "codewalk_get_overview": codewalk_get_overview,
-    "codewalk_get_blast_radius_map": codewalk_get_blast_radius_map,
-    "codewalk_get_reading_order": codewalk_get_reading_order,
-    "codewalk_get_execution_flow": codewalk_get_execution_flow,
-    "codewalk_scan_files": codewalk_scan_files,
-    "codewalk_submit_filtered_files": codewalk_submit_filtered_files,
-    "codewalk_index_filtered_files": codewalk_index_filtered_files,
-    "codewalk_incremental_reindex": codewalk_incremental_reindex,
-    "codewalk_refresh_analysis": codewalk_refresh_analysis,
-    "codewalk_review_diff": codewalk_review_diff,
-    "codewalk_review_file": codewalk_review_file,
-    "codewalk_load_guidelines": codewalk_load_guidelines,
-}
 
 
 # ─── TOOL 17 [VOICE · user]: codewalk_voice_ask ──────────────────────
@@ -1095,6 +1098,150 @@ def codewalk_speak(text: str) -> str:
     except Exception as e:
         return f"❌ TTS failed: {e}"
 
+
+# ─── TOOL 19 [QUERY · user+AI]: codewalk_get_architecture_health ─────
+@mcp.tool()
+def codewalk_get_architecture_health() -> str:
+    """Architecture health report: bottlenecks, key files, circular dependencies.
+
+    Returns:
+    - Graph stats (files, import edges, DAG status)
+    - Bottleneck files (betweenness centrality — most import paths pass through these)
+    - Most important files (PageRank — transitively depended on by the most code)
+    - Circular dependencies with suggested fixes (which imports to remove)
+
+    Use when asked about code health, architecture quality, refactoring
+    priorities, circular imports, or "what should I fix first?"
+    """
+    state.ensure_initialized()
+    runtime = state.get_graph_runtime()
+
+    sections = []
+
+    # ── Graph stats ──
+    stats = runtime.get_graph_stats()
+    sections.append(
+        f"## Architecture Health Report\n\n"
+        f"**Files:** {stats['file_graph']['vertices']} | "
+        f"**Import edges:** {stats['file_graph']['edges']} | "
+        f"**DAG:** {'Yes' if stats['file_graph']['is_dag'] else 'No (has cycles)'}\n"
+        f"**Modules:** {stats['module_graph']['vertices']} | "
+        f"**Module edges:** {stats['module_graph']['edges']}"
+    )
+
+    # ── Bottleneck files (betweenness centrality) ──
+    # High betweenness = many shortest paths pass through this file.
+    # If it breaks, it disrupts the most connections.
+    centrality = runtime.centrality(top_n=10)
+    if centrality["betweenness"]:
+        between_lines = []
+        for item in centrality["betweenness"]:
+            if item["score"] > 0:
+                name = item["file"].rsplit("/", 1)[-1]
+                between_lines.append(f"  - {name} (score: {item['score']})")
+        if between_lines:
+            sections.append(
+                "### Bottleneck Files (betweenness centrality)\n"
+                "These files sit on the most import paths. Changes here ripple widely.\n"
+                + "\n".join(between_lines)
+            )
+
+    # ── Most important files (PageRank) ──
+    # High PageRank = imported by other important files (transitive).
+    if centrality["pagerank"]:
+        pagerank_lines = []
+        for item in centrality["pagerank"][:10]:
+            name = item["file"].rsplit("/", 1)[-1]
+            pagerank_lines.append(f"  - {name} (score: {item['score']})")
+        sections.append(
+            "### Most Important Files (PageRank)\n"
+            "Transitively depended on by the most code.\n"
+            + "\n".join(pagerank_lines)
+        )
+
+    # ── Circular dependencies ──
+    # Cycle groups + minimum edges to break (feedback arc set).
+    cycles = runtime.detect_cycles()
+    if cycles["has_cycles"]:
+        cycle_lines = [f"### Circular Dependencies ({len(cycles['cycle_groups'])} cycle groups)"]
+        for index, group in enumerate(cycles["cycle_groups"], 1):
+            names = [file.rsplit("/", 1)[-1] for file in group]
+            cycle_lines.append(f"  Cycle {index}: {' ↔ '.join(names)}")
+            for file in group:
+                cycle_lines.append(f"    - {file}")
+        if cycles["edges_to_break"]:
+            cycle_lines.append("\n**Suggested Fixes (minimum imports to remove):")
+            for source, target in cycles["edges_to_break"]:
+                cycle_lines.append(f"  - Remove: {source.rsplit('/', 1)[-1]} → {target.rsplit('/', 1)[-1]}")
+        sections.append("\n".join(cycle_lines))
+    else:
+        sections.append("### Circular Dependencies\nNone — clean DAG.")
+
+    return "\n\n".join(sections)
+
+# ─── TOOL 20 [QUERY · user+AI]: codewalk_call_chain ──────────────────
+@mcp.tool()
+def call_chain(source: str, target: str) -> str:
+    """Trace the import chain between two files.
+
+    Shows the shortest path of imports from source to target.
+    Useful for understanding how changes propagate through the codebase.
+
+    Args:
+        source: Source file name or path (e.g. "pipeline.py" or "src/codewalk/pipeline.py")
+        target: Target file name or path (e.g. "config.py" or "src/codewalk/config.py")
+    """
+    state.ensure_initialized()
+    runtime = state.get_graph_runtime()
+
+    chain = runtime.shortest_path(source, target)
+
+    if not chain:
+        return (
+            f"No import path found from '{source}' to '{target}'.\n"
+            f"They may be in separate parts of the codebase with no dependency connection."
+        )
+    
+    short_names = [f.rsplit("/", 1)[-1] for f in chain]
+    chain_str = " → ".join(short_names)
+
+    lines = [
+        f"## Import Chain: {short_names[0]} → {short_names[-1]}",
+        f"**Hops:** {len(chain) - 1}",
+        f"**Path:** {chain_str}",
+        "",
+        "### Full paths:",
+    ]
+
+    for i, file_path in enumerate(chain):
+        marker = "📍" if i == 0 or i == len(chain) - 1 else "  →"
+        lines.append(f"  {marker} {file_path}")
+
+    return "\n".join(lines)
+
+
+# ─── Shared tool lookup map (used by voice_ask, backends.py) ──
+# NOTE: Must be defined AFTER all tool functions.
+_TOOL_MAP = {
+    "codewalk_analyze_codebase": codewalk_analyze_codebase,
+    "codewalk_search_codebase": codewalk_search_codebase,
+    "codewalk_get_module_info": codewalk_get_module_info,
+    "codewalk_explain_function": codewalk_explain_function,
+    "codewalk_get_overview": codewalk_get_overview,
+    "codewalk_get_blast_radius_map": codewalk_get_blast_radius_map,
+    "codewalk_get_reading_order": codewalk_get_reading_order,
+    "codewalk_get_execution_flow": codewalk_get_execution_flow,
+    "codewalk_scan_files": codewalk_scan_files,
+    "codewalk_submit_filtered_files": codewalk_submit_filtered_files,
+    "codewalk_index_filtered_files": codewalk_index_filtered_files,
+    "codewalk_incremental_reindex": codewalk_incremental_reindex,
+    "codewalk_refresh_analysis": codewalk_refresh_analysis,
+    "codewalk_review_diff": codewalk_review_diff,
+    "codewalk_review_file": codewalk_review_file,
+    "codewalk_load_guidelines": codewalk_load_guidelines,
+    "codewalk_get_architecture_health": codewalk_get_architecture_health,
+    "call_chain": call_chain,
+}
 
 if __name__ == "__main__":
     mcp.run(transport="stdio")

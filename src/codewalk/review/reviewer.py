@@ -62,7 +62,8 @@ def _get_file_content(diff_file: DiffFile, repo_path: str | None) -> str:
         return ""
 
 
-def _get_caller_context(diff_file: DiffFile, deps: dict | None = None, graph_store=None) -> str:
+def _get_caller_context(diff_file: DiffFile, deps: dict | None = None,
+                        graph_store: 'GraphStore | None' = None) -> str:
     """Symbol-level caller context for code review."""
     if graph_store:
         symbols = graph_store.get_symbols_in_file(diff_file.file_path)
@@ -155,7 +156,9 @@ def _get_security_context_for_file(diff_file: DiffFile, store) -> str:
     all_results = []
     for query in queries[:2]:
         results = store.search(query, n_results=2)
-        all_results.extend(results)
+        from src.codewalk.rag.retrieval_quality import filter_by_distance
+        filtered, _ = filter_by_distance(results)
+        all_results.extend(filtered)
 
     if not all_results:
         return ""

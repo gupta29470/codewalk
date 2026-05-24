@@ -79,10 +79,11 @@ def get_leftover_code(content: str, parsed_items: list[dict]) -> str:
 def chunk_file_with_parser(file_info: dict, chunk_size: int = 1000, chunk_overlap: int = 200) -> list[dict]:
     """Use tree-sitter to extract function/class level chunks.
 
-    Each function or class becomes its own chunk with rich metadata.
-    If a function's code exceeds chunk_size, it gets text-split into
-    smaller pieces (but still keeps the symbol metadata).
-    Leftover top-level code (imports, constants) is text-split separately.
+    Produces parent-child pairs:
+      - PARENT: full function/class body → stored for LLM context
+      - CHILDREN: sub-chunks of large functions → searched for precision
+      - Small functions (fit in chunk_size) → parent only, no children
+      - Leftover top-level code → text-split, type="leftover"
     """
     language = file_info["language"]
     file_path = file_info["absolute_path"]
@@ -100,9 +101,29 @@ def chunk_file_with_parser(file_info: dict, chunk_size: int = 1000, chunk_overla
     content = read_file_content(file_path)
     content_hash = file_hash(content)
 
-    # Step 2: Each parsed function/class → one or more chunks
+    # Step 2: Each parsed function/class → parent + optional children
     for item in parsed_items:
         code = item["code"]
+
+        parent_id = f"{relative_path}::parent::{chunk_index}"
+
+        parent_chunk = {
+            "text": code,
+            "file_path": relative_path,
+            "language": language,
+            "chunk_index": chunk_index,
+            "source": "parser",
+            "file_hash": content_hash,
+            "symbol_name": item["name"],
+            "symbol_type": item["type"],
+            "start_line": item["start_line"],
+            "end_line": item["end_line"],
+            "chunk_type": "parent",             
+            "parent_chunk_id": None,            
+        }
+
+        chunks.append(parent_chunk)
+        chunk_index += 1
 
         if len(code) <= chunk_size:
             # Fits in one chunk — keep it whole
@@ -117,6 +138,8 @@ def chunk_file_with_parser(file_info: dict, chunk_size: int = 1000, chunk_overla
                 "symbol_type": item["type"],
                 "start_line": item["start_line"],
                 "end_line": item["end_line"],
+                "chunk_type": "child",              
+                "parent_chunk_id": parent_id,       
             })
             chunk_index += 1
         else:
@@ -134,6 +157,8 @@ def chunk_file_with_parser(file_info: dict, chunk_size: int = 1000, chunk_overla
                     "start_line": item["start_line"],
                     "end_line": item["end_line"],
                     "file_hash": content_hash,
+                    "chunk_type": "child",      
+                    "parent_chunk_id": parent_id,
                 })
                 chunk_index += 1
 
@@ -154,6 +179,8 @@ def chunk_file_with_parser(file_info: dict, chunk_size: int = 1000, chunk_overla
                 "start_line": None,
                 "end_line": None,
                 "file_hash": content_hash,
+                "chunk_type": "leftover",
+                "parent_chunk_id": None,
             })
             chunk_index += 1
 
@@ -192,6 +219,8 @@ def chunk_file(file_info: dict, chunk_size: int = 1000, chunk_overlap: int = 200
             "start_line": None,
             "end_line": None,
             "file_hash": file_hash(content),
+            "chunk_type": "leftover",
+            "parent_chunk_id": None,
         }
         for index, text in enumerate(texts)
     ]

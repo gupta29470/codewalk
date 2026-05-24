@@ -25,6 +25,7 @@ _deps: dict | None = None              # build_dependency_graph() result
 _repo_path: str | None = None          # target repo being analyzed
 _graph_store: GraphStore | None = None
 _graph_runtime: GraphRuntime | None = None
+_banner_shown = False
 
 def get_store() -> VectorStore:
     """Get the VectorStore. Raises if not initialized."""
@@ -73,7 +74,6 @@ def get_graph_runtime() -> GraphRuntime:
         raise RuntimeError("No codebase analyzed yet. Call POST /analyze first.")
     return _graph_runtime
 
-
 def get_graph_store() -> GraphStore | None:
     """Get the GraphStore (DuckDB). Returns None if not initialized."""
     return _graph_store
@@ -81,7 +81,8 @@ def get_graph_store() -> GraphStore | None:
 
 def initialize(store: VectorStore, agent, modules_result: dict, analyze_result: dict,
                files: list[dict] | None = None, deps: dict | None = None,
-               repo_path: str | None = None):
+               repo_path: str | None = None,
+               embedded_chunks: list[dict] | None = None):
     """Set all state after a successful /analyze."""
     global _store, _agent, _modules_result, _analyze_result, _files, _deps, _repo_path, _graph_store, _graph_runtime
     _store = store
@@ -98,10 +99,9 @@ def initialize(store: VectorStore, agent, modules_result: dict, analyze_result: 
         repo = _repo_path or settings.repo_path
         db_path = f"{repo.rstrip('/')}/.codewalk/graph.duckdb"
         _graph_store = GraphStore(db_path)
-        _graph_store.populate_from_analysis(files, deps, modules_result)
+        _graph_store.populate_from_analysis(files, deps, modules_result,
+                                            embedded_chunks=embedded_chunks)
         _graph_runtime = GraphRuntime(_graph_store)
-
-        # Recreate agent with graph_runtime so tools get igraph speed
         _agent = create_agent(_store, _modules_result, files=_files, deps=_deps, graph_runtime=_graph_runtime, graph_store=_graph_store)
 
 
@@ -186,7 +186,8 @@ def ensure_initialized():
     _store = VectorStore(persist_dir=chroma)
     _store.create_collection(get_collection_name())
 
-    count = _store.collection.count()
+    count = _store.chunk_count()
+    _check_upgrade_banner(get_repo_path())
     _log(f"[ensure_initialized] Loaded {count} chunks from {chroma}")
 
     # Set _analyze_result so API endpoints can read repo_path
@@ -196,4 +197,38 @@ def ensure_initialized():
     if _agent is None and _store is not None and _modules_result is not None:
         _agent = create_agent(_store, _modules_result, files=_files, deps=_deps, graph_runtime=_graph_runtime, graph_store=_graph_store)
         _log("[ensure_initialized] Agent recreated")
+
+def _check_upgrade_banner(repo_path: str):
+    """Show one-time upgrade banner if index was built with older codewalk."""
+    import json
+    global _banner_shown
+
+    if _banner_shown:
+        return
+    
+    meta_path = f"{repo_path.rstrip('/')}/.codewalk/meta.json"
+    if not os.path.exists(meta_path):
+        return
+    
+    try:
+        with open(meta_path) as file:
+            meta = json.load(file)
+    except (json.JSONDecodeError, OSError):
+        return
+    
+    stored_version = meta.get("codewalk_version", "0.0.0")
+
+    from src.codewalk.pipeline import CODEWALK_VERSION
+    current_version = CODEWALK_VERSION
+
+    if stored_version < current_version:
+        _log(
+            f"\n"
+            f"  ⚡ Codewalk v{current_version} — index was built with v{stored_version}\n"
+            f"     Run codewalk_analyze_codebase to rebuild with latest features.\n"
+        )
+
+    _banner_shown = True
+
+
         

@@ -17,6 +17,8 @@ from src.codewalk.analysis.relevance_filter import filter_files_with_llm
 from src.codewalk.config import settings
 from src.codewalk.log import log as _log
 
+CODEWALK_VERSION = "1.9.0"
+
 _SENTINEL = object()
 EMBED_BATCH_SIZE = 256
 
@@ -128,7 +130,7 @@ def full_index(repo_path: str = "", collection_name: str = "codebase",
     store = VectorStore(persist_dir=persist_dir)
     store.create_collection(collection_name)
     store.clear_collection()
-    store.add_chunks(embedded)
+    store.add_parent_child_chunks(embedded)
     _log(f"[full_index] Stored {len(embedded)} chunks in ChromaDB")
 
     return {
@@ -137,6 +139,7 @@ def full_index(repo_path: str = "", collection_name: str = "codebase",
         "files_scanned": len(files),
         "chunks_created": len(chunks),
         "chunks_embedded": len(embedded),
+        "embedded_chunks": embedded, 
     }
 
 def full_index_parallel(repo_path: str = "", collection_name: str = "codebase",
@@ -165,7 +168,8 @@ def full_index_parallel(repo_path: str = "", collection_name: str = "codebase",
     store = VectorStore(persist_dir=persist_dir)
     store.create_collection(collection_name)
     store.clear_collection()
-    store.add_chunks(all_embedded)
+    store.add_parent_child_chunks(all_embedded)
+    _write_meta(repo_path, len(files)) 
 
     total_time = time.time() - pipeline_start
     _log(f"[parallel] Complete: {len(all_embedded)} chunks in {total_time:.1f}s")
@@ -176,6 +180,7 @@ def full_index_parallel(repo_path: str = "", collection_name: str = "codebase",
         "files_scanned": len(files),
         "chunks_created": total_chunks,
         "chunks_embedded": len(all_embedded),
+        "embedded_chunks": all_embedded,
     }
 
 def index_from_paths_parallel(paths: list[str], repo_path: str = "",
@@ -218,7 +223,8 @@ def index_from_paths_parallel(paths: list[str], repo_path: str = "",
     t0 = time.time()
     store = VectorStore(persist_dir=persist_dir)
     store.create_collection(collection_name)
-    store.add_chunks(all_embedded)
+    store.add_parent_child_chunks(all_embedded)
+    _write_meta(repo_path, len(files))
     store_time = time.time() - t0
 
     total_time = time.time() - pipeline_start
@@ -294,7 +300,7 @@ def index_from_paths(paths: list[str], repo_path: str = "",
     _log("[4/4] Storing in ChromaDB...")
     store = VectorStore(persist_dir=persist_dir)
     store.create_collection(collection_name)
-    store.add_chunks(embedded)
+    store.add_parent_child_chunks(embedded)
     elapsed = time.time() - t0
     _log(f"[4/4] Stored {len(embedded)} chunks ({elapsed:.1f}s)")
     steps.append(f"Store: {len(embedded)} chunks ({elapsed:.1f}s)")
@@ -429,9 +435,11 @@ def incremental_reindex(
     embedded_count = 0
     if to_embed:
         all_embedded, total_chunks = chunk_and_embed_parallel(to_embed)
-        store.add_chunks(all_embedded)
+        store.add_parent_child_chunks(all_embedded)
         embedded_count = len(all_embedded)
     
+    _write_meta(repo_path, len(disk_files))
+
     total_time = time.time() - pipeline_start
 
     return {
@@ -443,6 +451,28 @@ def incremental_reindex(
         "chunks_embedded": embedded_count,
         "total_time": f"{total_time:.1f}s",
     }
+
+def _write_meta(repo_path: str, file_count: int):
+    """Write .codewalk/meta.json after indexing."""
+    import json
+    from datetime import datetime, timezone
+    from pathlib import Path
+
+    meta_path = f"{repo_path.rstrip('/')}/.codewalk/meta.json"
+
+    meta = {
+        "codewalk_version": CODEWALK_VERSION,
+        "analyzed_at": datetime.now(timezone.utc).isoformat(),
+        "file_count": file_count,
+        "has_graph": True,
+    }
+
+    Path(meta_path).parent.mkdir(parents=True, exist_ok=True)
+
+    with open(meta_path, "w") as file:
+        json.dump(meta, file, indent=2)
+
+    _log(f"[meta] Wrote {meta_path} (v{CODEWALK_VERSION})")
 
 
 

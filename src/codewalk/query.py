@@ -4,12 +4,17 @@ Each function takes explicit data arguments (no global state dependency)
 and returns a formatted markdown string ready for display.
 """
 
+from __future__ import annotations
+
 from collections import Counter
 
 from src.codewalk.analysis.blast_radius import get_blast_radius, calculate_full_blast_map
 from src.codewalk.analysis.reading_order import generate_reading_order_raw
+from src.codewalk.graph.graph_runtime import GraphRuntime
+from src.codewalk.graph.graph_store import GraphStore
 from src.codewalk.ingestion.tech_detect import detect_tech_stack
 from src.codewalk.rag.chain import format_context
+from src.codewalk.rag.retrieval_quality import filter_by_distance
 
 
 # ─── Shared helpers ──────────────────────────────────────────────────
@@ -101,12 +106,15 @@ def resolve_module_with_fallback(
 def search_codebase_text(store, query: str) -> str:
     """Semantic search against ChromaDB embeddings."""
     results = store.search(query, n_results=5)
-    if not results:
+    filtered, _ = filter_by_distance(results)
+    if not filtered:
         return "No relevant code found for that query."
-    return format_context(results)
+    return format_context(filtered)
 
 
-def module_info_text(modules_result: dict, module_name: str) -> str:
+def module_info_text(modules_result: dict, module_name: str,
+                     graph_runtime: GraphRuntime | None = None,
+                     graph_store: GraphStore | None = None) -> str:
     """Basic module info: files, languages, dependencies."""
     modules = modules_result.get("modules", {})
     module_graph = modules_result.get("module_graph", {})
@@ -118,6 +126,31 @@ def module_info_text(modules_result: dict, module_name: str) -> str:
     info = modules[actual_name]
     depends_on = module_graph.get(actual_name, [])
     depended_by = [other for other, d in module_graph.items() if actual_name in d]
+    hub_section = ""
+    if graph_runtime and hasattr(graph_runtime, 'centrality'):
+        centrality = graph_runtime.centrality(top_n=5)
+        module_files = set(info["files"])
+        # Filter centrality to only files in this module
+        hub_files = [
+            item for item in centrality.get("betweenness", [])
+            if item["file"] in module_files and item["score"] > 0
+        ]
+        if hub_files:
+            hub_names = [f"{h['file'].rsplit('/', 1)[-1]} ({h['score']})" for h in hub_files[:3]]
+            hub_section = f"\n**Hub files:** {', '.join(hub_names)}"
+
+    coupling_section = ""
+    if graph_store:
+        outgoing = 0
+        incoming = 0
+        for file in info["files"]:
+            imports = graph_store.get_imports(file)
+            importers = graph_store.get_importers(file)
+            outgoing += sum(1 for imp in imports if imp not in info["files"])
+            incoming += sum(1 for imp in importers if imp not in info["files"])
+        if outgoing or incoming:
+            coupling_section = f"\n**Coupling:** {outgoing} outgoing, {incoming} incoming cross-module edges"
+
     file_names = [short_name(path) for path in sorted(info["files"])]
     lang_str = ", ".join(
         f"{lang} ({count} files)" for lang, count in sorted(info["languages"].items())
@@ -129,19 +162,21 @@ def module_info_text(modules_result: dict, module_name: str) -> str:
         f"**Languages:** {lang_str}",
         f"**Depends on:** {', '.join(depends_on) or 'None (standalone)'}",
         f"**Depended on by:** {', '.join(depended_by) or 'None'}",
-    ])
+    ]) + hub_section + coupling_section
 
 
 def explain_function_text(store, function_name: str,
-                          deps: dict = None, graph_runtime=None,
-                          graph_store=None) -> str:
+                          deps: dict = None,
+                          graph_runtime: GraphRuntime | None = None,
+                          graph_store: GraphStore | None = None) -> str:
     """Look up a function/class in ChromaDB and explain with blast radius."""
     results = store.search(function_name, n_results=10)
+    filtered, _ = filter_by_distance(results)
     matches = [
-        r for r in results
+        r for r in filtered
         if function_name.lower() in r["metadata"].get("symbol_name", "").lower()
     ]
-    to_show = matches[:3] if matches else results[:3] if results else []
+    to_show = matches[:3] if matches else filtered[:3] if filtered else []
     if not to_show:
         return f"Function '{function_name}' not found in the codebase."
 
@@ -194,7 +229,7 @@ def explain_function_text(store, function_name: str,
 
 
 def overview_text(repo_path: str, modules_result: dict, deps: dict,
-                  graph_runtime=None) -> str:
+                  graph_runtime: GraphRuntime | None = None) -> str:
     """Project overview: tech stack, modules, dependency flow, riskiest files."""
     tech = detect_tech_stack(repo_path)
 
@@ -243,6 +278,27 @@ def overview_text(repo_path: str, modules_result: dict, deps: dict,
             flow_lines.append(f"  {mod_name} → (standalone, no dependencies)")
     flow_section = "\n".join(flow_lines)
 
+    centrality_section = ""
+    if hasattr(runtime, "centrality"):
+        centrality = runtime.centrality(top_n=5)
+        if centrality.get("pagerank"):
+            pagerank_names = [item["file"].rsplit("/", 1)[-1] for item in centrality["pagerank"][:5]]
+            centrality_section = (
+                f"\n\n### Key Files (PageRank)\n"
+                f"Most important files by transitive dependency weight:\n"
+                f"  {', '.join(pagerank_names)}"
+            )
+
+    cycle_section = ""
+    if hasattr(runtime, 'detect_cycles'):
+        cycles = runtime.detect_cycles()
+        if cycles["has_cycles"]:
+            count = len(cycles["cycle_groups"])
+            cycle_section = (
+                f"\n\n### ⚠ Circular Dependencies\n"
+                f"{count} cycle group(s) detected. Run `codewalk_get_architecture_health` for details."
+            )
+
     return (
         f"## Project Overview\n\n"
         f"**Tech Stack:** {', '.join(tech) if tech else 'Not detected'}\n"
@@ -253,12 +309,13 @@ def overview_text(repo_path: str, modules_result: dict, deps: dict,
         f"**Entry points** (top-level, nothing depends on these): {', '.join(entry_modules) or 'None'}\n"
         f"**Core modules** (most depended on): {', '.join(core_modules) or 'None'}\n\n"
         f"{flow_section}\n\n"
-        f"### Riskiest Files (blast radius)\n{risky_section}"
+        f"### Riskiest Files ...\n{risky_section}{centrality_section}{cycle_section}"
     )
 
 
 def blast_radius_map_text(modules_result: dict, deps: dict,
-                          target: str = "", graph_runtime=None) -> str:
+                          target: str = "",
+                          graph_runtime: GraphRuntime | None = None) -> str:
     """Blast radius report for a target module, file, or top 30 riskiest."""
     graph = deps["graph"]
     runtime = graph_runtime or graph
@@ -312,7 +369,8 @@ def blast_radius_map_text(modules_result: dict, deps: dict,
 
 
 def reading_order_text(files: list[dict], deps: dict, modules_result: dict,
-                       module_name: str = "", graph_runtime=None) -> str:
+                       module_name: str = "",
+                       graph_runtime: GraphRuntime | None = None) -> str:
     """Reading order: all files in dependency order with blast radius risk."""
     order = generate_reading_order_raw(files, deps, graph_runtime=graph_runtime)
     runtime = graph_runtime or deps["graph"]

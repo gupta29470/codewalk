@@ -17,6 +17,8 @@ logger = logging.getLogger("codewalk")
 from src.codewalk.agent.prompts import AGENT_SYSTEM_PROMPT
 from src.codewalk.agent.tools import create_tools
 from src.codewalk.embeddings.vector_store import VectorStore
+from src.codewalk.graph.graph_runtime import GraphRuntime
+from src.codewalk.graph.graph_store import GraphStore
 
 # ─── STATE DEFINITION ────────────────────────────────────────────────
 class AgentState(TypedDict):
@@ -29,7 +31,8 @@ class AgentState(TypedDict):
 
 
 # ─── FACTORY FUNCTION ────────────────────────────────────────────────
-def create_agent(store: VectorStore, modules_result: dict, files: list[dict] = None, deps: dict = None, graph_runtime=None, graph_store=None):
+def create_agent(store: VectorStore, modules_result: dict, files: list[dict] = None, deps: dict = None,
+                 graph_runtime: GraphRuntime | None = None, graph_store: GraphStore | None = None):
     _log("[agent] Creating agent with tools...")
     """Build and compile a LangGraph agent with tools and memory.
 

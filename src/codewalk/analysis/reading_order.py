@@ -96,7 +96,8 @@ def topological_sort(graph) -> list[str]:
 
     return result
 
-def generate_reading_order(files: list[dict], deps: dict, graph_runtime=None) -> dict:
+def generate_reading_order(files: list[dict], deps: dict,
+                           graph_runtime: GraphRuntime | None = None) -> dict:
     """Generate a complete reading order from scanned files and dependency graph.
 
     Args:
@@ -158,7 +159,8 @@ def generate_reading_order(files: list[dict], deps: dict, graph_runtime=None) ->
         "has_cycles": has_cycles,
     }
 
-def generate_reading_order_raw(files: list[dict], deps: dict, graph_runtime=None) -> dict:
+def generate_reading_order_raw(files: list[dict], deps: dict,
+                               graph_runtime: GraphRuntime | None = None) -> dict:
     """Generate reading order WITHOUT LLM relevance tagging.
 
     Used by MCP tools where the host LLM (Copilot) does the reasoning.
