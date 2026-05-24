@@ -183,6 +183,7 @@ async def analyze_stream(request: AnalyzeRequest):
                     "repo_path": request.repo_path,
                     "files_scanned": len(files),
                     "chunks_created": chunks_created,
+                    "embedded_chunks": embedded,
                 }
 
             elif request.index_mode == "reindex":
@@ -494,7 +495,7 @@ async def incremental_reindex_endpoint():
         result = incremental_reindex(indexed_files, repo_path, collection_name, persist_dir=persist_dir)
 
         # Refresh analysis cache (includes graph rebuild)
-        state.rebuild_analysis_cache()
+        state.rebuild_analysis_cache(embedded_chunks=result.get("embedded_chunks"))
 
         return result
     except RuntimeError as e:

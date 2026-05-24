@@ -99,8 +99,15 @@ class GraphStore:
             deps: From build_dependency_graph() — {"graph": {"a.py": ["b.py"]}}
             module_results: From detect_modules() — {"modules": {...}, "module_graph": {...}}
         """
-        # Clear in reverse FK order: children before parents
-        self.conn.execute("DELETE FROM chunks")
+        # Clear in reverse FK order: children before parents.
+        # Chunks: only delete for files being re-embedded (incremental-safe).
+        # If embedded_chunks is None/empty, preserve existing chunks.
+        if embedded_chunks:
+            # Delete only chunks for files that are being re-embedded,
+            # not ALL chunks (which would wipe unchanged files' data).
+            changed_files = {_stable_id(c["file_path"]) for c in embedded_chunks}
+            for fid in changed_files:
+                self.conn.execute("DELETE FROM chunks WHERE file_id = ?", [fid])
         self.conn.execute("DELETE FROM symbol_calls")
         self.conn.execute("DELETE FROM symbols")
         self.conn.execute("DELETE FROM imports")
@@ -521,7 +528,74 @@ class GraphStore:
                 "VALUES (?, ?, ?, ?, ?, ?, ?)",
                 rows
             )
-    
+
+    def populate_chunks_from_chromadb(self, vector_store) -> int:
+        """Backfill chunks table from ChromaDB metadata.
+
+        Used when DuckDB chunks table is empty but ChromaDB has data
+        (e.g. after server restart, or after fixing the bug where
+        embedded_chunks wasn't being passed through).
+
+        Reads parent collection metadata → builds chunk rows → inserts.
+        Returns number of chunks inserted.
+        """
+        if not vector_store or not vector_store.parents_collection:
+            return 0
+
+        # Check if chunks table already has data
+        existing = self.conn.execute("SELECT COUNT(*) FROM chunks").fetchone()[0]
+        if existing > 0:
+            return existing
+
+        # Build symbol lookup: (file_path, symbol_name) → symbol_id
+        symbol_lookup = {}
+        for row in self.conn.execute(
+            "SELECT s.symbol_id, s.name, f.path "
+            "FROM symbols s JOIN files f ON s.file_id = f.file_id"
+        ).fetchall():
+            sid, name, fpath = row
+            symbol_lookup[(fpath, name)] = sid
+
+        # Read all metadata from ChromaDB parents collection
+        result = vector_store.parents_collection.get(include=["metadatas"])
+
+        rows = []
+        for meta in result["metadatas"]:
+            file_path = meta.get("file_path", "")
+            chunk_index = meta.get("chunk_index", 0)
+            symbol_name = meta.get("symbol_name", "")
+
+            file_id = _stable_id(file_path)
+
+            symbol_id = None
+            if symbol_name:
+                symbol_id = symbol_lookup.get((file_path, symbol_name))
+
+            embedding_id = f"{file_path}::chunk{chunk_index}"
+            chunk_id = _stable_id(file_path, str(chunk_index))
+
+            rows.append((
+                chunk_id,
+                file_id,
+                symbol_id,
+                meta.get("start_line") or None,
+                meta.get("end_line") or None,
+                meta.get("file_hash", ""),
+                embedding_id,
+            ))
+
+        if rows:
+            self.conn.execute("DELETE FROM chunks")
+            self.conn.executemany(
+                "INSERT OR IGNORE INTO chunks "
+                "(chunk_id, file_id, symbol_id, start_line, end_line, content_hash, embedding_id) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                rows
+            )
+            logger.info(f"[GraphStore] Backfilled {len(rows)} chunks from ChromaDB")
+
+        return len(rows)
+
     def close(self):
         """Close the DuckDB connection."""
         self.conn.close()

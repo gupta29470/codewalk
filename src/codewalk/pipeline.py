@@ -17,7 +17,7 @@ from src.codewalk.analysis.relevance_filter import filter_files_with_llm
 from src.codewalk.config import settings
 from src.codewalk.log import log as _log
 
-CODEWALK_VERSION = "1.9.0"
+CODEWALK_VERSION = "1.9.1"
 
 _SENTINEL = object()
 EMBED_BATCH_SIZE = 256
@@ -235,6 +235,7 @@ def index_from_paths_parallel(paths: list[str], repo_path: str = "",
         "files_scanned": len(files),
         "chunks_created": total_chunks,
         "chunks_embedded": len(all_embedded),
+        "embedded_chunks": all_embedded,
         "total_time": f"{total_time:.1f}s",
         "steps": [
                 f"Match: {len(files)}/{len(all_files)} files",
@@ -348,6 +349,7 @@ def reindex(repo_path: str = "", collection_name: str = "codebase",
         "chunks_created": result["chunks_embedded"],
         "chunks_embedded": result["chunks_embedded"],
         "total_time": result["total_time"],
+        "embedded_chunks": result.get("embedded_chunks"),
     }
 
 def incremental_reindex(
@@ -433,6 +435,7 @@ def incremental_reindex(
     
     # Step 6: Chunk + embed only the changed/new files
     embedded_count = 0
+    all_embedded = []
     if to_embed:
         all_embedded, total_chunks = chunk_and_embed_parallel(to_embed)
         store.add_parent_child_chunks(all_embedded)
@@ -449,6 +452,7 @@ def incremental_reindex(
         "files_reindexed": len(to_embed),
         "files_deleted": deleted,
         "chunks_embedded": embedded_count,
+        "embedded_chunks": all_embedded,
         "total_time": f"{total_time:.1f}s",
     }
 

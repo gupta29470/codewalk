@@ -89,7 +89,7 @@ mcp = FastMCP(
         "\n"
         "## ARCHITECTURE ANALYSIS\n"
         "- codewalk_get_architecture_health — bottlenecks, key files, circular dependencies, refactoring priorities\n"
-        "- call_chain(source, target) — trace the shortest import path between two files\n"
+        "- codewalk_call_chain(source, target) — trace the shortest import path between two files\n"
         "\n"
         "## VOICE COMPANION\n"
         "- codewalk_voice_ask — record mic + transcribe, then YOU:\n"
@@ -153,6 +153,10 @@ def codewalk_analyze_codebase() -> str:
     modules = list(state._modules_result["modules"].keys())
     _log(f"[codewalk_analyze_codebase] Modules: {modules} | Index: {existing} chunks")
     if existing > 0:
+        # Backfill DuckDB chunks table from ChromaDB if empty
+        if state._graph_store:
+            state._graph_store.populate_chunks_from_chromadb(state._store)
+
         # ── Embed guidelines if REVIEW_GUIDELINES_PATH is set ──
         guidelines_msg = ""
         gl_store = get_guidelines_store()
@@ -194,6 +198,10 @@ def codewalk_analyze_codebase() -> str:
     # Refresh store reference
     state._store = VectorStore(persist_dir=state.chroma_path())
     state._store.create_collection(state.get_collection_name())
+
+    # Populate chunks table in DuckDB (bridge to ChromaDB)
+    if state._graph_store and result.get("embedded_chunks"):
+        state._graph_store._populate_chunks(result["embedded_chunks"])
 
     _log(f"[codewalk_analyze_codebase] Indexed {result['chunks_embedded']} chunks in {result.get('total_time', 'N/A')}")
 
@@ -580,7 +588,7 @@ def codewalk_index_filtered_files() -> str:
         result = incremental_reindex(_selected_file_paths, repo_path, state.get_collection_name(), persist_dir=state.chroma_path())
 
         state._store = working_store
-        state.rebuild_analysis_cache()
+        state.rebuild_analysis_cache(embedded_chunks=result.get("embedded_chunks"))
         modules = list(state._modules_result["modules"].keys())
         _selected_file_paths = []
 
@@ -601,7 +609,7 @@ def codewalk_index_filtered_files() -> str:
         result = index_from_paths_parallel(_selected_file_paths, repo_path, state.get_collection_name(), persist_dir=state.chroma_path())
 
         state._store = working_store
-        state.rebuild_analysis_cache()
+        state.rebuild_analysis_cache(embedded_chunks=result.get("embedded_chunks"))
         modules = list(state._modules_result["modules"].keys())
         _selected_file_paths = []
 
@@ -663,7 +671,7 @@ def codewalk_incremental_reindex() -> str:
     
     result = incremental_reindex(paths, repo_path, state.get_collection_name(), persist_dir=state.chroma_path())
 
-    state.rebuild_analysis_cache()
+    state.rebuild_analysis_cache(embedded_chunks=result.get("embedded_chunks"))
 
     return (
         f"Incremental reindex complete ({result['total_time']})\n\n"
@@ -1181,7 +1189,7 @@ def codewalk_get_architecture_health() -> str:
 
 # ─── TOOL 20 [QUERY · user+AI]: codewalk_call_chain ──────────────────
 @mcp.tool()
-def call_chain(source: str, target: str) -> str:
+def codewalk_call_chain(source: str, target: str) -> str:
     """Trace the import chain between two files.
 
     Shows the shortest path of imports from source to target.
@@ -1240,7 +1248,7 @@ _TOOL_MAP = {
     "codewalk_review_file": codewalk_review_file,
     "codewalk_load_guidelines": codewalk_load_guidelines,
     "codewalk_get_architecture_health": codewalk_get_architecture_health,
-    "call_chain": call_chain,
+    "codewalk_call_chain": codewalk_call_chain,
 }
 
 if __name__ == "__main__":
