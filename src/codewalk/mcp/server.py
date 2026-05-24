@@ -1,10 +1,10 @@
-"""Codewalk MCP server — 18 tools for codebase onboarding, search, review, and voice.
+"""Codewalk MCP server — 20 tools for codebase onboarding, search, review, and voice.
 
 Tool categories:
-  SETUP  (1, 9-11): Analyze repo, scan/filter files, index embeddings.
-  QUERY  (2-8):     Search code, explain functions, blast radius, reading order, execution flow.
-  MAINT  (12-16):   Incremental reindex, refresh analysis, review diff/file, load guidelines.
-  VOICE  (17-18):   Mic record+transcribe (Copilot routes), TTS speak.
+  SETUP  (1, 9-11):    Analyze repo, scan/filter files, index embeddings.
+  QUERY  (2-8, 19-20): Search code, explain functions, blast radius, reading order, execution flow, architecture health.
+  MAINT  (12-16):      Incremental reindex, refresh analysis, review diff/file, load guidelines.
+  VOICE  (17-18):      Mic record+transcribe (Copilot routes), TTS speak.
 """
 
 import inspect
@@ -17,7 +17,6 @@ import asyncio
 from mcp.server.fastmcp import FastMCP
 
 from src.codewalk.ingestion.scanner import scan_directory
-from src.codewalk.ingestion.tech_detect import detect_tech_stack
 from src.codewalk.log import log as _log
 
 logger = logging.getLogger("codewalk")
@@ -27,18 +26,20 @@ from src.codewalk.analysis.module_detector import detect_modules
 from src.codewalk.generation.diagram_generator import generate_module_diagram
 from src.codewalk.embeddings.vector_store import VectorStore
 from src.codewalk.rag.chain import format_context
+from src.codewalk.rag.retrieval_quality import filter_by_distance
 from src.codewalk.pipeline import full_index_parallel, index_from_paths_parallel, incremental_reindex
 from src.codewalk.ingestion.file_filter import should_skip
 from src.codewalk.config import settings
-from src.codewalk.analysis.blast_radius import (
-    get_blast_radius,
-    calculate_full_blast_map,
-)
-from src.codewalk.analysis.reading_order import generate_reading_order_raw
 from src.codewalk.review.guidelines_loader import get_guidelines_store
 from src.codewalk.voice.stt import record_audio, transcribe
 from src.codewalk.voice.tts import speak, stop_speaking
 from src.codewalk.api import state
+from src.codewalk.query import (
+    resolve_module_name, module_not_found_error, short_name,
+    resolve_module_with_fallback, compute_file_risks,
+    explain_function_text, overview_text, blast_radius_map_text,
+    reading_order_text, execution_flow_text,
+)
 
 
 # ─── Create the MCP server ──────────────────────────────────────────
@@ -85,6 +86,10 @@ mcp = FastMCP(
         "- codewalk_review_diff — review git diff for bugs, security, style\n"
         "- codewalk_review_file(path) — review one file against codebase patterns\n"
         "- codewalk_load_guidelines(path) — load team coding standards for reviews\n"
+        "\n"
+        "## ARCHITECTURE ANALYSIS\n"
+        "- codewalk_get_architecture_health — bottlenecks, key files, circular dependencies, refactoring priorities\n"
+        "- call_chain(source, target) — trace the shortest import path between two files\n"
         "\n"
         "## VOICE COMPANION\n"
         "- codewalk_voice_ask — record mic + transcribe, then YOU:\n"
@@ -143,16 +148,24 @@ def codewalk_analyze_codebase() -> str:
     # Check if there's an existing index for search.
     state._store = VectorStore(persist_dir=state.chroma_path())
     state._store.create_collection(state.get_collection_name())
-    existing = state._store.collection.count()
+    existing = state._store.chunk_count()
 
     modules = list(state._modules_result["modules"].keys())
     _log(f"[codewalk_analyze_codebase] Modules: {modules} | Index: {existing} chunks")
     if existing > 0:
+        # ── Embed guidelines if REVIEW_GUIDELINES_PATH is set ──
+        guidelines_msg = ""
+        gl_store = get_guidelines_store()
+        if gl_store:
+            gl_count = gl_store.chunk_count()
+            guidelines_msg = f"Guidelines: {gl_count} chunks embedded\n"
+
         return (
             f"Codebase analyzed successfully.\n"
             f"Files found: {len(state._files)}\n"
             f"Modules found: {', '.join(modules)}\n"
-            f"Search index: INDEX READY — {existing} chunks available.\n\n"
+            f"Search index: INDEX READY — {existing} chunks available.\n"
+            f"{guidelines_msg}\n"
             f"✅ Index already exists. SKIP scan/filter/index steps.\n"
             f"Ready to answer questions — use query tools directly."
         )
@@ -184,12 +197,21 @@ def codewalk_analyze_codebase() -> str:
 
     _log(f"[codewalk_analyze_codebase] Indexed {result['chunks_embedded']} chunks in {result.get('total_time', 'N/A')}")
 
+    # ── Embed guidelines if REVIEW_GUIDELINES_PATH is set ──
+    guidelines_msg = ""
+    gl_store = get_guidelines_store()
+    if gl_store:
+        gl_count = gl_store.chunk_count()
+        guidelines_msg = f"Guidelines: {gl_count} chunks embedded\n"
+        _log(f"[codewalk_analyze_codebase] Guidelines embedded: {gl_count} chunks")
+
     return (
         f"Codebase analyzed and indexed successfully.\n"
         f"Files found: {len(state._files)}\n"
         f"Files indexed: {result['files_scanned']}\n"
         f"Chunks embedded: {result['chunks_embedded']}\n"
         f"Time: {result.get('total_time', 'N/A')}\n"
+        f"{guidelines_msg}"
         f"Modules found: {', '.join(modules)}\n\n"
         f"✅ Ready to answer questions — use query tools directly."
     )
@@ -221,10 +243,11 @@ def codewalk_search_codebase(query: str) -> str:
 
     _log(f"[codewalk_search_codebase] Query: {query}")
     results = state._store.search(query, n_results=5)
+    filtered, confidence = filter_by_distance(results)
     _log(f"[codewalk_search_codebase] Found {len(results)} results")
-    if not results:
+    if not filtered:
         return "No relevant code found for that query."
-    return format_context(results)
+    return format_context(filtered)
 
 # ─── TOOL 3 [QUERY · user+AI]: codewalk_get_module_info ──────────────
 @mcp.tool()
@@ -251,49 +274,12 @@ def codewalk_get_module_info(module_name: str) -> str:
     modules = state._modules_result["modules"]
     module_graph = state._modules_result.get("module_graph", {})
 
-    # Case-insensitive lookup
-    actual_name = None
-    for name in modules:
-        if name.lower() == module_name.lower():
-            actual_name = name
-            break
-
-    # Fallback: search for sub-folder inside modules (e.g. "users" → "features/users")
-    matched_as_feature = False
-    if actual_name is None:
-        source_root = state._modules_result.get("source_root", "")
-        for mod_name, mod_info in modules.items():
-            # Look through files in each module for a sub-folder matching the query
-            prefix = f"{source_root}/{mod_name}/{module_name.lower()}/" if source_root else f"{mod_name}/{module_name.lower()}/"
-            matching_files = [f for f in mod_info["files"] if f.lower().startswith(prefix.lower())]
-            if matching_files:
-                # Found as a sub-folder — synthesize a feature-level view
-                actual_name = mod_name
-                matched_as_feature = True
-                # Override info with just this sub-folder's files
-                info_override = {
-                    "files": matching_files,
-                    "file_count": len(matching_files),
-                    "languages": {},
-                }
-                from collections import Counter
-                lang_counter = Counter()
-                matching_set = set(matching_files)
-                for f in state._files or []:
-                    if f["file_path"] in matching_set:
-                        lang_counter[f["language"]] += 1
-                info_override["languages"] = dict(lang_counter)
-                break
+    actual_name, info, matched_as_feature = resolve_module_with_fallback(
+        module_name, state._modules_result, files=state._files
+    )
 
     if actual_name is None:
-        available = ", ".join(sorted(modules.keys()))
-        return f"Module '{module_name}' not found. Available modules: {available}\n\nTip: Try the parent module name (e.g. 'features' instead of a specific feature)."
-
-    # Use overridden info if matched as a feature sub-folder
-    if matched_as_feature:
-        info = info_override
-    else:
-        info = modules[actual_name]
+        return module_not_found_error(module_name, modules) + "\n\nTip: Try the parent module name (e.g. 'features' instead of a specific feature)."
 
     depends_on = module_graph.get(actual_name, [])
     depended_by = [n for n, deps in module_graph.items() if actual_name in deps]
@@ -309,7 +295,7 @@ def codewalk_get_module_info(module_name: str) -> str:
     file_lines = []
     display_files = file_list[:50]
     for file_path in display_files:
-        name = file_path.split("/")[-1]
+        name = short_name(file_path)
         symbols = symbols_by_file.get(file_path, [])
         if symbols:
             sym_parts = []
@@ -378,38 +364,7 @@ def codewalk_explain_function(function_name: str) -> str:
         return "Error: No codebase indexed yet. Call codewalk_analyze_codebase first."
 
     _log(f"[codewalk_explain_function] Looking up: {function_name}")
-    results = state._store.search(function_name, n_results=10)
-    matches = [
-        r for r in results
-        if function_name.lower() in r["metadata"].get("symbol_name", "").lower()
-    ]
-
-    to_show = matches[:3] if matches else results[:3] if results else []
-    if not to_show:
-        return f"Function '{function_name}' not found in the codebase."
-
-    context = format_context(to_show)
-
-
-
-    # Blast radius (uses cached graph)
-    file_path = to_show[0]["metadata"].get("file_path", "")
-    if file_path and state._deps:
-        radius = get_blast_radius(file_path, state._deps["graph"])
-        risk = radius["risk_level"].upper()
-        affected = radius["affected_files"]
-        direct_names = [f.split("/")[-1] for f in radius["direct"]]
-        transitive_names = [f.split("/")[-1] for f in radius["transitive"]]
-        breaks = f"Direct: {', '.join(direct_names)}" if direct_names else "No direct dependents"
-        if transitive_names:
-            breaks += f" | Transitive: {', '.join(transitive_names)}"
-        context += (
-            f"\n\n### Blast Radius\n"
-            f"**Risk:** {risk} — {affected} files affected\n"
-            f"**{breaks}**"
-        )
-
-    return context
+    return explain_function_text(state._store, function_name, state._deps, state._graph_runtime, state._graph_store)
 
 # ─── TOOL 5 [QUERY · user+AI]: codewalk_get_overview ─────────────────
 @mcp.tool()
@@ -427,73 +382,7 @@ def codewalk_get_overview() -> str:
         return "Error: No codebase indexed yet. Call codewalk_analyze_codebase first."
 
     _log("[codewalk_get_overview] Generating overview...")
-    tech = detect_tech_stack(state._repo_path)
-    modules = list(state._modules_result["modules"].keys())
-
-    # TEACH: Blast radius — send top 30 so Copilot has enough to separate
-    # foundational files from business logic files
-    blast_map = calculate_full_blast_map(state._deps["graph"])
-    top_risky = blast_map["blast_map"][:30]
-
-    risky_lines = []
-    for item in top_risky:
-        file_path = item["file"]
-        name = file_path.split("/")[-1]
-        risk = item["risk_level"].upper()
-        affected = item["affected_files"]
-        radius = get_blast_radius(file_path, state._deps["graph"])
-        direct = [f.split("/")[-1] for f in radius["direct"]]
-        risky_lines.append(
-            f"  [{risk}] {name} — {affected} affected | breaks: {', '.join(direct)}"
-        )
-
-    risky_section = "\n".join(risky_lines) if risky_lines else "  No high-risk files"
-
-    # TEACH: Module info — same as before, no changes
-    modules_info = state._modules_result["modules"]
-    module_lines = []
-    for name, info in sorted(modules_info.items()):
-        lang_str = ", ".join(f"{l}({c})" for l, c in sorted(info["languages"].items()))
-        module_lines.append(f"  - {name} ({info['file_count']} files): {lang_str}")
-    modules_section = "\n".join(module_lines)
-
-    module_graph = state._modules_result.get("module_graph", {})
-
-    # Entry modules: modules that NO other module depends on
-    depended_on = set()
-    for dep_list in module_graph.values():
-        depended_on.update(dep_list)
-    entry_modules = sorted(m for m in module_graph if m not in depended_on)
-
-    # Core modules: modules depended on by the MOST other modules
-    from collections import Counter
-    dep_count = Counter()
-    for dep_list in module_graph.values():
-        dep_count.update(dep_list)
-    core_modules = [name for name, _ in dep_count.most_common(3)] if dep_count else []
-
-    # Dependency flow lines: "module_a → depends on: module_b, module_c"
-    flow_lines = []
-    for mod_name in sorted(module_graph.keys()):
-        deps = module_graph.get(mod_name, [])
-        if deps:
-            flow_lines.append(f"  {mod_name} → {', '.join(deps)}")
-        else:
-            flow_lines.append(f"  {mod_name} → (standalone, no dependencies)")
-    flow_section = "\n".join(flow_lines)
-
-    return (
-        f"## Project Overview\n\n"
-        f"**Tech Stack:** {', '.join(tech) if tech else 'Not detected'}\n"
-        f"**Total Files:** {state._modules_result['stats']['total_files']}\n"
-        f"**Total Modules:** {state._modules_result['stats']['total_modules']}\n\n"
-        f"### Modules\n{modules_section}\n\n"
-        f"### Module Dependency Flow\n"
-        f"**Entry points** (top-level, nothing depends on these): {', '.join(entry_modules) or 'None'}\n"
-        f"**Core modules** (most depended on): {', '.join(core_modules) or 'None'}\n\n"
-        f"{flow_section}\n\n"
-        f"### Riskiest Files (blast radius)\n{risky_section}"
-    )
+    return overview_text(state._repo_path, state._modules_result, state._deps, state._graph_runtime)
 
 # ─── TOOL 6 [QUERY · user+AI]: codewalk_get_blast_radius_map ─────────
 @mcp.tool()
@@ -512,77 +401,7 @@ def codewalk_get_blast_radius_map(target: str = "") -> str:
         return "Error: No codebase indexed yet. Call codewalk_analyze_codebase first."
 
     _log(f"[codewalk_get_blast_radius_map] Target: {target or 'top 30'}")
-    graph = state._deps["graph"]
-
-    # Determine which files to analyze based on target
-    if target:
-        # Try module match first
-        modules = state._modules_result.get("modules", {})
-        actual_module = None
-        for name in modules:
-            if name.lower() == target.lower():
-                actual_module = name
-                break
-
-        if actual_module:
-            target_files = sorted(modules[actual_module]["files"])
-            scope = f"module '{actual_module}'"
-        else:
-            # Try file name match
-            matched = [f for f in graph.keys() if f.split("/")[-1] == target or f.endswith(target)]
-            if matched:
-                target_files = sorted(matched)
-                scope = f"file '{target}'"
-            else:
-                available_modules = ", ".join(sorted(modules.keys()))
-                return (
-                    f"'{target}' not found as a module or file.\n"
-                    f"Available modules: {available_modules}\n"
-                    f"Tip: use the exact file name like 'scanner.py' or module name like 'ingestion'."
-                )
-    else:
-        target_files = sorted(graph.keys())
-        scope = "top 30 riskiest"
-
-    risk_order = {"critical": 4, "high": 3, "moderate": 2, "low": 1, "none": 0}
-    max_risk = "low"
-    results = []
-
-    for file_path in target_files:
-        radius = get_blast_radius(file_path, graph)
-        if risk_order.get(radius["risk_level"], 0) > risk_order.get(max_risk, 0):
-            max_risk = radius["risk_level"]
-        results.append((file_path, radius))
-
-    results.sort(key=lambda x: x[1]["affected_files"], reverse=True)
-
-    # If no target specified, show top 30 non-SAFE files (enough for Copilot to
-    # separate foundational files from business logic)
-    if not target:
-        results = [r for r in results if r[1]["affected_files"] > 0][:30]
-
-    lines = []
-    for file_path, radius in results:
-        risk = radius["risk_level"].upper()
-        affected = radius["affected_files"]
-        short_path = "/".join(file_path.split("/")[-2:])
-        if affected > 0:
-            direct = [f.split("/")[-1] for f in radius["direct"]]
-            transitive = [f.split("/")[-1] for f in radius["transitive"]]
-            breaks = f"breaks: {', '.join(direct)}"
-            if transitive:
-                breaks += f" → then: {', '.join(transitive)}"
-            lines.append(f"  [{risk}] {short_path} — {affected} affected | {breaks}")
-        else:
-            lines.append(f"  [SAFE] {short_path} — no dependents")
-
-    header = (
-        f"## Blast Radius — {scope}\n"
-        f"**Overall risk:** {max_risk.upper()}\n"
-        f"**Files shown:** {len(lines)}\n"
-    )
-
-    return header + "\n" + "\n".join(lines)
+    return blast_radius_map_text(state._modules_result, state._deps, target, state._graph_runtime)
 
 # ─── TOOL 7 [QUERY · user+AI]: codewalk_get_reading_order ────────────
 @mcp.tool()
@@ -602,39 +421,7 @@ def codewalk_get_reading_order(module_name: str = "") -> str:
         return "Error: No codebase indexed yet."
 
     _log(f"[codewalk_get_reading_order] module={module_name or 'all'}")
-    order = generate_reading_order_raw(state._files, state._deps)
-    graph = state._deps["graph"]
-
-    all_items = order["order"]
-
-    # Filter by module if specified
-    scope = "entire repo"
-    if module_name:
-        modules = state._modules_result.get("modules", {})
-        actual_name = None
-        for name in modules:
-            if name.lower() == module_name.lower():
-                actual_name = name
-                break
-        if actual_name is None:
-            available = ", ".join(sorted(modules.keys()))
-            return f"Module '{module_name}' not found. Available: {available}"
-        module_files = set(modules[actual_name]["files"])
-        all_items = [item for item in all_items if item["file"] in module_files]
-        scope = f"module '{actual_name}'"
-
-    lines = []
-    for item in all_items:
-        radius = get_blast_radius(item["file"], graph)
-        risk = radius["risk_level"].upper()
-        pos = item["position"]
-        why = item["why"]
-        affected = radius["affected_files"]
-        lines.append(f"{pos}. [{risk}] {item['file']} ({affected} affected) — {why}")
-
-    header = f"## Reading Order — {scope} ({len(all_items)} files)"
-
-    return header + "\n" + "\n".join(lines)
+    return reading_order_text(state._files, state._deps, state._modules_result, module_name, state._graph_runtime)
 
 
 # ─── TOOL 8 [QUERY · user+AI]: codewalk_get_execution_flow ───────────
@@ -656,80 +443,7 @@ def codewalk_get_execution_flow(module_name: str = "") -> str:
         return "Error: No codebase indexed yet."
 
     _log(f"[codewalk_get_execution_flow] module={module_name or 'repo-level'}")
-
-    module_graph = state._modules_result.get("module_graph", {})
-    modules = state._modules_result.get("modules", {})
-
-    if not module_name:
-        # Module-to-module flow — structured data for Copilot to narrate
-        depended_on = set()
-        for deps in module_graph.values():
-            depended_on.update(deps)
-        entry_modules = sorted(m for m in module_graph if m not in depended_on)
-
-        lines = []
-        for mod_name in sorted(module_graph.keys()):
-            deps = module_graph.get(mod_name, [])
-            file_count = modules[mod_name]["file_count"] if mod_name in modules else "?"
-            if deps:
-                lines.append(f"  {mod_name} ({file_count} files) → depends on: {', '.join(deps)}")
-            else:
-                lines.append(f"  {mod_name} ({file_count} files) → (standalone)")
-
-        return (
-            f"## Execution Flow — Module Level\n"
-            f"**Entry modules** (nothing depends on these): {', '.join(entry_modules) or 'None'}\n"
-            f"**Total modules:** {len(module_graph)}\n\n"
-            f"### Module Dependencies\n"
-            + "\n".join(lines)
-        )
-    else:
-        # File-to-file flow within a module
-        actual_name = None
-        for name in modules:
-            if name.lower() == module_name.lower():
-                actual_name = name
-                break
-        if actual_name is None:
-            available = ", ".join(sorted(modules.keys()))
-            return f"Module '{module_name}' not found. Available: {available}"
-
-        graph = state._deps["graph"]
-        internal_files = set(graph.keys())
-        module_file_set = set(modules[actual_name]["files"])
-        target_files = sorted(f for f in graph.keys() if f in module_file_set)
-
-        imported_in_module = set()
-        for fp in target_files:
-            for dep in graph.get(fp, []):
-                if dep in module_file_set:
-                    imported_in_module.add(dep)
-        entry_files = [f for f in target_files if f not in imported_in_module]
-
-        dep_lines = []
-        for file_path in target_files:
-            internal_deps = [d for d in graph.get(file_path, []) if d in internal_files]
-            in_module = [d for d in internal_deps if d in module_file_set]
-            cross_module = [d for d in internal_deps if d not in module_file_set]
-            parts = []
-            if in_module:
-                parts.append(f"imports: {', '.join(d.split('/')[-1] for d in in_module)}")
-            if cross_module:
-                parts.append(f"external: {', '.join(d.split('/')[-1] for d in cross_module)}")
-            if parts:
-                dep_lines.append(f"  {file_path.split('/')[-1]} → {' | '.join(parts)}")
-            else:
-                dep_lines.append(f"  {file_path.split('/')[-1]} → (no internal imports)")
-
-        entry_names = [f.split("/")[-1] for f in entry_files]
-
-        return (
-            f"## Execution Flow — {actual_name} (file level)\n"
-            f"**Entry files** (nothing in this module imports these): {', '.join(entry_names)}\n"
-            f"**Files:** {len(target_files)}\n\n"
-            f"### File Dependencies\n"
-            + "\n".join(dep_lines)
-        )
+    return execution_flow_text(state._modules_result, state._deps, module_name)
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -857,7 +571,7 @@ def codewalk_index_filtered_files() -> str:
     # Open (or create) the persistent collection WITHOUT wiping it first
     working_store = VectorStore(persist_dir=state.chroma_path())
     working_store.create_collection(state.get_collection_name())
-    existing_count = working_store.collection.count()
+    existing_count = working_store.chunk_count()
 
     if existing_count > 0:
         # ── Incremental path: existing index found ──────────────────────
@@ -939,7 +653,7 @@ def codewalk_incremental_reindex() -> str:
         state._store = VectorStore(persist_dir=state.chroma_path())
         state._store.create_collection(state.get_collection_name())
 
-    if state._store.collection.count() == 0:
+    if state._store.chunk_count() == 0:
         return "❌ No index exists. Run the full setup workflow first (scan → filter → index)."
 
     # Use previously selected paths if available, else fall back to all indexed files
@@ -1019,6 +733,7 @@ def codewalk_review_diff(
         store=state._store,
         deps=state._deps,
         repo_path=settings.repo_path,
+        graph_store=state._graph_store,
     )
 
     if ctx is None:
@@ -1157,9 +872,10 @@ def codewalk_review_file(file_path: str) -> str:
     # Codebase patterns (similar code elsewhere)
     if state._store:
         results = state._store.search(f"code in {file_path}", n_results=5)
-        if results:
+        filtered, _ = filter_by_distance(results)
+        if filtered:
             output_parts.append("## Similar patterns elsewhere in the codebase")
-            output_parts.append(format_context(results))
+            output_parts.append(format_context(filtered))
             output_parts.append("")
 
     # Guidelines
@@ -1231,7 +947,7 @@ def codewalk_load_guidelines(docs_path: str | None = None) -> str:
     if not store:
         return f"❌ No guideline files found in {path}"
     
-    count = store.collection.count()
+    count = store.chunk_count()
 
     return (
         f"✅ Loaded {count} guideline chunks from {path}\n"
@@ -1290,27 +1006,6 @@ def codewalk_load_guidelines(docs_path: str | None = None) -> str:
 #         return f"❌ osascript not found — this tool only works on macOS.\n\nRun manually:\n```\n{cmd}\n```"
 #     except subprocess.CalledProcessError as e:
 #         return f"❌ Failed to launch Terminal: {e}\n\nRun manually:\n```\n{cmd}\n```"
-
-
-# ─── Shared tool lookup map (used by voice_ask, backends.py) ──
-_TOOL_MAP = {
-    "codewalk_analyze_codebase": codewalk_analyze_codebase,
-    "codewalk_search_codebase": codewalk_search_codebase,
-    "codewalk_get_module_info": codewalk_get_module_info,
-    "codewalk_explain_function": codewalk_explain_function,
-    "codewalk_get_overview": codewalk_get_overview,
-    "codewalk_get_blast_radius_map": codewalk_get_blast_radius_map,
-    "codewalk_get_reading_order": codewalk_get_reading_order,
-    "codewalk_get_execution_flow": codewalk_get_execution_flow,
-    "codewalk_scan_files": codewalk_scan_files,
-    "codewalk_submit_filtered_files": codewalk_submit_filtered_files,
-    "codewalk_index_filtered_files": codewalk_index_filtered_files,
-    "codewalk_incremental_reindex": codewalk_incremental_reindex,
-    "codewalk_refresh_analysis": codewalk_refresh_analysis,
-    "codewalk_review_diff": codewalk_review_diff,
-    "codewalk_review_file": codewalk_review_file,
-    "codewalk_load_guidelines": codewalk_load_guidelines,
-}
 
 
 # ─── TOOL 17 [VOICE · user]: codewalk_voice_ask ──────────────────────
@@ -1403,6 +1098,150 @@ def codewalk_speak(text: str) -> str:
     except Exception as e:
         return f"❌ TTS failed: {e}"
 
+
+# ─── TOOL 19 [QUERY · user+AI]: codewalk_get_architecture_health ─────
+@mcp.tool()
+def codewalk_get_architecture_health() -> str:
+    """Architecture health report: bottlenecks, key files, circular dependencies.
+
+    Returns:
+    - Graph stats (files, import edges, DAG status)
+    - Bottleneck files (betweenness centrality — most import paths pass through these)
+    - Most important files (PageRank — transitively depended on by the most code)
+    - Circular dependencies with suggested fixes (which imports to remove)
+
+    Use when asked about code health, architecture quality, refactoring
+    priorities, circular imports, or "what should I fix first?"
+    """
+    state.ensure_initialized()
+    runtime = state.get_graph_runtime()
+
+    sections = []
+
+    # ── Graph stats ──
+    stats = runtime.get_graph_stats()
+    sections.append(
+        f"## Architecture Health Report\n\n"
+        f"**Files:** {stats['file_graph']['vertices']} | "
+        f"**Import edges:** {stats['file_graph']['edges']} | "
+        f"**DAG:** {'Yes' if stats['file_graph']['is_dag'] else 'No (has cycles)'}\n"
+        f"**Modules:** {stats['module_graph']['vertices']} | "
+        f"**Module edges:** {stats['module_graph']['edges']}"
+    )
+
+    # ── Bottleneck files (betweenness centrality) ──
+    # High betweenness = many shortest paths pass through this file.
+    # If it breaks, it disrupts the most connections.
+    centrality = runtime.centrality(top_n=10)
+    if centrality["betweenness"]:
+        between_lines = []
+        for item in centrality["betweenness"]:
+            if item["score"] > 0:
+                name = item["file"].rsplit("/", 1)[-1]
+                between_lines.append(f"  - {name} (score: {item['score']})")
+        if between_lines:
+            sections.append(
+                "### Bottleneck Files (betweenness centrality)\n"
+                "These files sit on the most import paths. Changes here ripple widely.\n"
+                + "\n".join(between_lines)
+            )
+
+    # ── Most important files (PageRank) ──
+    # High PageRank = imported by other important files (transitive).
+    if centrality["pagerank"]:
+        pagerank_lines = []
+        for item in centrality["pagerank"][:10]:
+            name = item["file"].rsplit("/", 1)[-1]
+            pagerank_lines.append(f"  - {name} (score: {item['score']})")
+        sections.append(
+            "### Most Important Files (PageRank)\n"
+            "Transitively depended on by the most code.\n"
+            + "\n".join(pagerank_lines)
+        )
+
+    # ── Circular dependencies ──
+    # Cycle groups + minimum edges to break (feedback arc set).
+    cycles = runtime.detect_cycles()
+    if cycles["has_cycles"]:
+        cycle_lines = [f"### Circular Dependencies ({len(cycles['cycle_groups'])} cycle groups)"]
+        for index, group in enumerate(cycles["cycle_groups"], 1):
+            names = [file.rsplit("/", 1)[-1] for file in group]
+            cycle_lines.append(f"  Cycle {index}: {' ↔ '.join(names)}")
+            for file in group:
+                cycle_lines.append(f"    - {file}")
+        if cycles["edges_to_break"]:
+            cycle_lines.append("\n**Suggested Fixes (minimum imports to remove):")
+            for source, target in cycles["edges_to_break"]:
+                cycle_lines.append(f"  - Remove: {source.rsplit('/', 1)[-1]} → {target.rsplit('/', 1)[-1]}")
+        sections.append("\n".join(cycle_lines))
+    else:
+        sections.append("### Circular Dependencies\nNone — clean DAG.")
+
+    return "\n\n".join(sections)
+
+# ─── TOOL 20 [QUERY · user+AI]: codewalk_call_chain ──────────────────
+@mcp.tool()
+def call_chain(source: str, target: str) -> str:
+    """Trace the import chain between two files.
+
+    Shows the shortest path of imports from source to target.
+    Useful for understanding how changes propagate through the codebase.
+
+    Args:
+        source: Source file name or path (e.g. "pipeline.py" or "src/codewalk/pipeline.py")
+        target: Target file name or path (e.g. "config.py" or "src/codewalk/config.py")
+    """
+    state.ensure_initialized()
+    runtime = state.get_graph_runtime()
+
+    chain = runtime.shortest_path(source, target)
+
+    if not chain:
+        return (
+            f"No import path found from '{source}' to '{target}'.\n"
+            f"They may be in separate parts of the codebase with no dependency connection."
+        )
+    
+    short_names = [f.rsplit("/", 1)[-1] for f in chain]
+    chain_str = " → ".join(short_names)
+
+    lines = [
+        f"## Import Chain: {short_names[0]} → {short_names[-1]}",
+        f"**Hops:** {len(chain) - 1}",
+        f"**Path:** {chain_str}",
+        "",
+        "### Full paths:",
+    ]
+
+    for i, file_path in enumerate(chain):
+        marker = "📍" if i == 0 or i == len(chain) - 1 else "  →"
+        lines.append(f"  {marker} {file_path}")
+
+    return "\n".join(lines)
+
+
+# ─── Shared tool lookup map (used by voice_ask, backends.py) ──
+# NOTE: Must be defined AFTER all tool functions.
+_TOOL_MAP = {
+    "codewalk_analyze_codebase": codewalk_analyze_codebase,
+    "codewalk_search_codebase": codewalk_search_codebase,
+    "codewalk_get_module_info": codewalk_get_module_info,
+    "codewalk_explain_function": codewalk_explain_function,
+    "codewalk_get_overview": codewalk_get_overview,
+    "codewalk_get_blast_radius_map": codewalk_get_blast_radius_map,
+    "codewalk_get_reading_order": codewalk_get_reading_order,
+    "codewalk_get_execution_flow": codewalk_get_execution_flow,
+    "codewalk_scan_files": codewalk_scan_files,
+    "codewalk_submit_filtered_files": codewalk_submit_filtered_files,
+    "codewalk_index_filtered_files": codewalk_index_filtered_files,
+    "codewalk_incremental_reindex": codewalk_incremental_reindex,
+    "codewalk_refresh_analysis": codewalk_refresh_analysis,
+    "codewalk_review_diff": codewalk_review_diff,
+    "codewalk_review_file": codewalk_review_file,
+    "codewalk_load_guidelines": codewalk_load_guidelines,
+    "codewalk_get_architecture_health": codewalk_get_architecture_health,
+    "call_chain": call_chain,
+}
 
 if __name__ == "__main__":
     mcp.run(transport="stdio")

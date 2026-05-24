@@ -31,3 +31,9 @@ SESSION_SUMMARY.md
 
 # OS
 .DS_Store
+
+blogs/
+
+.codewalk/
+
+tests/
