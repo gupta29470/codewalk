@@ -3,7 +3,6 @@ from pathlib import Path
 
 from src.codewalk.embeddings.vector_store import VectorStore
 
-GUIDELINES_COLLECTION = "review_guidelines"
 GUIDELINE_EXTENSIONS = {".md", ".txt", ".rst"}
 
 def load_guidelines(guidelines_path: str) -> list[dict]:
@@ -37,39 +36,61 @@ def get_guidelines_store() -> VectorStore | None:
 
     Returns None if REVIEW_GUIDELINES_PATH is not set.
     Embeds guidelines on first call, reuses on subsequent calls.
+
+    Guidelines are stored as "leftover" chunks (no parent-child split)
+    in a separate ChromaDB instance alongside the guidelines folder.
     """
     guidelines_path = os.getenv("REVIEW_GUIDELINES_PATH", "")
     if not guidelines_path:
         return None
     
-    store = VectorStore(collection_name=GUIDELINES_COLLECTION)
+    persist_dir = os.path.join(guidelines_path, ".codewalk_index")
+    store = VectorStore(persist_dir=persist_dir)
+    store.create_collection("guidelines")
 
-    existing = store.collection.count() if store.collection else 0
+    existing = store.chunk_count()
     if existing > 0:
         return store
     
-    # First time — embed all guidelines
+    # First time — load, chunk, embed, store
     docs = load_guidelines(guidelines_path)
     if not docs:
         return None
     
     chunks = []
-    for doc in docs:
+    for doc_idx, doc in enumerate(docs):
         text = doc["text"]
+        source = doc["metadata"]["source"]
+
         if len(text) < 2000:
-            chunks.append(doc)
+            chunks.append({
+                "text": text,
+                "file_path": source,
+                "language": "markdown",
+                "chunk_index": doc_idx,
+                "chunk_type": "leftover",
+                "parent_chunk_id": None,
+                "source": "guidelines",
+            })
         else:
-            # Split by ## headers
+            # Split by ## headers for large docs
             sections = text.split("\n## ")
-            for index, section in enumerate(sections):
-                if index > 0:
+            for sec_idx, section in enumerate(sections):
+                if sec_idx > 0:
                     section = "## " + section
                 chunks.append({
                     "text": section.strip(),
-                    "metadata": doc["metadata"].copy(),
+                    "file_path": source,
+                    "language": "markdown",
+                    "chunk_index": f"{doc_idx}_{sec_idx}",
+                    "chunk_type": "leftover",
+                    "parent_chunk_id": None,
+                    "source": "guidelines",
                 })
 
-    store.add_chunks(chunks)
+    from src.codewalk.embeddings.embedder import embed_chunks
+    embedded = embed_chunks(chunks)
+    store.add_parent_child_chunks(embedded)
     return store
 
 def search_guidelines(store: VectorStore, diff_files: list, n_results: int = 3) -> str:

@@ -90,6 +90,7 @@ class GraphStore:
             files: list[dict],
             deps: dict,
             module_results: dict,
+            embedded_chunks: list[dict] | None = None
     ):
         """Populate all tables from existing analysis data.
 
@@ -99,6 +100,7 @@ class GraphStore:
             module_results: From detect_modules() — {"modules": {...}, "module_graph": {...}}
         """
         # Clear in reverse FK order: children before parents
+        self.conn.execute("DELETE FROM chunks")
         self.conn.execute("DELETE FROM symbol_calls")
         self.conn.execute("DELETE FROM symbols")
         self.conn.execute("DELETE FROM imports")
@@ -111,6 +113,8 @@ class GraphStore:
         self._populate_symbols(files)
         self._populate_symbol_calls(files)
         self._populate_modules(module_results)
+        if embedded_chunks:
+            self._populate_chunks(embedded_chunks)
         stats = self._get_stats()
 
         logger.info(
@@ -458,6 +462,65 @@ class GraphStore:
             }
             for row in rows
         ]
+    
+    def _populate_chunks(self, embedded_chunks: list[dict]):
+        """Populate chunks table from embedded chunk data.
+
+    TEACH: Each chunk dict from the embeddings pipeline has:
+        - file_path: "src/codewalk/config.py"
+        - chunk_index: 0, 1, 2...
+        - symbol_name: "Settings" or None (for leftover code)
+        - start_line / end_line: line range in file
+        - file_hash: content hash for change detection
+
+    We map each chunk to:
+        - file_id: _stable_id(file_path) — matches files table
+        - symbol_id: looked up from symbols table by name + file
+        - embedding_id: the ChromaDB ID format "file_path::chunkN"
+        - content_hash: for incremental reindex (skip unchanged)
+    """
+        symbol_lookup = {}
+        for row in self.conn.execute(
+            "SELECT s.symbol_id, s.name, f.path "
+            "FROM symbols s JOIN files f ON s.file_id = f.file_id"
+        ).fetchall():
+            sid, name, fpath = row
+            symbol_lookup[(fpath, name)] = sid
+        
+        rows = []
+
+        for chunk in embedded_chunks:
+            file_path = chunk["file_path"]
+            chunk_index = chunk.get("chunk_index", 0)
+            symbol_name = chunk.get("symbol_name")
+
+            file_id = _stable_id(file_path)
+
+            symbol_id = None
+            if symbol_name:
+                symbol_id = symbol_lookup.get((file_path, symbol_name))
+
+            embedding_id = f"{file_path}::chunk{chunk_index}"
+
+            chunk_id = _stable_id(file_path, str(chunk_index))
+
+            rows.append((
+                chunk_id,
+                file_id,
+                symbol_id,                              # nullable — leftover chunks have no symbol
+                chunk.get("start_line"),
+                chunk.get("end_line"),
+                chunk.get("file_hash", ""),
+                embedding_id,
+            ))
+
+        if rows:
+            self.conn.executemany(
+                "INSERT OR IGNORE INTO chunks "
+                "(chunk_id, file_id, symbol_id, start_line, end_line, content_hash, embedding_id) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                rows
+            )
     
     def close(self):
         """Close the DuckDB connection."""
