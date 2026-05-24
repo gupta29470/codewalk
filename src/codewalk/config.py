@@ -16,6 +16,7 @@ class Settings(BaseSettings):
     anthropic_api_key: str = os.getenv("ANTHROPIC_API_KEY", "")
     google_api_key: str = os.getenv("GOOGLE_API_KEY", "")
     openrouter_api_key: str = os.getenv("OPENROUTER_API_KEY", "")
+    deepseek_api_key: str = os.getenv("DEEPSEEK_API_KEY", "")
 
     # Relative path for self-analysis: "src/codewalk"
     # Absolute path for external repos: "/Users/you/Development/django-app/src"
@@ -110,6 +111,16 @@ def get_llm(temperature: float = 0, **kwargs) -> BaseChatModel:
             temperature=temperature,
             api_key=settings.openrouter_api_key,
             base_url="https://openrouter.ai/api/v1",
+            **filtered,
+        )
+    elif provider == "deepseek": 
+        from langchain_openai import ChatOpenAI 
+        return ChatOpenAI(
+            model=settings.llm_model, 
+            temperature=temperature, 
+            api_key=settings.deepseek_api_key, 
+            base_url="https://api.deepseek.com",
+            extra_body={"thinking": {"type": "disabled"}},
             **filtered,
         )
 

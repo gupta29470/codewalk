@@ -31,6 +31,8 @@ Codewalk analyzes any codebase and gives you:
 - **AI chat** — ask anything about the code, powered by RAG + tool-calling agent
 - **Code review** — review git diffs for bugs, security issues, and style (context-enriched, OWASP-focused)
 - **Incremental reindex** — re-embed only changed files using content hash comparison
+- **Graph intelligence** — DuckDB + igraph: symbol-level call graph, cycle detection, centrality analysis, import chain tracing
+- **Corrective RAG** — distance-based chunk filtering + LLM answer grading + query rewriting for higher quality answers
 - **Voice interface** — talk to your codebase hands-free: mic → transcribe → Copilot routes → speak answer
 
 Four ways to use it:
@@ -70,8 +72,11 @@ Four ways to use it:
 | 🔎 **Semantic Search** | ChromaDB vector search on embedded code chunks (RAG) |
 | 🔬 **Code Review** | Multi-stage review pipeline: test coverage, blast radius, guidelines RAG, context-enriched deep analysis |
 | 🔄 **Incremental Reindex** | Content hash comparison — only re-embeds changed files, skips unchanged |
-| 🧩 **MCP Server** | 18 tools for VS Code Copilot / Claude Code / Cursor / Codex |
+| 🧩 **MCP Server** | 20 tools for VS Code Copilot / Claude Code / Cursor / Codex |
 | 🎙️ **Voice Interface** | Talk to your codebase — mic recording, local STT (faster-whisper), Copilot-driven routing (MCP) / Ollama routing (API), TTS response |
+| 🔬 **Graph Intelligence** | DuckDB persistent graph + igraph C-speed traversal: cycle detection, centrality, import chain tracing |
+| 🧬 **Corrective RAG** | Distance-based chunk filtering (free) + LLM answer grading + query rewriting for reliable answers |
+| 📦 **Parent-Child Chunking** | Full functions stored as parents, sub-chunks searched — retrieve complete context on match |
 | ⚡ **Parallel Embedding** | Producer-consumer pipeline — CPU chunking overlaps with GPU embedding |
 | 🏗️ **Multi-Provider LLM** | Ollama (local), OpenAI, Anthropic, Groq, Gemini, OpenRouter |
 | 🌐 **15+ Languages** | Python, JS, TS, Java, Go, Rust, Ruby, PHP, C#, C++, C, Dart, Kotlin, Swift, YAML |
@@ -360,7 +365,7 @@ Codewalk runs as an MCP (Model Context Protocol) server, so any AI agent that sp
    ![Start Server](assets/mcp-start-server.png)
 
 6. The server starts in the background (stdio transport)
-7. Open Copilot Chat → type **`@codewalk`** → all 18 tools are available
+7. Open Copilot Chat → type **`@codewalk`** → all 20 tools are available
 
    ![MCP tools list](assets/mcp-tools-list.png)
 
@@ -498,6 +503,8 @@ You just tell the AI to analyze — **the AI handles the rest automatically**.
 │  codewalk_get_blast_radius_map  → change risk analysis              │
 │  codewalk_get_reading_order     → optimal file reading sequence     │
 │  codewalk_get_execution_flow    → module/file dependency flow       │
+│  codewalk_get_architecture_health → bottlenecks, cycles, key files  │
+│  call_chain(source, target)     → trace import path between files   │
 └─────────────────────────────────────────────────────────────────────┘
 
 ┌─────────────────────────────────────────────────────────────────────┐
@@ -798,6 +805,42 @@ You want to ask a question by speaking instead of typing.
 
 ---
 
+#### "Is the architecture healthy?"
+
+**Tool:** `codewalk_get_architecture_health` — no parameters needed
+
+You want a health check: bottleneck files, circular dependencies, and the most important files.
+
+```
+@codewalk check the architecture health
+or
+@codewalk_get_architecture_health
+```
+
+**Returns:** Graph stats, bottleneck files (betweenness centrality), most important files (PageRank), circular dependencies with suggested fixes.
+
+**When to use:** Before a refactor, code review, or whenever you suspect architectural issues.
+
+---
+
+#### "How does file A reach file B?"
+
+**Tool:** `call_chain(source, target)` — two file names
+
+You want to trace the import chain between two files — "how does a change in config.py eventually affect server.py?"
+
+```
+@codewalk trace the import chain from config.py to server.py
+or
+@call_chain config.py server.py
+```
+
+**Returns:** Shortest import path with hop count and full file paths.
+
+**When to use:** Understanding how changes propagate, debugging import issues, or tracing dependency chains.
+
+---
+
 ### Quick Reference — What To Ask
 
 | You want to... | Just say... |
@@ -816,6 +859,8 @@ You want to ask a question by speaking instead of typing.
 | Review git diff | `@codewalk review my changes` or `@codewalk_review_diff` |
 | Review a file | `@codewalk review src/auth.py` or `@codewalk_review_file src/auth.py` |
 | Load guidelines | `@codewalk load guidelines from docs/` or `@codewalk_load_guidelines docs/` |
+| Architecture health | `@codewalk check architecture health` or `@codewalk_get_architecture_health` |
+| Trace import chain | `@codewalk trace chain from config.py to server.py` or `@call_chain config.py server.py` |
 | Ask by speaking (hands-free) | `@codewalk_voice_ask` → Copilot calls tool → `@codewalk_speak` |
 
 ---
@@ -1239,6 +1284,17 @@ curl http://localhost:8000/health
 │   (BFS reverse       (topological      (tree-sitter      │
 │    graph)             sort)              15+ langs)       │
 ├──────────────────────────────────────────────────────────┤
+│                    GRAPH LAYER                           │
+│                                                          │
+│   graph/store.py ──► graph/runtime.py                    │
+│   (DuckDB 7-table     (igraph C-speed                    │
+│    persistent          traversal: cycles,                 │
+│    graph)              centrality, paths)                 │
+│                                                          │
+│   .codewalk/graph.duckdb  ◄── files, imports, symbols,   │
+│                               symbol_calls, chunks,       │
+│                               modules, module_deps        │
+├──────────────────────────────────────────────────────────┤
 │                    REVIEW LAYER                          │
 │                                                          │
 │   diff_parser.py → test_coverage.py → reviewer.py        │
@@ -1303,6 +1359,9 @@ codewalk/
 │   │   ├── module_detector.py     #   Auto-grouping into modules
 │   │   ├── blast_radius.py        #   Change impact (BFS)
 │   │   └── reading_order.py       #   Topological sort
+│   ├── graph/                     # Graph intelligence layer
+│   │   ├── graph_store.py         #   DuckDB 7-table schema + stable hash IDs
+│   │   └── graph_runtime.py       #   igraph: cycles, centrality, shortest path
 │   ├── embeddings/                # Vectorization
 │   │   ├── chunker.py             #   Code → chunks
 │   │   ├── embedder.py            #   Chunks → vectors
@@ -1311,6 +1370,11 @@ codewalk/
 │   │   ├── graph.py               #   StateGraph + fallback parser
 │   │   ├── tools.py               #   7 tool functions
 │   │   └── prompts.py             #   System prompt
+│   ├── rag/                       # RAG pipeline
+│   │   ├── chain.py               #   ask() + ask_corrective() (corrective RAG)
+│   │   ├── retrieval_quality.py   #   Distance-based chunk filtering (free)
+│   │   ├── answer_grader.py       #   LLM answer quality grading
+│   │   └── query_rewriter.py      #   LLM query reformulation
 │   ├── review/                    # Code review pipeline
 │   │   ├── models.py              #   Issue, ReviewResult, Severity, Category
 │   │   ├── diff_parser.py         #   git diff → parsed DiffFile objects
@@ -1329,7 +1393,7 @@ codewalk/
 │   │   ├── backends.py            #   Tool execution bridge
 │   │   └── companion.py           #   Standalone voice loop
 │   └── mcp/                       # Model Context Protocol
-│       └── server.py              #   18 MCP tools (stdio)
+│       └── server.py              #   20 MCP tools (stdio)
 │
 ├── frontend/                      # Next.js 14 web UI
 │   └── src/app/
@@ -1347,7 +1411,9 @@ codewalk/
 │           └── page.tsx
 │
 ├── <target-repo>/.codewalk/
-│   └── chroma/                    # ChromaDB persistent storage (per repo)
+│   ├── chroma/                    # ChromaDB persistent storage (per repo)
+│   ├── graph.duckdb               # DuckDB graph database (relationships)
+│   └── meta.json                  # Version tracking + index metadata
 │
 ├── requirements.txt               # Python dependencies
 ├── .env                           # Configuration (gitignored)
@@ -1407,7 +1473,7 @@ This removes all embedded chunks and collections. Next time you run `codewalk_an
 
 ### Adding `.codewalk/` to `.gitignore`
 
-Codewalk stores its ChromaDB index inside each target repo at `.codewalk/chroma/`. This directory should **not** be committed to version control.
+Codewalk stores its index data inside each target repo at `.codewalk/` (ChromaDB embeddings, DuckDB graph, version metadata). This directory should **not** be committed to version control.
 
 Add this to each target repo's `.gitignore`:
 
@@ -1427,6 +1493,8 @@ Add this to each target repo's `.gitignore`:
 | **Backend** | Python 3.10+, FastAPI, Uvicorn |
 | **Agent** | LangGraph, LangChain |
 | **Vector DB** | ChromaDB (persistent, per-repo at `.codewalk/chroma/`) |
+| **Graph DB** | DuckDB (persistent, per-repo at `.codewalk/graph.duckdb`) |
+| **Graph Runtime** | igraph (C-speed traversal, in-memory from DuckDB) |
 | **Voice STT** | faster-whisper (local, small model, int8) |
 | **Voice TTS** | edge-tts (free, en-US-AriaNeural) |
 | **Voice Router** | Ollama qwen2.5:1.5b  (local, ~300MB) |

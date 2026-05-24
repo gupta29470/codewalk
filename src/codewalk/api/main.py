@@ -30,9 +30,9 @@ from src.codewalk.agent.graph import create_agent
 from src.codewalk.analysis.reading_order import generate_reading_order
 from src.codewalk.generation.flow_generator import generate_execution_flow
 from src.codewalk.config import settings
-from src.codewalk.analysis.blast_radius import (
-    get_blast_radius,
-    calculate_full_blast_map,
+from src.codewalk.analysis.blast_radius import calculate_full_blast_map
+from src.codewalk.query import (
+    compute_file_risks, resolve_module_with_fallback, short_name,
 )
 from src.codewalk.voice.stt import transcribe_bytes
 from src.codewalk.voice.tts import synthesize
@@ -88,7 +88,7 @@ async def analyze(request: AnalyzeRequest):
         persist_dir = f"{request.repo_path.rstrip('/')}/.codewalk/chroma"
         store = VectorStore(persist_dir=persist_dir)
         store.create_collection(request.collection_name)
-        existing_count = store.collection.count()
+        existing_count = store.chunk_count()
 
         # ── Decide whether to index ──────────────────────────────
         if request.index_mode == "full" or existing_count == 0:
@@ -115,7 +115,14 @@ async def analyze(request: AnalyzeRequest):
 
         # ── Save state (including files/deps cache) ─────────────
         state.initialize(store, agent, modules_result, index_result,
-                         files=files, deps=deps, repo_path=request.repo_path)
+                         files=files, deps=deps, repo_path=request.repo_path,
+                         embedded_chunks=index_result.get("embedded_chunks"))
+
+        # ── Embed guidelines if REVIEW_GUIDELINES_PATH is set ──
+        from src.codewalk.review.guidelines_loader import get_guidelines_store
+        gl_store = get_guidelines_store()
+        if gl_store:
+            _log(f"[api] Guidelines embedded: {gl_store.chunk_count()} chunks")
 
         return AnalyzeResponse(
             status="complete",
@@ -143,7 +150,7 @@ async def analyze_stream(request: AnalyzeRequest):
             persist_dir = f"{request.repo_path.rstrip('/')}/.codewalk/chroma"
             store = VectorStore(persist_dir=persist_dir)
             store.create_collection(request.collection_name)
-            existing_count = store.collection.count()
+            existing_count = store.chunk_count()
 
             # Step 2: Indexing
             if request.index_mode == "full" or existing_count == 0:
@@ -169,7 +176,7 @@ async def analyze_stream(request: AnalyzeRequest):
 
                 yield f"data: {json.dumps({'step': 'store', 'message': 'Storing in vector database...'})}\n\n"
                 store.clear_collection()
-                store.add_chunks(embedded)
+                store.add_parent_child_chunks(embedded)
                 yield f"data: {json.dumps({'step': 'store', 'message': f'Stored {len(embedded)} chunks in ChromaDB'})}\n\n"
 
                 index_result = {
@@ -210,7 +217,15 @@ async def analyze_stream(request: AnalyzeRequest):
 
             # Step 5: Save state (including files/deps cache)
             state.initialize(store, agent, modules_result, index_result,
-                             files=files, deps=deps, repo_path=request.repo_path)
+                             files=files, deps=deps, repo_path=request.repo_path,
+                             embedded_chunks=index_result.get("embedded_chunks"))
+
+            # Step 6: Embed guidelines if REVIEW_GUIDELINES_PATH is set
+            from src.codewalk.review.guidelines_loader import get_guidelines_store
+            gl_store = get_guidelines_store()
+            if gl_store:
+                gl_count = gl_store.chunk_count()
+                yield f"data: {json.dumps({'step': 'guidelines', 'message': f'Embedded {gl_count} guideline chunks'})}\n\n"
 
             # Final event — includes full result
             yield f"data: {json.dumps({'step': 'done', 'message': 'Analysis complete!', 'result': {'status': 'complete', 'repo_path': request.repo_path, 'files_scanned': index_result.get('files_scanned', 0), 'chunks_created': index_result.get('chunks_created', 0), 'modules': list(modules_result['modules'].keys())}})}\n\n"
@@ -267,15 +282,10 @@ async def overview():
         overview_text = generate_overview(tech, modules_result, diagram)
 
         deps = state.get_deps()
-        blast_map = calculate_full_blast_map(deps["graph"])
-        top_risky = []
-        for item in blast_map["blast_map"][:30]:
-            radius = get_blast_radius(item["file"], deps["graph"])
-            top_risky.append({
-                **item,
-                "direct": [f.split("/")[-1] for f in radius["direct"]],
-                "transitive": [f.split("/")[-1] for f in radius["transitive"]],
-            })
+        runtime = state._graph_runtime or deps["graph"]
+        blast_map = calculate_full_blast_map(runtime)
+        top_files = [item["file"] for item in blast_map["blast_map"][:30]]
+        top_risky, _ = compute_file_risks(top_files, runtime)
 
         return OverviewResponse(
             tech_stack=tech,
@@ -302,36 +312,9 @@ async def get_module(module_name: str):
         modules = module_result["modules"]
         module_graph = module_result["module_graph"]
 
-        # Case-insensitive lookup
-        actual_name = None
-        for name in modules:
-            if name.lower() == module_name.lower():
-                actual_name = name
-                break
-        
-        # Fallback: search for sub-folder inside modules (e.g. "users" → features/users)
-        matched_as_feature = False
-        if not actual_name:
-            source_root = module_result.get("source_root", "")
-            for mod_name, mod_info in modules.items():
-                prefix = f"{source_root}/{mod_name}/{module_name.lower()}/" if source_root else f"{mod_name}/{module_name.lower()}/"
-                matching_files = [f for f in mod_info["files"] if f.lower().startswith(prefix.lower())]
-                if matching_files:
-                    actual_name = mod_name
-                    matched_as_feature = True
-                    from collections import Counter
-                    lang_counter = Counter()
-                    all_files = state.get_files()
-                    matching_set = set(matching_files)
-                    for f in all_files:
-                        if f["file_path"] in matching_set:
-                            lang_counter[f["language"]] += 1
-                    info = {
-                        "files": matching_files,
-                        "file_count": len(matching_files),
-                        "languages": dict(lang_counter),
-                    }
-                    break
+        actual_name, info, matched_as_feature = resolve_module_with_fallback(
+            module_name, module_result, files=state.get_files()
+        )
 
         if not actual_name:
             available = ", ".join(sorted(modules.keys()))
@@ -339,9 +322,7 @@ async def get_module(module_name: str):
                 status_code=404,
                 detail=f"Module '{module_name}' not found. Available: {available}",
             )
-        
-        if not matched_as_feature:
-            info = modules[actual_name]
+
         depends_on = module_graph.get(actual_name, [])
         depended_by = [
             other for other, deps in module_graph.items()
@@ -349,23 +330,8 @@ async def get_module(module_name: str):
         ]
 
         deps = state.get_deps()
-        graph = deps["graph"]
-
-        file_risks = []
-        risk_order = {"critical": 4, "high": 3, "moderate": 2, "low": 1, "none": 0}
-        max_risk = "low"
-
-        for file_path in sorted(info["files"]):
-            radius = get_blast_radius(file_path, graph)
-            file_risks.append({
-                "file": file_path,
-                "affected_files": radius["affected_files"],
-                "risk_level": radius["risk_level"],
-                "direct": [f.split("/")[-1] for f in radius["direct"]],
-                "transitive": [f.split("/")[-1] for f in radius["transitive"]],
-            })
-            if risk_order.get(radius["risk_level"], 0) > risk_order.get(max_risk, 0):
-                max_risk = radius["risk_level"]
+        runtime = state._graph_runtime or deps["graph"]
+        file_risks, max_risk = compute_file_risks(sorted(info["files"]), runtime)
 
         return ModuleResponse(
             name=f"{module_name} (inside '{actual_name}')" if matched_as_feature else actual_name,
@@ -393,19 +359,13 @@ async def get_blast_radius_for_module(module_name: str = ""):
     try:
         state.ensure_initialized()
         modules_result = state.get_modules_result()
-        analyze_result = state.get_analyze_result()
-        repo_path = analyze_result.get("repo_path", settings.repo_path)
         deps = state.get_deps()
-        graph = deps["graph"]
+        runtime = state._graph_runtime or deps["graph"]
 
         # Determine scope
         if module_name:
             modules = modules_result["modules"]
-            actual_name = None
-            for name in modules:
-                if name.lower() == module_name.lower():
-                    actual_name = name
-                    break
+            actual_name, _, _ = resolve_module_with_fallback(module_name, modules_result)
             if not actual_name:
                 available = ", ".join(sorted(modules.keys()))
                 raise HTTPException(
@@ -415,26 +375,10 @@ async def get_blast_radius_for_module(module_name: str = ""):
             target_files = sorted(modules[actual_name]["files"])
             scope = actual_name
         else:
-            target_files = sorted(graph.keys())
+            target_files = sorted(deps["graph"].keys())
             scope = "all"
 
-        risk_order = {"critical": 4, "high": 3, "moderate": 2, "low": 1, "none": 0}
-        max_risk = "low"
-        file_results = []
-
-        for file_path in target_files:
-            radius = get_blast_radius(file_path, graph)
-            file_results.append({
-                "file": file_path,
-                "risk_level": radius["risk_level"],
-                "affected_files": radius["affected_files"],
-                "direct": [f.split("/")[-1] for f in radius["direct"]],
-                "transitive": [f.split("/")[-1] for f in radius["transitive"]],
-            })
-            if risk_order.get(radius["risk_level"], 0) > risk_order.get(max_risk, 0):
-                max_risk = radius["risk_level"]
-
-        file_results.sort(key=lambda x: x["affected_files"], reverse=True)
+        file_results, max_risk = compute_file_risks(target_files, runtime)
 
         return BlastRadiusResponse(
             module=scope,
@@ -470,18 +414,22 @@ def get_reading_order():
     """Get the recommended reading order for the codebase."""
     try:
        state.ensure_initialized()
-       analyze_result = state.get_analyze_result()
-       repo_path = analyze_result.get("repo_path", settings.repo_path)
        files = state.get_files()
        deps = state.get_deps()
-       order = generate_reading_order(files, deps)
-       graph = deps["graph"]
+       runtime = state._graph_runtime or deps["graph"]
+       order = generate_reading_order(files, deps, graph_runtime=runtime)
+       order_files = [item["file"] for item in order["order"]]
+       risks, _ = compute_file_risks(order_files, runtime)
+       risks_by_file = {r["file"]: r for r in risks}
        for item in order["order"]:
-           radius = get_blast_radius(item["file"], graph)
-           item["risk_level"] = radius["risk_level"]
-           item["affected_files"] = radius["affected_files"]
-           item["direct"] = [f.split("/")[-1] for f in radius["direct"]]
-           item["transitive"] = [f.split("/")[-1] for f in radius["transitive"]]
+           risk = risks_by_file.get(item["file"], {})
+           item["risk_level"] = risk.get("risk_level", "none")
+           item["affected_files"] = risk.get("affected_files", 0)
+           item["direct"] = risk.get("direct", [])
+           item["transitive"] = risk.get("transitive", [])
+           # Map backend fields to frontend expectations
+           item["priority"] = item.get("relevance", "optional")
+           item["reason"] = item.get("why", "")
            
        return order
     except RuntimeError as e:
@@ -499,7 +447,8 @@ def get_execution_flow():
         repo_path = analyze_result.get("repo_path", settings.repo_path)
         files = state.get_files()
         deps = state.get_deps()
-        order = generate_reading_order(files, deps)
+        runtime = state._graph_runtime or deps["graph"]
+        order = generate_reading_order(files, deps, graph_runtime=runtime)
         flow = generate_execution_flow(order, deps)
         return {"flow": flow}
     except RuntimeError as e:
@@ -517,19 +466,12 @@ async def refresh_analysis():
     """
     try:
         state.ensure_initialized()
-        analyze_result = state.get_analyze_result()
-        repo_path = analyze_result.get("repo_path", settings.repo_path)
-
-        files = scan_directory(repo_path)
-        deps = build_dependency_graph(files)
-        modules_result = detect_modules(files, deps)
-
-        state.refresh(files, deps, modules_result)
+        state.rebuild_analysis_cache()
 
         return {
             "status": "refreshed",
-            "files": len(files),
-            "modules": list(modules_result["modules"].keys()),
+            "files": len(state._files),
+            "modules": list(state._modules_result["modules"].keys()),
         }
     except RuntimeError as e:
         raise HTTPException(status_code=400, detail=str(e))
@@ -551,11 +493,8 @@ async def incremental_reindex_endpoint():
 
         result = incremental_reindex(indexed_files, repo_path, collection_name, persist_dir=persist_dir)
 
-        # Refresh analysis cache after reindex
-        files = scan_directory(repo_path)
-        deps = build_dependency_graph(files)
-        modules_result = detect_modules(files, deps)
-        state.refresh(files, deps, modules_result)
+        # Refresh analysis cache (includes graph rebuild)
+        state.rebuild_analysis_cache()
 
         return result
     except RuntimeError as e:
@@ -572,6 +511,8 @@ async def review_endpoint(request: ReviewRequest):
     try:
         from src.codewalk.review.reviewer import review_diff
 
+        state.ensure_initialized()
+
         store = None
         deps = None
         try:
@@ -586,6 +527,8 @@ async def review_endpoint(request: ReviewRequest):
             use_llm=True,
             store=store,
             deps=deps,
+            graph_store=state.get_graph_store(),
+            repo_path=state.get_repo_path(),
         )
 
         issues = [
@@ -628,7 +571,9 @@ async def review_file_endpoint(request: ReviewFileRequest):
             content = f.read()
 
         results = store.search(f"code in {request.file_path}", n_results=5)
-        patterns = format_context(results) if results else "No indexed context."
+        from src.codewalk.rag.retrieval_quality import filter_by_distance
+        filtered, _ = filter_by_distance(results)
+        patterns = format_context(filtered) if filtered else "No indexed context."
 
         llm = get_llm(temperature=0)
         response = llm.invoke([
@@ -672,7 +617,7 @@ async def load_guidelines_endpoint(request: GuidelinesRequest):
         if not store:
             raise HTTPException(status_code=400, detail=f"No guideline files found in {path}")
 
-        count = store.collection.count()
+        count = store.chunk_count()
         return {"status": "loaded", "chunks": count, "path": path}
     except HTTPException:
         raise
@@ -747,6 +692,25 @@ async def voice_ask_endpoint(
         "speech": voice["speech"],
         "audio_base64": base64.b64encode(audio_response).decode(),
     })
+
+@app.get("/cycles")
+async def get_cycles():
+    """Detect circular dependencies."""
+    state.ensure_initialized()
+    runtime = state.get_graph_runtime()
+    return runtime.detect_cycles()
+
+
+@app.get("/architecture")
+async def get_architecture():
+    """Architecture health report: stats, centrality, cycles."""
+    state.ensure_initialized()
+    runtime = state.get_graph_runtime()
+    return {
+        "stats": runtime.get_graph_stats(),
+        "centrality": runtime.centrality(top_n=10),
+        "cycles": runtime.detect_cycles(),
+    }
 
 # ─── Health check ───────────────────────────────────────────────────
 
