@@ -1,6 +1,6 @@
 ---
 name: codewalk
-description: AI-powered codebase onboarding assistant
+description: AI-powered codebase intelligence assistant
 tools:
   - codewalk/*
 ---

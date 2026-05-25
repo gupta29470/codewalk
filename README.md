@@ -1,7 +1,7 @@
 <p align="center">
   <h1 align="center">CODEWALK</h1>
   <p align="center">
-    <strong>AI-powered codebase onboarding tool</strong><br>
+    <strong>AI-powered codebase intelligence tool</strong><br>
     Point it at any repo → understand the entire codebase in hours, not weeks
   </p>
 </p>
