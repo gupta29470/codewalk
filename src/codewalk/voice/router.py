@@ -72,6 +72,17 @@ TOOL_REGISTRY = {
         "description": "Load team coding guidelines for use in reviews.",
         "parameters": {"docs_path": {"type": "string", "description": "Path to guidelines directory", "default": None}},
     },
+    "codewalk_get_architecture_health": {
+        "description": "Architecture health: bottlenecks, key files, circular dependencies, refactoring priorities.",
+        "parameters": {},
+    },
+    "codewalk_call_chain": {
+        "description": "Trace the shortest import chain between two files.",
+        "parameters": {
+            "source": {"type": "string", "description": "Source file name or path"},
+            "target": {"type": "string", "description": "Target file name or path"},
+        },
+    },
     # "codewalk_voice_ask" — not in routing map (voice_ask IS the router entry point)
 }
 
@@ -147,6 +158,18 @@ User: "refresh the analysis"
 
 User: "load our coding guidelines"
 {{"tool": "codewalk_load_guidelines", "arguments": {{}}}}
+
+User: "show me the architecture health"
+{{"tool": "codewalk_get_architecture_health", "arguments": {{}}}}
+
+User: "are there any circular dependencies"
+{{"tool": "codewalk_get_architecture_health", "arguments": {{}}}}
+
+User: "how does pipeline connect to config"
+{{"tool": "codewalk_call_chain", "arguments": {{"source": "pipeline.py", "target": "config.py"}}}}
+
+User: "import chain from scanner to vector store"
+{{"tool": "codewalk_call_chain", "arguments": {{"source": "scanner.py", "target": "vector_store.py"}}}}
 
 Return ONLY valid JSON, nothing else:
 {{"tool": "tool_name", "arguments": {{...}}}}

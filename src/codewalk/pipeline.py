@@ -17,7 +17,7 @@ from src.codewalk.analysis.relevance_filter import filter_files_with_llm
 from src.codewalk.config import settings
 from src.codewalk.log import log as _log
 
-CODEWALK_VERSION = "1.13.0"
+CODEWALK_VERSION = "1.13.1"
 
 _SENTINEL = object()
 EMBED_BATCH_SIZE = 256

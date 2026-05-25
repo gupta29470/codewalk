@@ -22,6 +22,8 @@ _TOOL_TO_ROUTE = {
     "codewalk_review_diff": ("POST", "/review"),
     "codewalk_review_file": ("POST", "/review/file"),
     "codewalk_load_guidelines": ("POST", "/review/guidelines"),
+    "codewalk_get_architecture_health": ("GET", "/architecture"),
+    "codewalk_call_chain": ("GET", "/cycles"),
 }
 
 def execute_direct(tool_name: str, arguments: dict) -> str:
