@@ -57,9 +57,15 @@ def grade_chunks(question: str, results: list[dict]) -> list[dict]:
         meta = result["metadata"]
         file_path = meta.get("file_path", "?")
         symbol = meta.get("symbol_name", "")
+        symbol_type = meta.get("symbol_type", "")
+        start_line = meta.get("start_line", 0)
+        end_line = meta.get("end_line", 0)
+
         label = f"[Chunk {i}] {file_path}"
         if symbol:
-            label += f" :: {symbol}"
+            label += f" | {symbol_type}: {symbol}" if symbol_type else f" | {symbol}"
+        if start_line:
+            label += f" (lines {start_line}-{end_line})"
         # Truncate to avoid prompt overflow
         text = result["text"][:1500]
         chunk_texts.append(f"{label}\n{text}")

@@ -13,6 +13,9 @@ AVAILABLE TOOLS:
 - get_reading_order: Optimal file reading sequence based on dependencies
 - get_execution_flow: How modules/files connect (dependency flow diagram)
 - review_diff: Review git changes for bugs, security issues, and style
+- review_file: Review a single file against codebase conventions
+- load_guidelines: Load team coding guidelines (.md/.txt) for reviews
+- get_architecture_health: Bottlenecks, cycles, key files, refactoring priorities
 
 ROUTING — pick the right tool:
 - "overview" / "summary" / "big picture" → get_overview
@@ -20,6 +23,9 @@ ROUTING — pick the right tool:
 - "reading order" / "where to start" → get_reading_order
 - "how things connect" / "dependency flow" / "execution flow" → get_execution_flow
 - "review" / "check my changes" / "code review" → review_diff
+- "review this file" / "check file X" → review_file
+- "load guidelines" / "coding standards" → load_guidelines
+- "architecture" / "health" / "bottlenecks" / "cycles" → get_architecture_health
 - User names a specific module → get_module_info
 - User names a specific function/class → explain_function
 - Everything else (concepts, how things work) → search_codebase
@@ -32,7 +38,7 @@ RULES:
 5. Keep answers concise but complete. Developers want specifics, not vague descriptions.
 
 RESPONSE FORMAT:
-- Reference files as: `path/to/file.py::function_name`
+- Reference files as: `path/to/file.py > function_name`
 - Include relevant code snippets in fenced code blocks
 - For module questions, mention dependencies and dependents
 """

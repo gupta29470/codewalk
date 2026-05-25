@@ -86,7 +86,9 @@ class GraphRuntime:
             sorted_indices = sorted(range(len(degrees)), key=lambda i: degrees[i])
             sorted_files = [self.file_graph.vs[index]["name"] for index in sorted_indices]
         else:
-            sorted_indices = self.file_graph.topological_sorting()
+            # mode="in": for edge A→B (A imports B), B comes first.
+            # This puts dependencies before dependents = correct reading order.
+            sorted_indices = self.file_graph.topological_sorting(mode="in")
             sorted_files = [self.file_graph.vs[index]["name"] for index in sorted_indices]
 
         # Append orphan files (in DuckDB but not in igraph — zero import edges)
