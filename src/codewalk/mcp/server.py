@@ -25,7 +25,7 @@ from src.codewalk.analysis.dependency_graph import build_dependency_graph
 from src.codewalk.analysis.module_detector import detect_modules
 from src.codewalk.generation.diagram_generator import generate_module_diagram
 from src.codewalk.embeddings.vector_store import VectorStore
-from src.codewalk.rag.chain import format_context
+from src.codewalk.rag.chain import format_context, ask_corrective
 from src.codewalk.rag.retrieval_quality import filter_by_distance
 from src.codewalk.pipeline import full_index_parallel, index_from_paths_parallel, incremental_reindex
 from src.codewalk.ingestion.file_filter import should_skip
@@ -231,18 +231,19 @@ def codewalk_analyze_codebase() -> str:
 # ─── TOOL 2 [QUERY · user+AI]: codewalk_search_codebase ──────────────
 @mcp.tool()
 def codewalk_search_codebase(query: str) -> str:
-    """Search the codebase using ChromaDB semantic embeddings — NOT a text search.
+    """Search the codebase and generate a verified answer using corrective RAG.
 
-    Uses vector similarity on pre-computed embeddings to find code by meaning,
-    not keywords. Finds results that keyword search would miss.
-
-    Returns up to 5 relevant code snippets with file paths, line numbers,
-    and surrounding context.
+    Retrieves code chunks by semantic similarity, grades them for relevance,
+    generates an answer, and verifies it is faithful to the retrieved code.
+    Automatically retries with query rewriting and graph-neighbor expansion
+    when needed.
 
     For a specific function/class by name, prefer codewalk_explain_function.
 
+    Requires codewalk_analyze_codebase + indexing workflow first.
+
     Args:
-        query: Natural language search query, e.g. "authentication logic",
+        query: Natural language question, e.g. "how does authentication work",
                "error handling in API routes", "how files get chunked"
     """
     state.ensure_initialized()
@@ -250,12 +251,18 @@ def codewalk_search_codebase(query: str) -> str:
         return "Error: No codebase indexed yet. Call codewalk_analyze_codebase first."
 
     _log(f"[codewalk_search_codebase] Query: {query}")
-    results = state._store.search(query, n_results=5)
-    filtered, confidence = filter_by_distance(results)
-    _log(f"[codewalk_search_codebase] Found {len(results)} results")
-    if not filtered:
-        return "No relevant code found for that query."
-    return format_context(filtered)
+    result = ask_corrective(
+        query, state._store,
+        graph_store=state._graph_store,
+    )
+    meta = (
+        f"\n\n---\nConfident: {result['confident']} | "
+        f"Retries: {result['retries']} | "
+        f"Chunks: {result['relevant_chunks']} | "
+        f"Confidence: {result['retrieval_confidence']:.2f}"
+    )
+    return result["answer"] + meta
+
 
 # ─── TOOL 3 [QUERY · user+AI]: codewalk_get_module_info ──────────────
 @mcp.tool()

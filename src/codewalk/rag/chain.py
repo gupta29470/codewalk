@@ -9,6 +9,8 @@ from src.codewalk.log import log as _log
 from src.codewalk.rag.retrieval_quality import filter_by_distance, is_retreival_good
 from src.codewalk.rag.answer_grader import grade_answer
 from src.codewalk.rag.query_rewriter import rewrite_query
+from src.codewalk.rag.chunk_grader import grade_chunks
+from src.codewalk.rag.graph_expansion import expand_via_graph
 
 logger = logging.getLogger("codewalk")
 
@@ -72,12 +74,15 @@ def ask(question: str, store: VectorStore, n_results: int = 5) -> str:
     return answer
 
 
-def ask_corrective(question: str, store, n_results: int = 5) -> dict:
-    """Corrective RAG: distance filter → generate → grade answer → retry if bad.
+def ask_corrective(question: str, store, n_results: int = 5,
+                   graph_store=None) -> dict:
+    """Corrective RAG: distance filter → chunk grade → generate → grade answer → retry.
 
     Layer 1 (FREE):  filter_by_distance() drops noise chunks
     Layer 2 (FREE):  retrieval_is_good() decides if we need to rewrite
-    Layer 3 (1 LLM): grade_answer() checks faithfulness + relevance
+    Layer 2b(FREE):  expand_via_graph() adds neighbor file chunks when retrieval is weak
+    Layer 3 (1 LLM): grade_chunks() keeps only relevant chunks
+    Layer 4 (1 LLM): grade_answer() checks faithfulness + relevance
 
     Returns:
         {
@@ -104,12 +109,12 @@ def ask_corrective(question: str, store, n_results: int = 5) -> dict:
     best_confidence = 0.0
 
     for attempt in range(MAX_RETRIES):
-        _log(f"[corrective] Attempt {attempt + 1}/{1 + MAX_RETRIES}: '{current_question[:60]}'")
+        _log(f"[corrective] Attempt {attempt + 1}/{MAX_RETRIES}: '{current_question[:60]}'")
 
         # ── Layer 1 (FREE): Retrieve + distance filter ──
         results = store.search(current_question, n_results=n_results)
         if not results:
-            if attempt < MAX_RETRIES:
+            if attempt < MAX_RETRIES - 1:
                 current_question = rewrite_query(current_question)
                 continue
             break
@@ -118,14 +123,29 @@ def ask_corrective(question: str, store, n_results: int = 5) -> dict:
 
         # ── Layer 2 (FREE): Check if retrieval is good enough ──
         if not is_retreival_good(confidence, len(filtered)):
-            _log(f"[corrective] Retrieval too weak (confidence={confidence:.2f}) — rewriting")
-            if attempt < MAX_RETRIES:
-                current_question = rewrite_query(current_question)
-                continue
+            _log(f"[corrective] Retrieval too weak (confidence={confidence:.2f})")
 
-            # Last attempt — use whatever we have
-            if not filtered:
-                filtered = results
+            # ── Layer 2b (FREE): Graph expansion fallback ──
+            if graph_store and filtered:
+                expanded = expand_via_graph(filtered, store, current_question, graph_store)
+                if len(expanded) > len(filtered):
+                    filtered = expanded
+                    confidence = max(confidence, 0.3)  # bump since we found neighbors
+                    _log(f"[corrective] Graph expansion recovered {len(expanded)} chunks")
+
+            if not is_retreival_good(confidence, len(filtered)):
+                if attempt < MAX_RETRIES - 1:
+                    current_question = rewrite_query(current_question)
+                    continue
+                # Last attempt — use whatever we have
+                if not filtered:
+                    filtered = results
+
+        # ── Layer 3 (1 LLM call): Grade individual chunks ──
+        graded = grade_chunks(question, filtered)
+        if graded:
+            filtered = graded
+        # If chunk grader returned nothing, keep distance-filtered set
             
         # ── Generate answer ──
         context = format_context(filtered)
@@ -134,7 +154,7 @@ def ask_corrective(question: str, store, n_results: int = 5) -> dict:
             "question": question,  # always ORIGINAL question for generation
         })
 
-        # ── Layer 3 (1 LLM call): Grade the answer ──
+        # ── Layer 4 (1 LLM call): Grade the answer ──
         grade = grade_answer(question, context, answer)
 
         if grade.faithful and grade.relevant:
@@ -153,7 +173,7 @@ def ask_corrective(question: str, store, n_results: int = 5) -> dict:
 
         _log(f"[corrective] Answer BAD ({grade.reason[:60]}) — rewriting")
 
-        if attempt < MAX_RETRIES:
+        if attempt < MAX_RETRIES - 1:
             current_question = rewrite_query(current_question)
 
     # ── Exhausted retries ──

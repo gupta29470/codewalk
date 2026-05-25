@@ -17,7 +17,7 @@ from src.codewalk.analysis.relevance_filter import filter_files_with_llm
 from src.codewalk.config import settings
 from src.codewalk.log import log as _log
 
-CODEWALK_VERSION = "1.9.1"
+CODEWALK_VERSION = "1.10.0"
 
 _SENTINEL = object()
 EMBED_BATCH_SIZE = 256
@@ -39,12 +39,16 @@ def chunk_and_embed_parallel(files: list[dict]) -> tuple[list[dict], int]:
     all_embedded = []
     chunk_count = [0]
     errors = []
+    stop_event = threading.Event()
 
     def producer():
         try:
             batch = []
             total = len(files)
             for i, file_info in enumerate(files, 1):
+                if stop_event.is_set():
+                    _log("[producer] Stop event set — aborting")
+                    break
                 chunks = chunk_file(file_info)
                 batch.extend(chunks)
                 chunk_count[0] += len(chunks)
@@ -54,7 +58,7 @@ def chunk_and_embed_parallel(files: list[dict]) -> tuple[list[dict], int]:
                     batch = []
                 if i % 100 == 0:
                     _log(f"[producer] Progress: {i}/{total} files chunked")
-            if batch:
+            if batch and not stop_event.is_set():
                 chunk_queue_inner.put(batch)
                 _log(f"[producer] Final batch queued ({len(batch)} chunks)")
         except Exception as e:
@@ -77,6 +81,7 @@ def chunk_and_embed_parallel(files: list[dict]) -> tuple[list[dict], int]:
         except Exception as e:
             errors.append(f"Consumer error: {e}")
             _log(f"[consumer] ERROR: {e}")
+            stop_event.set()
 
     p = threading.Thread(target=producer, name="chunk-producer", daemon=True)
     c = threading.Thread(target=consumer, name="embed-consumer", daemon=True)

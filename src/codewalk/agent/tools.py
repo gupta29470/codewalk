@@ -4,10 +4,11 @@ from src.codewalk.embeddings.vector_store import VectorStore
 from src.codewalk.graph.graph_store import GraphStore
 from src.codewalk.graph.graph_runtime import GraphRuntime
 from src.codewalk.query import (
-    search_codebase_text, module_info_text, explain_function_text,
+    module_info_text, explain_function_text,
     overview_text, blast_radius_map_text, reading_order_text,
     execution_flow_text,
 )
+from src.codewalk.rag.chain import ask_corrective
 from src.codewalk.review.reviewer import review_diff as _review_diff
 from src.codewalk.review.guidelines_loader import get_guidelines_store, search_guidelines
 from src.codewalk.config import settings
@@ -33,16 +34,30 @@ def create_tools(store: VectorStore, modules_result: dict,
     # ─── TOOL 1: search_codebase ─────────────────────────────────
     @tool
     def search_codebase(query: str) -> str:
-        """Search the indexed codebase for code related to the query.
+        """Search the codebase and generate a verified answer.
 
-        Use this tool when the user asks about specific code, functions,
-        files, or implementation details. Returns relevant code snippets
-        with file paths and function names.
+        Uses corrective RAG: retrieves code chunks, grades them for
+        relevance, generates an answer, and verifies it is faithful
+        to the retrieved code. Automatically retries with query
+        rewriting if the first attempt fails.
+
+        Falls back to graph-neighbor expansion when semantic search
+        alone is not enough.
+
+        Use this for ANY question about code, functions, features, or
+        implementation details.
 
         Args:
-            query: Natural language search query, e.g. "authentication logic"
+            query: Natural language question, e.g. "how does authentication work"
         """
-        return search_codebase_text(store, query)
+        result = ask_corrective(query, store, graph_store=graph_store)
+        meta = (
+            f"\n\n---\n_Confident: {result['confident']} | "
+            f"Retries: {result['retries']} | "
+            f"Chunks: {result['relevant_chunks']} | "
+            f"Confidence: {result['retrieval_confidence']:.2f}_"
+        )
+        return result["answer"] + meta
 
     # ─── TOOL 2: get_module_info ─────────────────────────────────
     @tool
@@ -330,7 +345,7 @@ def create_tools(store: VectorStore, modules_result: dict,
             parts.append("Cycles: None (clean DAG)")
     
         return "\n".join(parts)
-    
+
     return [search_codebase, get_module_info, explain_function,
             get_overview, get_blast_radius_map, get_reading_order,
             get_execution_flow, review_diff, review_file, load_guidelines,
