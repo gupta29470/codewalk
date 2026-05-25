@@ -56,20 +56,26 @@ class GraphRuntime:
         
     def get_blast_radius(self, file_path: str) -> list[str]:
         """All files affected if this file changes (transitive reverse deps)."""
-        index = self._find_vertex(self.file_graph, file_path)
-        if index is None:
+        start = self._find_vertex(self.file_graph, file_path)
+        if start is None:
             return []
         # order=999 = unlimited depth. mode="in" = reverse (who imports me).
-        affected_indices = self.file_graph.neighborhood(index, order=999, mode="in")
+        affected_indices = self.file_graph.neighborhood(start, order=999, mode="in")
         # Remove the file itself from results (index 0 in the list is always self)
         return [
-            self.file_graph.vs[index]["name"]
-            for index in affected_indices
-            if index != index
+            self.file_graph.vs[idx]["name"]
+            for idx in affected_indices
+            if idx != start
         ]
     
     def topological_sort(self) -> list[str]:
-        """Files in dependency order (leaf dependencies first)."""
+        """Files in dependency order (leaf dependencies first).
+
+        igraph only contains files that appear in at least one import edge.
+        Files with zero import relationships (no imports AND not imported)
+        are missing from igraph entirely. We append them at the end from DuckDB
+        so the reading order includes ALL indexed files, not just connected ones.
+        """
         if self.file_graph.vcount() == 0:
             # No import edges in igraph — return all files from DuckDB
             rows = self.store.conn.execute("SELECT path FROM files ORDER BY path").fetchall()
@@ -78,10 +84,21 @@ class GraphRuntime:
             logger.warning("[GraphRuntime] Cycle detected — using in-degree sort fallback")
             degrees = self.file_graph.indegree()
             sorted_indices = sorted(range(len(degrees)), key=lambda i: degrees[i])
-            return [self.file_graph.vs[index]["name"] for index in sorted_indices]
-        
-        sorted_indices = self.file_graph.topological_sorting()
-        return [self.file_graph.vs[index]["name"] for index in sorted_indices]
+            sorted_files = [self.file_graph.vs[index]["name"] for index in sorted_indices]
+        else:
+            sorted_indices = self.file_graph.topological_sorting()
+            sorted_files = [self.file_graph.vs[index]["name"] for index in sorted_indices]
+
+        # Append orphan files (in DuckDB but not in igraph — zero import edges)
+        all_files = self.store.get_all_files()
+        graph_files = set(sorted_files)
+        orphans = sorted(f for f in all_files if f not in graph_files)
+        if orphans:
+            logger.info(
+                f"[GraphRuntime] topological_sort: {len(sorted_files)} connected + "
+                f"{len(orphans)} orphan files (no import edges)"
+            )
+        return sorted_files + orphans
         
     def detect_cycles(self) -> dict:
         """Detect circular dependencies in the file graph."""

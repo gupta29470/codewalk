@@ -1,4 +1,5 @@
 from collections import deque
+import math
 
 from src.codewalk.graph.graph_runtime import GraphRuntime
 
@@ -41,7 +42,7 @@ def get_blast_radius(target_file: str, graph: dict[str, list[str]]) -> dict:
         impact_tree = {}
 
         for vertex_index, distance in enumerate(distances):
-            if vertex_index == idx or distance == float("inf"):
+            if vertex_index == idx or math.isinf(distance):
                 continue
             impact_tree[file_graph.vs[vertex_index]["name"]] = int(distance)
         
@@ -156,7 +157,7 @@ def calculate_full_blast_map(graph: dict[str, list[str]]) -> dict:
             total_affected = 0
 
             for vertex_index, distance in enumerate(distances):
-                if vertex_index == index or distance == float("inf"):
+                if vertex_index == index or math.isinf(distance):
                     continue
                 total_affected += 1
                 if distance == 1:

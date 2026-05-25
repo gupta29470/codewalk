@@ -1,5 +1,6 @@
 import logging
 import os
+import threading
 
 from src.codewalk.embeddings.vector_store import VectorStore
 from src.codewalk.agent.graph import create_agent
@@ -26,6 +27,7 @@ _repo_path: str | None = None          # target repo being analyzed
 _graph_store: GraphStore | None = None
 _graph_runtime: GraphRuntime | None = None
 _banner_shown = False
+_init_lock = threading.Lock()
 
 def get_store() -> VectorStore:
     """Get the VectorStore. Raises if not initialized."""
@@ -98,6 +100,8 @@ def initialize(store: VectorStore, agent, modules_result: dict, analyze_result: 
     if files and deps and modules_result:
         repo = _repo_path or settings.repo_path
         db_path = f"{repo.rstrip('/')}/.codewalk/graph.duckdb"
+        if _graph_store is not None:
+            _graph_store.close()
         _graph_store = GraphStore(db_path)
         _graph_store.populate_from_analysis(files, deps, modules_result,
                                             embedded_chunks=embedded_chunks)
@@ -115,6 +119,8 @@ def refresh(files: list[dict], deps: dict, modules_result: dict):
     # Rebuild graph so blast radius / reading order use fresh data
     repo = _repo_path or settings.repo_path
     db_path = f"{repo.rstrip('/')}/.codewalk/graph.duckdb"
+    if _graph_store is not None:
+        _graph_store.close()
     _graph_store = GraphStore(db_path)
     _graph_store.populate_from_analysis(files, deps, modules_result)
     _graph_runtime = GraphRuntime(_graph_store)
@@ -166,6 +172,8 @@ def rebuild_analysis_cache(embedded_chunks: list[dict] | None = None):
 
     repo_path = _repo_path or settings.repo_path
     db_path = f"{repo_path.rstrip('/')}/.codewalk/graph.duckdb"
+    if _graph_store is not None:
+        _graph_store.close()
     _graph_store = GraphStore(db_path)
     _graph_store.populate_from_analysis(_files, _deps, _modules_result,
                                         embedded_chunks=embedded_chunks)
@@ -183,6 +191,18 @@ def ensure_initialized():
     if _store is not None and _modules_result is not None:
         return  # Already initialized
 
+    with _init_lock:
+        # Double-check inside lock — another thread may have initialized while we waited.
+        if _store is not None and _modules_result is not None:
+            return
+
+        _ensure_initialized_locked()
+
+
+def _ensure_initialized_locked():
+    """Inner initialization logic — called under _init_lock."""
+    global _store, _agent, _analyze_result, _graph_store, _graph_runtime
+
     chroma = chroma_path()
     if not os.path.isdir(chroma):
         return  # No index on disk — nothing to load
@@ -195,6 +215,8 @@ def ensure_initialized():
     # Open existing DuckDB — DON'T repopulate. Data persists from last analyze/reindex.
     repo = get_repo_path()
     db_path = f"{repo.rstrip('/')}/.codewalk/graph.duckdb"
+    if _graph_store is not None:
+        _graph_store.close()
     _graph_store = GraphStore(db_path)
     _graph_runtime = GraphRuntime(_graph_store)
 

@@ -100,14 +100,15 @@ class GraphStore:
             module_results: From detect_modules() — {"modules": {...}, "module_graph": {...}}
         """
         # Clear in reverse FK order: children before parents.
-        # Chunks: only delete for files being re-embedded (incremental-safe).
-        # If embedded_chunks is None/empty, preserve existing chunks.
         if embedded_chunks:
-            # Delete only chunks for files that are being re-embedded,
-            # not ALL chunks (which would wipe unchanged files' data).
+            # Incremental: delete only chunks for files being re-embedded.
             changed_files = {_stable_id(c["file_path"]) for c in embedded_chunks}
             for fid in changed_files:
                 self.conn.execute("DELETE FROM chunks WHERE file_id = ?", [fid])
+        else:
+            # Full rebuild (no new chunks): delete ALL chunks to satisfy FK constraint
+            # before files table is cleared below.
+            self.conn.execute("DELETE FROM chunks")
         self.conn.execute("DELETE FROM symbol_calls")
         self.conn.execute("DELETE FROM symbols")
         self.conn.execute("DELETE FROM imports")

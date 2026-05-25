@@ -64,7 +64,7 @@ def expand_via_graph(
 
     # Search within neighbor files
     neighbor_results = []
-    for fp in list(neighbor_files)[:10]:  # Cap at 10 neighbors to limit queries
+    for fp in sorted(neighbor_files)[:10]:  # Cap at 10 neighbors to limit queries
         try:
             file_results = store.parents_collection.get(
                 where={"file_path": fp},
@@ -77,7 +77,8 @@ def expand_via_graph(
                         "metadata": meta,
                         "distance": 0.5,  # neutral distance — let chunk grader decide
                     })
-        except Exception:
+        except Exception as e:
+            _log(f"[graph_expansion] Error querying neighbor {fp}: {e}")
             continue
 
     if not neighbor_results:
