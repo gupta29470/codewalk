@@ -93,7 +93,6 @@ SKIP_DIRS = {
     "tmp", "temp",
     "logs",
     "reports",
-    "data",
 }
 
 # Extensions that aren't code (binary/media files)
