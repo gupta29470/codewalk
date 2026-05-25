@@ -10,14 +10,14 @@ import time
 from src.codewalk.embeddings.chunker import file_hash, read_file_content
 from src.codewalk.ingestion.scanner import scan_directory
 from src.codewalk.ingestion.tech_detect import detect_tech_stack
-from src.codewalk.embeddings.chunker import chunk_all_files, chunk_file
+from src.codewalk.embeddings.chunker import chunk_file
 from src.codewalk.embeddings.embedder import embed_chunks
 from src.codewalk.embeddings.vector_store import VectorStore
 from src.codewalk.analysis.relevance_filter import filter_files_with_llm
 from src.codewalk.config import settings
 from src.codewalk.log import log as _log
 
-CODEWALK_VERSION = "1.12.0"
+CODEWALK_VERSION = "1.13.0"
 
 _SENTINEL = object()
 EMBED_BATCH_SIZE = 256
@@ -99,61 +99,13 @@ def chunk_and_embed_parallel(files: list[dict]) -> tuple[list[dict], int]:
 
     return all_embedded, chunk_count[0]
 
-def full_index(repo_path: str = "", collection_name: str = "codebase",
-               use_llm_filter: bool = True,
-               persist_dir: str = "./data/chroma") -> dict:
-    """Full pipeline: scan → chunk → embed → store. Nukes old data first.
-
-    Args:
-        use_llm_filter: If True, uses LLM to filter files. If False, uses
-                        Python pattern matching only (for MCP where Copilot filters).
-
-    Returns a summary dict with stats.
-    """
-    repo_path = repo_path or settings.repo_path
-    _log(f"[full_index] Starting: {repo_path}")
-    
-    # Step 1: Detect tech stack (just for info)
-    tech_stack = detect_tech_stack(repo_path)
-    _log(f"[full_index] Tech stack: {tech_stack}")
-
-    # Step 2: Scan directory
-    files = scan_directory(repo_path)
-    if use_llm_filter:
-        files = filter_files_with_llm(files)
-    _log(f"[full_index] Scanned {len(files)} files")
-
-    # Step 3: Chunk all files
-    chunks = chunk_all_files(files)
-    _log(f"[full_index] Generated {len(chunks)} chunks")
-
-    # Step 4: Embed all chunks
-    embedded = embed_chunks(chunks)
-    _log(f"[full_index] Embedded {len(embedded)} chunks")
-
-    # Step 5: Store in ChromaDB (nuke old data first)
-    store = VectorStore(persist_dir=persist_dir)
-    store.create_collection(collection_name)
-    store.clear_collection()
-    store.add_parent_child_chunks(embedded)
-    _log(f"[full_index] Stored {len(embedded)} chunks in ChromaDB")
-
-    return {
-        "repo_path": repo_path,
-        "tech_stack": tech_stack,
-        "files_scanned": len(files),
-        "chunks_created": len(chunks),
-        "chunks_embedded": len(embedded),
-        "embedded_chunks": embedded, 
-    }
-
 def full_index_parallel(repo_path: str = "", collection_name: str = "codebase",
                         use_llm_filter: bool = True,
                         persist_dir: str = "./data/chroma") -> dict:
-    """Full pipeline with parallel chunking + embedding.
+    """Full pipeline: scan → chunk → embed → store. Nukes old data first.
 
-    Same as full_index() but overlaps chunking (CPU) with embedding (GPU)
-    using a producer-consumer pattern with threads.
+    Overlaps chunking (CPU) with embedding (GPU) using a producer-consumer
+    pattern with threads.
     """
     repo_path = repo_path or settings.repo_path
     _log(f"[parallel] Starting: {repo_path}")
@@ -191,9 +143,11 @@ def full_index_parallel(repo_path: str = "", collection_name: str = "codebase",
 def index_from_paths_parallel(paths: list[str], repo_path: str = "",
                               collection_name: str = "codebase",
                               persist_dir: str = "./data/chroma") -> dict:
-    """Parallel version of index_from_paths.
+    """Index files matching the given paths or directories.
 
-    Same file-matching logic, but uses producer-consumer for chunk+embed.
+    Accepts both file paths and directory paths. A directory path
+    matches all files under it (e.g. "lib" matches "lib/main.dart").
+    Uses producer-consumer for parallel chunk+embed.
     """
     pipeline_start = time.time()
     repo_path = repo_path or settings.repo_path
@@ -249,79 +203,6 @@ def index_from_paths_parallel(paths: list[str], repo_path: str = "",
             ],
     }
 
-
-
-def index_from_paths(paths: list[str], repo_path: str = "",
-                     collection_name: str = "codebase",
-                     persist_dir: str = "./data/chroma") -> dict:
-    """Index files matching the given paths or directories.
-
-    Accepts both file paths and directory paths. A directory path
-    matches all files under it (e.g. "lib" matches "lib/main.dart").
-    """
-    pipeline_start = time.time()
-    steps = []
-
-    repo_path = repo_path or settings.repo_path
-
-    # Step 1: Match files
-    t0 = time.time()
-    _log("[1/4] Scanning files...")
-    all_files = scan_directory(repo_path)
-
-    path_set = set(paths)
-    files = []
-    for file in all_files:
-        file_path = file["file_path"]
-        if file_path in path_set:
-            files.append(file)
-            continue
-        for path in path_set:
-            if file_path.startswith(path + "/") or file_path.startswith(path.rstrip("/") + "/"):
-                files.append(file)
-                break
-
-    elapsed = time.time() - t0
-    _log(f"[1/4] Matched {len(files)} of {len(all_files)} files ({elapsed:.1f}s)")
-    steps.append(f"Scan: {len(files)}/{len(all_files)} files ({elapsed:.1f}s)")
-
-    # Step 2: Chunk
-    t0 = time.time()
-    _log("[2/4] Chunking files...")
-    chunks = chunk_all_files(files)
-    elapsed = time.time() - t0
-    _log(f"[2/4] Created {len(chunks)} chunks ({elapsed:.1f}s)")
-    steps.append(f"Chunk: {len(chunks)} chunks ({elapsed:.1f}s)")
-
-    # Step 3: Embed
-    t0 = time.time()
-    _log("[3/4] Embedding chunks...")
-    embedded = embed_chunks(chunks)
-    elapsed = time.time() - t0
-    _log(f"[3/4] Embedded {len(embedded)} chunks ({elapsed:.1f}s)")
-    steps.append(f"Embed: {len(embedded)} chunks ({elapsed:.1f}s)")
-
-    # Step 4: Store
-    t0 = time.time()
-    _log("[4/4] Storing in ChromaDB...")
-    store = VectorStore(persist_dir=persist_dir)
-    store.create_collection(collection_name)
-    store.add_parent_child_chunks(embedded)
-    elapsed = time.time() - t0
-    _log(f"[4/4] Stored {len(embedded)} chunks ({elapsed:.1f}s)")
-    steps.append(f"Store: {len(embedded)} chunks ({elapsed:.1f}s)")
-
-    total_time = time.time() - pipeline_start
-    _log(f"Pipeline complete in {total_time:.1f}s")
-
-    return {
-        "repo_path": repo_path,
-        "files_scanned": len(files),
-        "chunks_created": len(chunks),
-        "chunks_embedded": len(embedded),
-        "total_time": f"{total_time:.1f}s",
-        "steps": steps,
-    }
 
 
 def reindex(repo_path: str = "", collection_name: str = "codebase",

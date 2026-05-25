@@ -74,6 +74,79 @@ def ask(question: str, store: VectorStore, n_results: int = 5) -> str:
     return answer
 
 
+def retrieve_corrective(question: str, store, n_results: int = 5,
+                        graph_store=None) -> dict:
+    """Corrective retrieval: distance filter → graph expansion → free chunk grade.
+
+    Same L1→L2→L2b→L3 flow as ask_corrective, but with zero LLM calls.
+    Returns raw chunks for the MCP host (Copilot) to generate the answer.
+
+    Layer 1 (FREE):  filter_by_distance() drops noise chunks
+    Layer 2 (FREE):  is_retrieval_good() checks retrieval quality
+    Layer 2b(FREE):  expand_via_graph() adds neighbor file chunks
+    Layer 3 (FREE):  grade_chunks_free() keyword overlap filter
+
+    Returns:
+        {
+            "chunks": list[dict],          — filtered chunks with text + metadata
+            "confidence": float,           — 0.0-1.0 from distance scoring
+            "retrieval_good": bool,        — True if retrieval quality passed
+            "total_retrieved": int,        — chunks before filtering
+            "total_after_filter": int,     — chunks after all filtering
+        }
+    """
+    from src.codewalk.rag.chunk_grader import grade_chunks_free
+
+    _log(f"[retrieve_corrective] Query: '{question[:60]}'")
+
+    # ── Layer 1 (FREE): Retrieve + distance filter ──
+    results = store.search(question, n_results=n_results)
+    if not results:
+        return {
+            "chunks": [],
+            "confidence": 0.0,
+            "retrieval_good": False,
+            "total_retrieved": 0,
+            "total_after_filter": 0,
+        }
+
+    total_retrieved = len(results)
+    filtered, confidence = filter_by_distance(results)
+
+    # ── Layer 2 (FREE): Check if retrieval is good enough ──
+    retrieval_good = is_retreival_good(confidence, len(filtered))
+
+    if not retrieval_good:
+        _log(f"[retrieve_corrective] Retrieval weak (confidence={confidence:.2f})")
+
+        # ── Layer 2b (FREE): Graph expansion fallback ──
+        if graph_store and filtered:
+            expanded = expand_via_graph(filtered, store, question, graph_store)
+            if len(expanded) > len(filtered):
+                filtered = expanded
+                confidence = max(confidence, 0.3)
+                retrieval_good = is_retreival_good(confidence, len(filtered))
+                _log(f"[retrieve_corrective] Graph expansion recovered {len(expanded)} chunks")
+
+        if not filtered:
+            filtered = results
+
+    # ── Layer 3 (FREE): Keyword-based chunk grading ──
+    graded = grade_chunks_free(question, filtered)
+    if graded:
+        filtered = graded
+
+    _log(f"[retrieve_corrective] Returning {len(filtered)} chunks (confidence={confidence:.2f})")
+
+    return {
+        "chunks": filtered,
+        "confidence": confidence,
+        "retrieval_good": retrieval_good,
+        "total_retrieved": total_retrieved,
+        "total_after_filter": len(filtered),
+    }
+
+
 def ask_corrective(question: str, store, n_results: int = 5,
                    graph_store=None) -> dict:
     """Corrective RAG: distance filter → chunk grade → generate → grade answer → retry.

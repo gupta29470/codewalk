@@ -86,3 +86,81 @@ def grade_chunks(question: str, results: list[dict]) -> list[dict]:
 
     _log(f"[chunk_grader] {len(filtered)}/{len(results)} chunks graded relevant")
     return filtered
+
+
+# ── Stopwords for free keyword grading ───────────────────────────────
+from sklearn.feature_extraction.text import ENGLISH_STOP_WORDS
+
+# sklearn misses a few common words — supplement them
+_STOPWORDS = ENGLISH_STOP_WORDS.union({"does", "did", "need", "shall"})
+
+
+def _tokenize(text: str) -> set[str]:
+    """Extract keyword tokens, splitting compound identifiers.
+
+    'get_blast_radius' → {'get_blast_radius', 'get', 'blast', 'radius'}
+    'filterByDistance' → {'filterbydistance', 'filter', 'by', 'distance'}
+    """
+    import re
+    # Match word-like tokens (including underscored identifiers)
+    raw = set(re.findall(r"[a-zA-Z_][a-zA-Z0-9_]*", text))
+    tokens = set()
+    for word in raw:
+        lower = word.lower()
+        tokens.add(lower)
+        # Split on underscores: get_blast_radius → get, blast, radius
+        if "_" in lower:
+            tokens.update(lower.split("_"))
+        # Split camelCase: filterByDistance → filter, by, distance
+        parts = re.findall(r"[a-z]+|[A-Z][a-z]*", word)
+        if len(parts) > 1:
+            tokens.update(p.lower() for p in parts)
+    # Remove stopwords and short tokens
+    return {t for t in tokens if t not in _STOPWORDS and len(t) > 2}
+
+
+def grade_chunks_free(question: str, results: list[dict]) -> list[dict]:
+    """Grade chunks by keyword overlap — zero LLM cost.
+
+    Tokenizes the question into keywords, scores each chunk by how many
+    question keywords appear in the chunk text, and keeps chunks above
+    a minimum overlap threshold.
+
+    If nothing passes the threshold, returns all chunks (same fallback
+    behavior as the LLM grader).
+
+    Args:
+        question: The user's original question.
+        results: Search results from store.search().
+
+    Returns:
+        Filtered list — only chunks with sufficient keyword overlap.
+    """
+    if not results:
+        return []
+
+    q_tokens = _tokenize(question)
+    if not q_tokens:
+        return results  # can't grade without keywords
+
+    scored = []
+    for result in results:
+        chunk_tokens = _tokenize(result["text"])
+        if not chunk_tokens:
+            scored.append((0.0, result))
+            continue
+        overlap = len(q_tokens & chunk_tokens)
+        score = overlap / len(q_tokens)
+        scored.append((score, result))
+
+    # Keep chunks with at least 20% keyword overlap
+    threshold = 0.2
+    filtered = [r for score, r in scored if score >= threshold]
+
+    if not filtered:
+        # Nothing passed — keep all (same as LLM grader fallback)
+        _log(f"[chunk_grader_free] No chunks passed threshold, keeping all {len(results)}")
+        return results
+
+    _log(f"[chunk_grader_free] {len(filtered)}/{len(results)} chunks passed keyword filter")
+    return filtered

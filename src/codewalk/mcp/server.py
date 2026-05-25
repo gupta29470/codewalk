@@ -25,7 +25,7 @@ from src.codewalk.analysis.dependency_graph import build_dependency_graph
 from src.codewalk.analysis.module_detector import detect_modules
 from src.codewalk.generation.diagram_generator import generate_module_diagram
 from src.codewalk.embeddings.vector_store import VectorStore
-from src.codewalk.rag.chain import format_context, ask_corrective
+from src.codewalk.rag.chain import format_context, retrieve_corrective
 from src.codewalk.rag.retrieval_quality import filter_by_distance
 from src.codewalk.pipeline import full_index_parallel, index_from_paths_parallel, incremental_reindex
 from src.codewalk.ingestion.file_filter import should_skip
@@ -69,7 +69,7 @@ mcp = FastMCP(
         "\n"
         "## ANSWERING QUESTIONS (after setup)\n"
         "- 'What does X do?' → codewalk_explain_function(X) — line-by-line explanation\n"
-        "- 'How does feature Y work?' → codewalk_search_codebase(Y)\n"
+        "- 'How does feature Y work?' → codewalk_search_codebase(Y) — returns code chunks for YOU to analyze\n"
         "- 'Give me an overview' → codewalk_get_overview\n"
         "- 'What's in module Z?' → codewalk_get_module_info(Z) — files + functions/classes\n"
         "- 'What breaks if I change X?' → codewalk_get_blast_radius_map(target=X) — "
@@ -107,6 +107,17 @@ mcp = FastMCP(
         "   cubits, use cases, API clients) — show these in full detail.\n"
         "Lead with the Business Logic section — that's what the user cares about.\n"
         "Foundational files being high-risk is expected and not actionable.\n"
+        "\n"
+        "## SEARCH & CORRECTIVE RAG\n"
+        "codewalk_search_codebase returns RAW code chunks, not a pre-made answer.\n"
+        "YOU must generate the answer from the chunks. Follow this flow:\n"
+        "1. Call codewalk_search_codebase(query) — get filtered code chunks + confidence\n"
+        "2. Read the chunks and generate your answer using ONLY the returned code\n"
+        "3. If confidence < 0.3 or chunks seem irrelevant to the question:\n"
+        "   - Rephrase the query (use different keywords, be more specific)\n"
+        "   - Call codewalk_search_codebase again with the rephrased query\n"
+        "   - Max 3 retries, then answer with best available chunks\n"
+        "4. Always cite file paths and line numbers from chunk metadata\n"
         "\n"
         "## ERROR HANDLING\n"
         "If any tool returns a message starting with 'Error:':\n"
@@ -231,12 +242,15 @@ def codewalk_analyze_codebase() -> str:
 # ─── TOOL 2 [QUERY · user+AI]: codewalk_search_codebase ──────────────
 @mcp.tool()
 def codewalk_search_codebase(query: str) -> str:
-    """Search the codebase and generate a verified answer using corrective RAG.
+    """Search the codebase and return relevant code chunks for analysis.
 
-    Retrieves code chunks by semantic similarity, grades them for relevance,
-    generates an answer, and verifies it is faithful to the retrieved code.
-    Automatically retries with query rewriting and graph-neighbor expansion
-    when needed.
+    Retrieves code chunks by semantic similarity, filters by distance,
+    expands via the dependency graph when retrieval is weak, and grades
+    chunks by keyword overlap. Returns the raw chunks — YOU (Copilot)
+    generate the answer from them.
+
+    If confidence is low or chunks seem irrelevant, rephrase the query
+    and call this tool again (max 3 retries).
 
     For a specific function/class by name, prefer codewalk_explain_function.
 
@@ -251,17 +265,28 @@ def codewalk_search_codebase(query: str) -> str:
         return "Error: No codebase indexed yet. Call codewalk_analyze_codebase first."
 
     _log(f"[codewalk_search_codebase] Query: {query}")
-    result = ask_corrective(
+    result = retrieve_corrective(
         query, state._store,
         graph_store=state._graph_store,
     )
+
+    if not result["chunks"]:
+        return (
+            f"No relevant chunks found for: {query}\n"
+            f"Confidence: {result['confidence']:.2f}\n\n"
+            f"Try rephrasing with different keywords."
+        )
+
+    context = format_context(result["chunks"])
     meta = (
-        f"\n\n---\nConfident: {result['confident']} | "
-        f"Retries: {result['retries']} | "
-        f"Chunks: {result['relevant_chunks']} | "
-        f"Confidence: {result['retrieval_confidence']:.2f}"
+        f"\n\n---\n"
+        f"Confidence: {result['confidence']:.2f} | "
+        f"Retrieval good: {result['retrieval_good']} | "
+        f"Chunks: {result['total_after_filter']}/{result['total_retrieved']}\n"
+        f"Generate your answer from the code chunks above. "
+        f"Cite file paths and line numbers."
     )
-    return result["answer"] + meta
+    return context + meta
 
 
 # ─── TOOL 3 [QUERY · user+AI]: codewalk_get_module_info ──────────────

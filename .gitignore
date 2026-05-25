@@ -37,3 +37,6 @@ blogs/
 .codewalk/
 
 tests/
+
+# Wiki documentation
+wiki/

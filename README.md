@@ -396,6 +396,32 @@ Add to `.vscode/mcp.json` in your desired project:
 
 > **Customizing file filters:** Codewalk ships with a built-in skip list (binary files, lock files, `node_modules/`, etc.). If you want to **remove** a predefined skip rule (e.g., to index `.md` or `.css` files), edit [`src/codewalk/ingestion/file_filter.py`](src/codewalk/ingestion/file_filter.py).
 
+> **`.codewalkignore`** — Create a `.codewalkignore` file in the root of the repo you're analyzing to skip specific files/directories:
+>
+> ```
+> # Skip test files
+> tests/
+> *_test.py
+>
+> # Skip specific directories
+> data/
+> wiki/
+> blogs/
+>
+> # Skip specific file patterns
+> *.config.js
+> setup.py
+> ```
+>
+> **Syntax** (gitignore-like):
+> - `folder/` — skip any path containing this directory
+> - `*.pattern` — glob match against full path or filename
+> - `filename` — matches exact filename or path segment
+> - `# comment` — ignored
+> - blank lines — ignored
+>
+> Patterns are cached in `_codewalkignore_patterns` (loaded once per session). If you change the repo being analyzed, `reset_codewalkignore()` clears the cache so the next repo's `.codewalkignore` gets loaded.
+
 Then in Copilot Chat: **`@codewalk`** → follow the scan → filter → index workflow.
 
 > **Note:** After adding or modifying `.vscode/mcp.json`, reload the VS Code window: **`Cmd+Shift+P`** → **`Developer: Reload Window`**.
@@ -1493,7 +1519,7 @@ Add this to each target repo's `.gitignore`:
 | **Backend** | Python 3.10+, FastAPI, Uvicorn |
 | **Agent** | LangGraph, LangChain |
 | **Vector DB** | ChromaDB (persistent, per-repo at `.codewalk/chroma/`) |
-| **Graph DB** | DuckDB (persistent, per-repo at `.codewalk/graph.duckdb`) |
+| **Graph DB** | DuckDB (persistent, per-repo at `.codewalk/graph.duckdb`) — [Why DuckDB over SQLite?](docs/WHY_DUCKDB.md) |
 | **Graph Runtime** | igraph (C-speed traversal, in-memory from DuckDB) |
 | **Voice STT** | faster-whisper (local, small model, int8) |
 | **Voice TTS** | edge-tts (free, en-US-AriaNeural) |

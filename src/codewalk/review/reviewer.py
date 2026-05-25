@@ -1,9 +1,15 @@
+from __future__ import annotations
+
 import json
 import asyncio
 from pathlib import Path
 from dataclasses import dataclass, field
 from concurrent.futures import ThreadPoolExecutor
+from typing import TYPE_CHECKING
 from src.codewalk.config import get_llm
+
+if TYPE_CHECKING:
+    from src.codewalk.graph.graph_store import GraphStore
 from src.codewalk.review.diff_parser import get_diff, get_parsed_diff
 from src.codewalk.review.models import ReviewResult, Issue, Severity, Category, DiffFile
 from src.codewalk.review.test_coverage import TestCoverage
@@ -52,18 +58,18 @@ def _get_file_content(diff_file: DiffFile, repo_path: str | None) -> str:
 
     try:
         content = file_path.read_text(errors="replace")
-        # Cap at 500 lines to avoid token overflow
+        # Cap at 5000 lines to avoid token overflow
         lines = content.splitlines()
-        if len(lines) > 500:
-            lines = lines[:500]
-            content = "\n".join(lines) + "\n... (truncated at 500 lines)"
+        if len(lines) > 5000:
+            lines = lines[:5000]
+            content = "\n".join(lines) + "\n... (truncated at 5000 lines)"
         return content
     except (OSError, UnicodeDecodeError):
         return ""
 
 
 def _get_caller_context(diff_file: DiffFile, deps: dict | None = None,
-                        graph_store: 'GraphStore | None' = None) -> str:
+                        graph_store: GraphStore | None = None) -> str:
     """Symbol-level caller context for code review."""
     if graph_store:
         symbols = graph_store.get_symbols_in_file(diff_file.file_path)
