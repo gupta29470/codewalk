@@ -39,8 +39,9 @@ tree-sitter-php
 # Then install:
 #   pip install "tree-sitter-dart @ git+https://github.com/UserNobody14/tree-sitter-dart.git"
 tree-sitter-yaml
- tree-sitter-kotlin
- tree-sitter-swift
+tree-sitter-kotlin
+tree-sitter-swift
+ pymupdf
 
 # Utilities
 pydantic

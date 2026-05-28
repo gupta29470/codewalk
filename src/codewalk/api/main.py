@@ -16,7 +16,8 @@ from src.codewalk.api.models import (
     ChatRequest, ChatResponse,
     ModuleResponse, OverviewResponse,
     BlastRadiusResponse,
-    ReviewRequest, ReviewFileRequest, GuidelinesRequest,
+    ReviewRequest, ReviewFileRequest, GuidelinesRequest, 
+    DocsIndexRequest, DocsAskRequest, DocsSearchRequest
 )
 from src.codewalk.api import state
 from src.codewalk.ingestion.scanner import scan_directory
@@ -712,6 +713,85 @@ async def get_architecture():
         "centrality": runtime.centrality(top_n=10),
         "cycles": runtime.detect_cycles(),
     }
+
+# ─── POST /docs/index ────────────────────────────────────────────────
+@app.post("/docs/index")
+def docs_index(req: DocsIndexRequest):
+    store = state.get_doc_store()
+    result = store.index_docs(req.docs_path)
+    return result
+
+# ─── POST /docs/search ──────────────────────────────────────────────
+@app.post("/docs/search")
+def docs_search(req: DocsSearchRequest):
+    store = state.get_doc_store()
+
+    if store.chunk_count() == 0:
+        raise HTTPException(status_code=400, detail="No documents indexed yet.")
+
+    results = store.search(req.query, n_results=req.n_results)
+
+    return {
+        "query": req.query,
+        "results": [
+            {
+                "text": r["text"],
+                "metadata": r["metadata"],
+                "distance": r["distance"],
+            }
+            for r in results
+        ],
+    }
+
+
+# ─── POST /docs/ask ─────────────────────────────────────────────────
+@app.post("/docs/ask")
+def docs_ask(req: DocsAskRequest):
+    from src.codewalk.config import get_llm
+    from src.codewalk.doc_knowledge.prompts import DOC_ASK_PROMPT
+
+    store = state.get_doc_store()
+
+    if store.chunk_count() == 0:
+        raise HTTPException(status_code=400, detail="No documents indexed yet.")
+    
+    results = store.search(req.question, n_results=req.n_results)
+
+    if not results:
+        return {"answer": "No relevant documents found.", "sources": []}
+    
+    # Build context
+    context_parts = []
+    for result in results:
+        metadata = result["metadata"]
+        source = f"{metadata.get('doc_path', '?')} > {metadata.get('section', '?')}"
+        context_parts.append(f"--- {source} ---\n{result['text']}")
+    
+    context = "\n\n".join(context_parts)
+
+    prompt = DOC_ASK_PROMPT.format(context=context, question=req.question)
+
+    llm = get_llm(temperature=0)
+
+    response = llm.invoke(prompt)
+
+    sources = [
+        {
+            "doc_path": r["metadata"].get("doc_path", "?"),
+            "section": r["metadata"].get("section", "?"),
+        }
+        for r in results
+    ]
+
+    return {
+        "answer": response.content,
+        "sources": sources,
+    }
+
+
+
+
+
 
 # ─── Health check ───────────────────────────────────────────────────
 

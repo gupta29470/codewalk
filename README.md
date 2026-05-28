@@ -72,13 +72,14 @@ Four ways to use it:
 | 🔎 **Semantic Search** | ChromaDB vector search on embedded code chunks (RAG) |
 | 🔬 **Code Review** | Multi-stage review pipeline: test coverage, blast radius, guidelines RAG, context-enriched deep analysis |
 | 🔄 **Incremental Reindex** | Content hash comparison — only re-embeds changed files, skips unchanged |
-| 🧩 **MCP Server** | 20 tools for VS Code Copilot / Claude Code / Cursor / Codex |
+| 🧩 **MCP Server** | 23 tools for VS Code Copilot / Claude Code / Cursor / Codex |
 | 🎙️ **Voice Interface** | Talk to your codebase — mic recording, local STT (faster-whisper), Copilot-driven routing (MCP) / Ollama routing (API), TTS response |
 | 🔬 **Graph Intelligence** | DuckDB persistent graph + igraph C-speed traversal: cycle detection, centrality, import chain tracing |
 | 🧬 **Corrective RAG** | Distance-based chunk filtering (free) + LLM answer grading + query rewriting for reliable answers |
 | 📦 **Parent-Child Chunking** | Full functions stored as parents, sub-chunks searched — retrieve complete context on match |
 | ⚡ **Parallel Embedding** | Producer-consumer pipeline — CPU chunking overlaps with GPU embedding |
 | 🏗️ **Multi-Provider LLM** | Ollama (local), OpenAI, Anthropic, Groq, Gemini, OpenRouter |
+| 📚 **Doc Indexing** | Index team docs (.md, .pdf, .txt) — search and ask questions with source citations |
 | 🌐 **15+ Languages** | Python, JS, TS, Java, Go, Rust, Ruby, PHP, C#, C++, C, Dart, Kotlin, Swift, YAML |
 
 ### Supported Languages
@@ -365,7 +366,7 @@ Codewalk runs as an MCP (Model Context Protocol) server, so any AI agent that sp
    ![Start Server](assets/mcp-start-server.png)
 
 6. The server starts in the background (stdio transport)
-7. Open Copilot Chat → type **`@codewalk`** → all 20 tools are available
+7. Open Copilot Chat → type **`@codewalk`** → all 23 tools are available
 
    ![MCP tools list](assets/mcp-tools-list.png)
 
@@ -385,7 +386,9 @@ Add to `.vscode/mcp.json` in your desired project:
       "cwd": "/path/to/codewalk",
       "env": {
         "REPO_PATH": "${workspaceFolder}",
-        "EXCLUDE_PATHS": ""
+        "EXCLUDE_PATHS": "",
+        "REVIEW_GUIDELINES_PATH": "",
+        "CODE_DOCS_PATH": ""
       }
     }
   }
@@ -393,6 +396,10 @@ Add to `.vscode/mcp.json` in your desired project:
 ```
 
 > **`EXCLUDE_PATHS`** — comma-separated list of paths/patterns to skip during scanning. Example: `"tests,docs,scripts/legacy,*.generated.*"`
+
+> **`REVIEW_GUIDELINES_PATH`** — path to a folder of team coding guidelines (.md files). Used by `codewalk_review_diff` and `codewalk_review_file` to check code against your team's standards. Example: `"/path/to/team/review-guidelines"`
+
+> **`CODE_DOCS_PATH`** — default path for team documents (.md, .pdf, .txt). Used by `codewalk_index_docs` if no path argument is given. Example: `"/path/to/team/docs"`
 
 > **Customizing file filters:** Codewalk ships with a built-in skip list (binary files, lock files, `node_modules/`, etc.). If you want to **remove** a predefined skip rule (e.g., to index `.md` or `.css` files), edit [`src/codewalk/ingestion/file_filter.py`](src/codewalk/ingestion/file_filter.py).
 
@@ -439,7 +446,9 @@ Add to `~/.claude/mcp.json`:
       "cwd": "/path/to/codewalk",
       "env": {
         "REPO_PATH": "/path/to/target/repo",
-        "EXCLUDE_PATHS": ""
+        "EXCLUDE_PATHS": "",
+        "REVIEW_GUIDELINES_PATH": "",
+        "CODE_DOCS_PATH": ""
       }
     }
   }
@@ -458,7 +467,9 @@ Settings → MCP Servers → Add:
     "cwd": "/path/to/codewalk",
     "env": {
       "REPO_PATH": "/path/to/target/repo",
-      "EXCLUDE_PATHS": ""
+      "EXCLUDE_PATHS": "",
+      "REVIEW_GUIDELINES_PATH": "",
+      "CODE_DOCS_PATH": ""
     }
   }
 }
@@ -477,7 +488,9 @@ Add to `~/.codex/mcp.json`:
       "cwd": "/path/to/codewalk",
       "env": {
         "REPO_PATH": "/path/to/target/repo",
-        "EXCLUDE_PATHS": ""
+        "EXCLUDE_PATHS": "",
+        "REVIEW_GUIDELINES_PATH": "",
+        "CODE_DOCS_PATH": ""
       }
     }
   }
@@ -531,6 +544,9 @@ You just tell the AI to analyze — **the AI handles the rest automatically**.
 │  codewalk_get_execution_flow    → module/file dependency flow       │
 │  codewalk_get_architecture_health → bottlenecks, cycles, key files  │
 │  call_chain(source, target)     → trace import path between files   │
+│  codewalk_index_docs(path)      → index .md/.pdf/.txt docs          │
+│  codewalk_search_docs(query)    → search indexed documents           │
+│  codewalk_ask_docs(question)    → RAG answer grounded in docs        │
 └─────────────────────────────────────────────────────────────────────┘
 
 ┌─────────────────────────────────────────────────────────────────────┐

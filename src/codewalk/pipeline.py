@@ -16,11 +16,10 @@ from src.codewalk.embeddings.vector_store import VectorStore
 from src.codewalk.analysis.relevance_filter import filter_files_with_llm
 from src.codewalk.config import settings
 from src.codewalk.log import log as _log
-
-CODEWALK_VERSION = "1.13.1"
+from src.codewalk import __version__ as CODEWALK_VERSION
 
 _SENTINEL = object()
-EMBED_BATCH_SIZE = 256
+EMBED_BATCH_SIZE = 128
 
 logger = logging.getLogger("codewalk")
 

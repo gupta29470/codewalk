@@ -26,6 +26,7 @@ from src.codewalk.analysis.module_detector import detect_modules
 from src.codewalk.generation.diagram_generator import generate_module_diagram
 from src.codewalk.embeddings.vector_store import VectorStore
 from src.codewalk.rag.chain import format_context, retrieve_corrective
+from src.codewalk.rag.prompts import SYSTEM_PROMPT, QUESTION_PROMPT
 from src.codewalk.rag.retrieval_quality import filter_by_distance
 from src.codewalk.pipeline import full_index_parallel, index_from_paths_parallel, incremental_reindex
 from src.codewalk.ingestion.file_filter import should_skip
@@ -40,6 +41,7 @@ from src.codewalk.query import (
     explain_function_text, overview_text, blast_radius_map_text,
     reading_order_text, execution_flow_text,
 )
+from src.codewalk.doc_knowledge.prompts import DOC_ASK_PROMPT
 
 
 # ─── Create the MCP server ──────────────────────────────────────────
@@ -58,6 +60,7 @@ mcp = FastMCP(
         "1) codewalk_analyze_codebase — detect modules and structure.\n"
         "   → If the response says 'INDEX READY', SKIP steps 2-6 and go straight to answering questions.\n"
         "   → If the response says 'INDEX EMPTY', continue with steps 2-6.\n"
+        "   → If the response says 'indexed successfully', SKIP steps 2-6 (auto-indexed with pattern filter).\n"
         "2) codewalk_scan_files(batch=1) — get file paths for filtering.\n"
         "3) Review paths. KEEP: source code, business logic, services, models, "
         "controllers, UI, entry points, config with logic. "
@@ -90,6 +93,11 @@ mcp = FastMCP(
         "## ARCHITECTURE ANALYSIS\n"
         "- codewalk_get_architecture_health — bottlenecks, key files, circular dependencies, refactoring priorities\n"
         "- codewalk_call_chain(source, target) — trace the shortest import path between two files\n"
+        "\n"
+        "## DOCUMENTATION SEARCH\n"
+        "- codewalk_index_docs(docs_path) — index a folder of .md/.pdf/.txt docs for semantic search\n"
+        "- codewalk_search_docs(query) — search indexed docs, returns raw chunks for browsing\n"
+        "- codewalk_ask_docs(question) — search + answer grounded in docs with citations\n"
         "\n"
         "## VOICE COMPANION\n"
         "- codewalk_voice_ask — record mic + transcribe, then YOU:\n"
@@ -140,18 +148,19 @@ MCP_BATCH_SIZE = 100  # files per batch for Copilot filtering
 # ─── TOOL 1 [SETUP · user+AI]: codewalk_analyze_codebase ────────────
 @mcp.tool()
 def codewalk_analyze_codebase() -> str:
-    """Analyze a codebase structure and auto-index for search.
+    """Analyze a codebase structure and prepare for search.
 
     This must be called FIRST. It will:
     1. Detect modules, dependencies, and blast radius
     2. If an index already exists → skip to ready state (INDEX READY)
-    3. If no index exists → auto-filter files (skip tests/node_modules/etc)
-       and embed them for semantic search
+    3. If no index exists + USE_LLM_FILTER=true → return INDEX EMPTY,
+       proceed to batch filter workflow (steps 2-6)
+    4. If no index exists + USE_LLM_FILTER=false → auto-filter with
+       pattern matching and index immediately
 
-    No additional steps needed — this tool handles everything.
-    After this returns, query tools are ready to use.
-
-    ⏩ NEXT STEP: Use any query tool (codewalk_get_overview, codewalk_search_codebase, etc.)
+    ⏩ NEXT STEP:
+      - INDEX READY → use any query tool directly
+      - INDEX EMPTY → call codewalk_scan_files(batch=1) to start filtering
     """
     _log(f"[codewalk_analyze_codebase] Starting analysis: {settings.repo_path}")
     state.rebuild_analysis_cache()
@@ -185,8 +194,20 @@ def codewalk_analyze_codebase() -> str:
             f"Ready to answer questions — use query tools directly."
         )
 
-    # ── Auto-filter: use built-in skip patterns (no user intervention) ──
-    _log("[codewalk_analyze_codebase] INDEX EMPTY — auto-filtering and indexing...")
+    # ── INDEX EMPTY: use_llm_filter decides the path ──
+    if settings.use_llm_filter:
+        # LLM filter ON → let Copilot filter via batch workflow (steps 2-6)
+        _log("[codewalk_analyze_codebase] INDEX EMPTY + use_llm_filter=True → batch workflow")
+        return (
+            f"Codebase analyzed successfully.\n"
+            f"Files found: {len(state._files)}\n"
+            f"Modules found: {', '.join(modules)}\n"
+            f"Search index: INDEX EMPTY — needs file filtering and indexing.\n\n"
+            f"⏩ NEXT STEP: Call codewalk_scan_files(batch=1) to start filtering files."
+        )
+
+    # LLM filter OFF → auto-index with pattern-based skip
+    _log("[codewalk_analyze_codebase] INDEX EMPTY + use_llm_filter=False → auto-indexing...")
     all_paths = [f["file_path"] for f in state._files if not should_skip(f["file_path"])]
     _log(f"[codewalk_analyze_codebase] Auto-filtered to {len(all_paths)} files (from {len(state._files)} total)")
 
@@ -283,10 +304,11 @@ def codewalk_search_codebase(query: str) -> str:
         f"Confidence: {result['confidence']:.2f} | "
         f"Retrieval good: {result['retrieval_good']} | "
         f"Chunks: {result['total_after_filter']}/{result['total_retrieved']}\n"
-        f"Generate your answer from the code chunks above. "
-        f"Cite file paths and line numbers."
     )
-    return context + meta
+    prompt = SYSTEM_PROMPT + "\n" + QUESTION_PROMPT.format(
+        context=context, question=query
+    )
+    return prompt + meta
 
 
 # ─── TOOL 3 [QUERY · user+AI]: codewalk_get_module_info ──────────────
@@ -1113,6 +1135,8 @@ def codewalk_voice_ask() -> str:
         f"   - User asks about dependencies or execution flow → `codewalk_get_execution_flow()`\n"
         f"   - User asks where to start reading → `codewalk_get_reading_order()`\n"
         f"   - User asks to review changes → `codewalk_review_diff()`\n"
+        f"   - User asks about docs/guides/runbooks → `codewalk_ask_docs(question)`\n"
+        f"   - User asks to index/load documents → `codewalk_index_docs(path)`\n"
         f"   - DEFAULT: if user names something that could be a module → `codewalk_get_module_info`, otherwise → `codewalk_search_codebase`\n"
         f"2. Show the FULL tool result as text in the chat — same detail as a typed question.\n"
         f"3. Then call `codewalk_speak()` with a 2-4 sentence plain-English spoken summary.\n"
@@ -1260,6 +1284,109 @@ def codewalk_call_chain(source: str, target: str) -> str:
     return "\n".join(lines)
 
 
+# ─── TOOL 21 [DOCS]: codewalk_index_docs ─────────────────────────────
+@mcp.tool()
+def codewalk_index_docs(docs_path: str) -> str:
+    """Index a folder of documents (.md, .pdf, .txt) for semantic search.
+
+    Parses all supported documents, splits them into chunks by section/page,
+    embeds them, and stores in a separate ChromaDB collection.
+
+    Args:
+        docs_path: Absolute path to the documents folder.
+                   Example: "/Users/you/team-docs"
+    """
+    store = state.get_doc_store()
+
+    result = store.index_docs(docs_path)
+
+    if result["chunks_stored"] == 0:
+        return (
+            f"No supported documents found in: {docs_path}\n"
+            f"Supported formats: .md, .pdf, .txt"
+        )
+    
+    return (
+        f"## Docs Indexed Successfully\n"
+        f"**Documents:** {result['docs_found']}\n"
+        f"**Chunks:** {result['chunks_stored']}\n"
+        f"\nYou can now use `codewalk_search_docs(query)` to search these documents."
+    )
+
+# ─── TOOL 22 [DOCS]: codewalk_search_docs ────────────────────────────
+@mcp.tool()
+def codewalk_search_docs(query: str, n_results: int = 5) -> str:
+    """Search indexed documents for content matching a query.
+
+    Returns the most relevant document chunks with source citations.
+    Use this after codewalk_index_docs to find information in team docs.
+
+    Args:
+        query: What to search for (e.g. "deployment process", "API authentication").
+        n_results: Number of results to return (default 5).
+    """
+    store = state.get_doc_store()
+
+    if store.chunk_count() == 0:
+        return "No documents indexed yet. Run codewalk_index_docs(path) first."
+    
+    results = store.search(query, n_results=n_results)
+    if not results:
+        return f"No relevant documents found for: '{query}'"
+    
+    lines = [f"## Document Search: '{query}'\n"]
+
+    for index, result in enumerate(results):
+        meta = result["metadata"]
+        distance = result.get("distance")
+
+        score_str = f" (distance: {distance:.3f})" if distance is not None else ""
+
+        lines.append(f"### Result {index + 1}{score_str}")
+        lines.append(f"**Source:** {meta.get('doc_path', '?')} > {meta.get('section', '?')}")
+        if meta.get("page"):
+            lines.append(f"**Page:** {meta['page']}")
+
+        lines.append(f"```\n{result['text'][:15000]}\n```\n")
+    
+    return "\n".join(lines)
+
+# ─── TOOL 23 [DOCS]: codewalk_ask_docs ───────────────────────────────
+@mcp.tool()
+def codewalk_ask_docs(question: str, n_results: int = 5) -> str:
+    """Ask a question and get an answer grounded in indexed documents.
+
+    Retrieves relevant document chunks, formats them with source citations,
+    and returns context with instructions for answering. Use for questions
+    like "How do we deploy?" or "What's our API rate limit?"
+
+    Args:
+        question: The question to answer from the docs.
+        n_results: Number of document chunks to retrieve (default 5).
+    """
+    store = state.get_doc_store()
+
+    if store.chunk_count() == 0:
+        return "No documents indexed yet. Run codewalk_index_docs(path) first."
+
+    results = store.search(question, n_results=n_results)
+
+    if not results:
+        return f"No relevant documents found for: '{question}'"
+
+    # Build context — same format DOC_ASK_PROMPT expects
+    context_parts = []
+    for r in results:
+        meta = r["metadata"]
+        source = f"{meta.get('doc_path', '?')} > {meta.get('section', '?')}"
+        context_parts.append(f"--- {source} ---\n{r['text']}")
+
+    context = "\n\n".join(context_parts)
+
+    # Return the full prompt — Copilot reads this and answers
+    return DOC_ASK_PROMPT.format(context=context, question=question)
+
+
 # ─── Shared tool lookup map (used by voice_ask, backends.py) ──
 # NOTE: Must be defined AFTER all tool functions.
 _TOOL_MAP = {
@@ -1281,6 +1408,9 @@ _TOOL_MAP = {
     "codewalk_load_guidelines": codewalk_load_guidelines,
     "codewalk_get_architecture_health": codewalk_get_architecture_health,
     "codewalk_call_chain": codewalk_call_chain,
+    "codewalk_index_docs": codewalk_index_docs,
+    "codewalk_search_docs": codewalk_search_docs,
+    "codewalk_ask_docs": codewalk_ask_docs,
 }
 
 if __name__ == "__main__":

@@ -32,7 +32,12 @@ class Settings(BaseSettings):
     # False = pattern matching only (faster, keeps all source files)
     use_llm_filter: bool = os.getenv("USE_LLM_FILTER", "true").lower() in ("true", "1", "yes")
 
-    review_guidelines_path: str = os.getenv("REVIEW_GUIDELINES_PATH", "review_guidelines")
+    review_guidelines_path: str = os.getenv("REVIEW_GUIDELINES_PATH", "")
+
+    # Optional default path for team documents (PDF, markdown, txt)
+    # Override via .env: CODE_DOCS_PATH=/path/to/team/docs
+    # Can also be passed directly to codewalk_index_docs(path)
+    code_docs_path: str = os.getenv("CODE_DOCS_PATH", "")
 
 
     class Config:

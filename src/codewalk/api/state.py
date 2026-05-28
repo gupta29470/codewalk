@@ -13,6 +13,8 @@ from src.codewalk.log import log as _log
 from src.codewalk.graph.graph_store import GraphStore
 from src.codewalk.graph.graph_runtime import GraphRuntime
 
+from src.codewalk.doc_knowledge.doc_store import DocStore
+
 logger = logging.getLogger("codewalk")
 
 # ─── Module-level state (single source of truth for MCP + API) ──────
@@ -28,6 +30,7 @@ _graph_store: GraphStore | None = None
 _graph_runtime: GraphRuntime | None = None
 _banner_shown = False
 _init_lock = threading.Lock()
+_doc_store: DocStore | None = None
 
 def get_store() -> VectorStore:
     """Get the VectorStore. Raises if not initialized."""
@@ -79,6 +82,15 @@ def get_graph_runtime() -> GraphRuntime:
 def get_graph_store() -> GraphStore | None:
     """Get the GraphStore (DuckDB). Returns None if not initialized."""
     return _graph_store
+
+def get_doc_store() -> DocStore:
+    """Get or create the DocStore (lazy init — no analyze needed)."""
+    global _doc_store
+    if _doc_store is None:
+        _doc_store = DocStore(persist_dir=chroma_path())
+        _doc_store.create_collection()
+
+    return _doc_store
 
 
 def initialize(store: VectorStore, agent, modules_result: dict, analyze_result: dict,
@@ -259,8 +271,8 @@ def _check_upgrade_banner(repo_path: str):
     
     stored_version = meta.get("codewalk_version", "0.0.0")
 
-    from src.codewalk.pipeline import CODEWALK_VERSION
-    current_version = CODEWALK_VERSION
+    from src.codewalk import __version__
+    current_version = __version__
 
     if stored_version < current_version:
         _log(

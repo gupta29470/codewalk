@@ -73,3 +73,14 @@ class ErrorResponse(BaseModel):
     """Error response for any endpoint."""
     error: str
     detail: str = ""
+
+class DocsIndexRequest(BaseModel):
+    docs_path: str
+
+class DocsSearchRequest(BaseModel):
+    query: str
+    n_results: int = 5
+
+class DocsAskRequest(BaseModel):
+    question: str
+    n_results: int = 5
