@@ -21,10 +21,11 @@ class DocStore:
       5. delete_doc(doc_path)  → remove all chunks for one document
       6. clear()               → wipe the entire docs collection
     """
-    def __init__(self, persist_dir: str = "./data/chroma"):
+    def __init__(self, persist_dir: str = "./data/chroma", collection_name: str = "docs"):
         self.client = chromadb.PersistentClient(path=persist_dir)
         self.embedding_model = get_embedding_model()
         self.collection = None
+        self._collection_name = collection_name
 
     def create_collection(self):
         """Create or get the 'docs' collection.
@@ -33,7 +34,7 @@ class DocStore:
                multiple times. cosine space matches what we use for code.
         """
         self.collection = self.client.get_or_create_collection(
-            name="docs",
+            name=self._collection_name,
             metadata={"hnsw:space": "cosine"},
         )     
 
@@ -158,7 +159,7 @@ class DocStore:
         TEACH: Nuclear option — wipes all indexed docs.
                Used when user wants to re-index from scratch.
         """
-        self.client.delete_collection("docs")
+        self.client.delete_collection(self._collection_name)
         self.create_collection()
 
         

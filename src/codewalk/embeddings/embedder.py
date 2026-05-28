@@ -5,14 +5,9 @@ from langchain_core.embeddings import Embeddings
 from src.codewalk.config import settings
 from src.codewalk.log import log as _log
 
-# Cap sequence length to prevent quadratic attention blowup.
-# 8192 tokens ≈ 32K chars — anything longer gets truncated by the model.
-_MAX_SEQ_LENGTH = 8192
+_MAX_SEQ_LENGTH = 4096
 
-# Characters to keep per chunk before embedding.
-# ~4 chars/token → 8192 tokens. Prevents tokenizer from producing
-# huge sequences that blow up attention matrices.
-_MAX_CHUNK_CHARS = 30_000
+_MAX_CHUNK_CHARS = 15_000
 
 def _detect_device() -> str:
     """Auto-detect the best available compute device."""
@@ -42,10 +37,12 @@ class JinaCodeEmbeddings(Embeddings):
         device = device or _detect_device()
         self._device = device
         _log(f"Loading embedding model: {model_name} (device={device})")
+        model_kwargs = {"dtype": torch.float16} if device != "cpu" else {}
         self._model = SentenceTransformer(
             model_name,
             device=device,
             trust_remote_code=True,
+            model_kwargs=model_kwargs,
         )
         # Cap max sequence length to prevent OOM from huge attention matrices.
         # Attention is O(seq_len²) — 32K tokens → 4x memory vs 16K.
@@ -64,7 +61,7 @@ class JinaCodeEmbeddings(Embeddings):
     def embed_documents(self, texts: list[str]) -> list[list[float]]:
         """Embed a list of documents (batch)."""
         texts = [t[:_MAX_CHUNK_CHARS] for t in texts]
-        vectors = self._model.encode(texts, normalize_embeddings=True, batch_size=4)
+        vectors = self._model.encode(texts, normalize_embeddings=True, batch_size=16)
         return vectors.tolist()
     
 # Singleton — load model once, reuse everywhere
@@ -110,15 +107,24 @@ def embed_chunks(chunks: list[dict]) -> list[dict]:
     if not valid_texts:
         return embedded
     
-    # Conservative batch to stay within MPS/GPU memory limits.
-    EMBED_BATCH = 16
-    total = len(valid_texts)
-    _log(f"  Embedding {total} chunks (batch_size={EMBED_BATCH})...")
+    # Sort by text length so similar-sized chunks batch together.
+    # Eliminates padding waste — short chunks aren't padded to the
+    # length of a long outlier in the same batch.
+    indexed_pairs = list(enumerate(zip(valid_chunks, valid_texts)))
+    indexed_pairs.sort(key=lambda x: len(x[1][1]))
+    sorted_indices, sorted_pairs = zip(*indexed_pairs)
+    sorted_chunks = [p[0] for p in sorted_pairs]
+    sorted_texts = [p[1] for p in sorted_pairs]
 
+    EMBED_BATCH = 32
+    total = len(sorted_texts)
+    _log(f"  Embedding {total} chunks (batch_size={EMBED_BATCH}, sorted by length)...")
+
+    batch_num = 0
     for start in range(0, total, EMBED_BATCH):
         end = min(start + EMBED_BATCH, total)
-        batch_texts = valid_texts[start:end]
-        batch_chunks = valid_chunks[start:end]
+        batch_texts = sorted_texts[start:end]
+        batch_chunks = sorted_chunks[start:end]
 
         try:
             vectors = model.embed_documents(batch_texts)
@@ -150,5 +156,11 @@ def embed_chunks(chunks: list[dict]) -> list[dict]:
                             _log(f"  SKIP {chunk['file_path']}::chunk{chunk['chunk_index']}: {e2}")
 
         _log(f"  Embedded {len(embedded)}/{total} chunks")
+
+        # Periodic GPU cleanup every 5 batches to prevent memory fragmentation.
+        # Cost: ~10ms per clear. Prevents OOM cascades that cost minutes.
+        batch_num += 1
+        if batch_num % 5 == 0:
+            _clear_gpu_cache()
 
     return embedded

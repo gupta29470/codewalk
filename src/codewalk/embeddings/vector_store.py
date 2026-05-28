@@ -15,15 +15,17 @@ class VectorStore:
         self.parents_collection = None
         self.children_collection = None
         self.collection = None
+        self._collection_prefix = "codebase"
 
     def create_collection(self, name: str = "codebase"):
-        """Create parent + child ChromaDB collections."""
+        """Create parent + child ChromaDB collections, prefixed with repo name."""
+        self._collection_prefix = name
         self.parents_collection = self.client.get_or_create_collection(
-            name="parents",
+            name=f"{name}_parents",
             metadata={"hnsw:space": "cosine"}
         )
         self.children_collection = self.client.get_or_create_collection(
-            name="children",
+            name=f"{name}_children",
             metadata={"hnsw:space": "cosine"}
         )
         self.collection = self.parents_collection
@@ -254,9 +256,11 @@ class VectorStore:
 
     def clear_collection(self):
         """Delete all collections and recreate them."""
-        self.client.delete_collection("parents")
-        self.client.delete_collection("children")
-        self.create_collection()
+        for col in self.client.list_collections():
+            col_name = col if isinstance(col, str) else col.name
+            if col_name in (self.parents_collection.name, self.children_collection.name):
+                self.client.delete_collection(col_name)
+        self.create_collection(self._collection_prefix)
 
 
     

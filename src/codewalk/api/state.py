@@ -87,7 +87,8 @@ def get_doc_store() -> DocStore:
     """Get or create the DocStore (lazy init — no analyze needed)."""
     global _doc_store
     if _doc_store is None:
-        _doc_store = DocStore(persist_dir=chroma_path())
+        col_name = f"{get_collection_name()}_docs"
+        _doc_store = DocStore(persist_dir=chroma_path(), collection_name=col_name)
         _doc_store.create_collection()
 
     return _doc_store
