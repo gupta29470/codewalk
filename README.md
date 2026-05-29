@@ -72,7 +72,7 @@ Four ways to use it:
 | 🔎 **Semantic Search** | ChromaDB vector search on embedded code chunks (RAG) |
 | 🔬 **Code Review** | Multi-stage review pipeline: test coverage, blast radius, guidelines RAG, context-enriched deep analysis |
 | 🔄 **Incremental Reindex** | Content hash comparison — only re-embeds changed files, skips unchanged |
-| 🧩 **MCP Server** | 23 tools for VS Code Copilot / Claude Code / Cursor / Codex |
+| 🧩 **MCP Server** | 20 tools for VS Code Copilot / Claude Code / Cursor / Codex |
 | 🎙️ **Voice Interface** | Talk to your codebase — mic recording, local STT (faster-whisper), Copilot-driven routing (MCP) / Ollama routing (API), TTS response |
 | 🔬 **Graph Intelligence** | DuckDB persistent graph + igraph C-speed traversal: cycle detection, centrality, import chain tracing |
 | 🧬 **Corrective RAG** | Distance-based chunk filtering (free) + LLM answer grading + query rewriting for reliable answers |
@@ -366,7 +366,7 @@ Codewalk runs as an MCP (Model Context Protocol) server, so any AI agent that sp
    ![Start Server](assets/mcp-start-server.png)
 
 6. The server starts in the background (stdio transport)
-7. Open Copilot Chat → type **`@codewalk`** → all 23 tools are available
+7. Open Copilot Chat → type **`@codewalk`** → all 20 tools are available
 
    ![MCP tools list](assets/mcp-tools-list.png)
 
@@ -401,7 +401,11 @@ Add to `.vscode/mcp.json` in your desired project:
 
 > **`CODE_DOCS_PATH`** — default path for team documents (.md, .pdf, .txt). Used by `codewalk_index_docs` if no path argument is given. Example: `"/path/to/team/docs"`
 
-> **Customizing file filters:** Codewalk ships with a built-in skip list (binary files, lock files, `node_modules/`, etc.). If you want to **remove** a predefined skip rule (e.g., to index `.md` or `.css` files), edit [`src/codewalk/ingestion/file_filter.py`](src/codewalk/ingestion/file_filter.py).
+> **Customizing file filters:** Codewalk uses a deterministic file filter ([`src/codewalk/ingestion/file_filter.py`](src/codewalk/ingestion/file_filter.py)) — no LLM involved. If a folder or file is **not being indexed** that you need, you have three options:
+>
+> 1. **`EXCLUDE_PATHS` env var** — comma-separated dirs/patterns passed via `mcp.json` or `.env`. Example: `"test,docs,*.generated.*"`. These are checked at scan time.
+> 2. **`.codewalkignore` file** — gitignore-style patterns in the repo root (see below).
+> 3. **Edit `file_filter.py` directly** — remove entries from `SKIP_DIRS`, `SKIP_EXTENSIONS`, `SKIP_FILES`, or `SKIP_SUFFIXES` to allow specific file types that are blocked by default (e.g., `.md`, `.css`, `.sql`, `migrations/`).
 
 > **`.codewalkignore`** — Create a `.codewalkignore` file in the root of the repo you're analyzing to skip specific files/directories:
 >
@@ -429,7 +433,7 @@ Add to `.vscode/mcp.json` in your desired project:
 >
 > Patterns are cached in `_codewalkignore_patterns` (loaded once per session). If you change the repo being analyzed, `reset_codewalkignore()` clears the cache so the next repo's `.codewalkignore` gets loaded.
 
-Then in Copilot Chat: **`@codewalk`** → follow the scan → filter → index workflow.
+Then in Copilot Chat: **`@codewalk`** → it will call `codewalk_analyze_codebase` automatically.
 
 > **Note:** After adding or modifying `.vscode/mcp.json`, reload the VS Code window: **`Cmd+Shift+P`** → **`Developer: Reload Window`**.
 
@@ -508,28 +512,12 @@ You just tell the AI to analyze — **the AI handles the rest automatically**.
 ┌─────────────────────────────────────────────────────────────────────┐
 │                    SETUP WORKFLOW (run once)                        │
 │                                                                     │
-│  Step 1                                                             │
+│  Step 1 (only step)                                                 │
 │  codewalk_analyze_codebase                                          │
-│       │  scans files, builds dependency graph, detects modules      │
+│       │  scans files, builds dependency graph, detects modules,     │
+│       │  filters with file_filter.py, chunks, embeds — all in one   │
 │       ▼                                                             │
-│  Step 2                                                             │
-│  codewalk_scan_files(batch=1)                                       │
-│       │  returns ~100 file paths for review                         │
-│       ▼                                                             │
-│  Step 3                                                             │
-│  codewalk_submit_filtered_files(paths=[...])                        │
-│       │  submit relevant source files from this batch               │
-│       ▼                                                             │
-│  ┌─── More batches? ───┐                                            │
-│  │ YES                 │ NO                                         │
-│  │ Go to Step 2        │                                            │
-│  │ (batch=2, 3, ...)   ▼                                            │
-│  └─────────────┐  Step 4                                            │
-│                │  codewalk_index_filtered_files                      │
-│                │       │  chunks + embeds all submitted files        │
-│                │       ▼                                             │
-│                │  ✅ READY — all query tools unlocked                │
-│                └────────────────────────────────────────             │
+│  ✅ READY — all query tools unlocked                                │
 └─────────────────────────────────────────────────────────────────────┘
 
 ┌─────────────────────────────────────────────────────────────────────┐
@@ -580,28 +568,17 @@ or
 ```
 
 **What happens behind the scenes (you don't need to do anything):**
-1. The AI calls `codewalk_analyze_codebase` → scans all files, detects modules, builds the dependency graph
-2. The AI calls `codewalk_scan_files(batch=1)` → gets a batch of file paths
-3. The AI reviews the paths — keeps source code (`.py`, `.ts`, `.js`), skips junk (`node_modules/`, `__pycache__/`, test files, images)
-4. The AI calls `codewalk_submit_filtered_files(file_paths=[...])` → submits the good files
-5. Steps 2-4 repeat for each batch until all files are processed
-6. The AI calls `codewalk_index_filtered_files` → embeds everything into the vector database
+1. The AI calls `codewalk_analyze_codebase` → scans all files, filters with `file_filter.py`, detects modules, builds the dependency graph, chunks and embeds everything in one call
 
 **You'll see progress like:**
 ```
-✓ Codebase analyzed — 142 files, 5 modules detected
-✓ Scanning batch 1 of 2... submitted 87 source files
-✓ Scanning batch 2 of 2... submitted 34 source files (LAST BATCH)
-✓ Indexed 121 files → 380 chunks embedded
+✓ Codebase analyzed and indexed successfully
+  Files found: 142
+  Files indexed: 121
+  Chunks embedded: 380
+  Modules found: api, analysis, embeddings, ingestion, rag
 
-Ready! You can now use these tools:
-  - codewalk_get_overview (if LLM didn't call — run manually for project summary)
-  - codewalk_search_codebase (if LLM didn't call — search code by concept)
-  - codewalk_get_module_info (if LLM didn't call — inspect a specific module)
-  - codewalk_explain_function (if LLM didn't call — explain any function/class)
-  - codewalk_get_blast_radius_map (if LLM didn't call — check change risk)
-  - codewalk_get_reading_order (if LLM didn't call — optimal file reading order)
-  - codewalk_get_execution_flow (if LLM didn't call — dependency flow diagram)
+✅ Ready to answer questions — use query tools directly.
 ```
 
 > **Note:** After indexing, the AI agent should automatically call these tools. If it doesn't, you can invoke them manually — the hints above tell you exactly which tools to run.
@@ -610,14 +587,11 @@ Ready! You can now use these tools:
 
 ### ⚠️ If the AI Stops Mid-Workflow
 
-Some LLMs stop after one tool call instead of continuing the full workflow. **Each tool's output tells you exactly what to call next.** If the AI stops, just call the next tool yourself:
+The setup is now a single call — `codewalk_analyze_codebase` does everything. If the AI stops after that, just call any query tool yourself:
 
 | AI stopped after... | You call next |
 |---|---|
-| `codewalk_analyze_codebase` | `codewalk_scan_files(batch=1)` |
-| `codewalk_scan_files` | `codewalk_submit_filtered_files` with the listed paths |
-| `codewalk_submit_filtered_files` | `codewalk_scan_files(batch=<next>)` or `codewalk_index_filtered_files` if last batch |
-| `codewalk_index_filtered_files` | Any query tool — `codewalk_get_overview`, `codewalk_search_codebase`, etc. |
+| `codewalk_analyze_codebase` | Any query tool — `codewalk_get_overview`, `codewalk_search_codebase`, etc. |
 
 > **Tip:** Look for the **⏩ NEXT STEP** line at the bottom of each tool's output — it tells you exactly what to do.
 
@@ -1473,7 +1447,6 @@ codewalk/
 | `EMBEDDING_MODEL` | `jinaai/jina-code-embeddings-1.5b` | Sentence-transformer model for code embeddings |
 | `REPO_PATH` | `src/codewalk` | Default repository path to analyze |
 | `EXCLUDE_PATHS` | — | Comma-separated paths to exclude from scanning (e.g. `tests,docs,*.generated.*`) |
-| `USE_LLM_FILTER` | `true` | `true` = LLM decides which files to embed (smarter, slower). `false` = pattern matching only (faster) |
 | `GROQ_API_KEY` | — | Groq API key |
 | `OPENAI_API_KEY` | — | OpenAI API key |
 | `ANTHROPIC_API_KEY` | — | Anthropic API key |

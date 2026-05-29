@@ -10,7 +10,6 @@ from fastapi import UploadFile, File, Form
 from fastapi.responses import JSONResponse
 
 from src.codewalk.pipeline import full_index_parallel, reindex, chunk_and_embed_parallel, incremental_reindex
-from src.codewalk.analysis.relevance_filter import filter_files_with_llm
 from src.codewalk.api.models import (
     AnalyzeRequest, AnalyzeResponse,
     ChatRequest, ChatResponse,
@@ -93,7 +92,7 @@ async def analyze(request: AnalyzeRequest):
 
         # ── Decide whether to index ──────────────────────────────
         if request.index_mode == "full" or existing_count == 0:
-            index_result = full_index_parallel(request.repo_path, request.collection_name, use_llm_filter=settings.use_llm_filter, persist_dir=persist_dir)
+            index_result = full_index_parallel(request.repo_path, request.collection_name, persist_dir=persist_dir)
         elif request.index_mode == "reindex":
             index_result = reindex(request.repo_path, request.collection_name, persist_dir=persist_dir)
         else:
@@ -159,14 +158,7 @@ async def analyze_stream(request: AnalyzeRequest):
                 yield f"data: {json.dumps({'step': 'scan', 'message': 'Scanning directory...'})}\n\n"
                 files = scan_directory(request.repo_path)
                 scanned_count = len(files)
-                yield f"data: {json.dumps({'step': 'scan', 'message': f'Scanned {scanned_count} files'})}\n\n"
-
-                if settings.use_llm_filter:
-                    yield f"data: {json.dumps({'step': 'filter', 'message': f'Smart filtering {scanned_count} files via LLM — wait time depends on number of files...'})}\n\n"
-                    files = filter_files_with_llm(files)
-                    yield f"data: {json.dumps({'step': 'filter', 'message': f'Kept {len(files)} relevant files (filtered out {scanned_count - len(files)})'})}\n\n"
-                else:
-                    yield f"data: {json.dumps({'step': 'filter', 'message': 'LLM filter disabled — using all scanned files'})}\n\n"
+                yield f"data: {json.dumps({'step': 'scan', 'message': f'Scanned {scanned_count} files (filtered by file_filter)'})}\n\n"
 
                 yield f"data: {json.dumps({'step': 'chunk', 'message': 'Chunking + embedding in parallel...'})}\n\n"
 

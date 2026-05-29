@@ -38,11 +38,8 @@ SKIP_DIRS = {
     "Packages",
     # Elixir
     "_build",
-    # Testing / fixtures
-    "__tests__",
+    # Testing artifacts (keep test SOURCE, skip test OUTPUT)
     "__snapshots__",
-    "testdata",
-    "fixtures",
     # Localization
     "l10n",
     "locales",
@@ -327,12 +324,16 @@ def should_skip(file_path: str) -> bool:
     if path.name in SKIP_FILES:
         return True
     
-    # Skip generated file patterns (e.g. foo.g.dart, bar.freezed.dart)
+    # Skip generated file patterns (e.g. foo.g.dart, bar.pb.go, baz.designer.cs)
     if any(path.name.endswith(suffix) for suffix in SKIP_SUFFIXES):
         return True
     
     # Check .codewalkignore patterns
     if _codewalkignore_matches(file_path):
+        return True
+
+    # Check EXCLUDE_PATHS env var (comma-separated dirs/patterns)
+    if _exclude_paths_matches(file_path):
         return True
 
     return False
@@ -392,4 +393,53 @@ def reset_codewalkignore():
     """Reset cached patterns (call when repo_path changes)."""
     global _codewalkignore_patterns
     _codewalkignore_patterns = None
+
+
+# ─── EXCLUDE_PATHS env var support ───────────────────────────────────
+
+_exclude_paths_parsed: list[str] | None = None
+
+def _load_exclude_paths() -> list[str]:
+    """Parse EXCLUDE_PATHS from settings (comma-separated dirs/patterns)."""
+    global _exclude_paths_parsed
+    if _exclude_paths_parsed is not None:
+        return _exclude_paths_parsed
+
+    from src.codewalk.config import settings
+    raw = settings.exclude_paths.strip()
+    if not raw:
+        _exclude_paths_parsed = []
+        return _exclude_paths_parsed
+
+    _exclude_paths_parsed = [p.strip() for p in raw.split(",") if p.strip()]
+    return _exclude_paths_parsed
+
+
+def _exclude_paths_matches(file_path: str) -> bool:
+    """Check if a file path matches any EXCLUDE_PATHS pattern."""
+    patterns = _load_exclude_paths()
+    if not patterns:
+        return False
+
+    path = Path(file_path)
+    for pattern in patterns:
+        # Glob pattern (contains * or ?)
+        if "*" in pattern or "?" in pattern:
+            if fnmatch_module.fnmatch(file_path, pattern):
+                return True
+            if fnmatch_module.fnmatch(path.name, pattern):
+                return True
+        # Directory/path segment match (e.g. "test", "docs")
+        elif pattern in path.parts:
+            return True
+        # Prefix match (e.g. "scripts/legacy")
+        elif file_path.startswith(pattern + "/") or file_path.startswith(pattern):
+            return True
+    return False
+
+
+def reset_exclude_paths():
+    """Reset cached EXCLUDE_PATHS (call when settings change)."""
+    global _exclude_paths_parsed
+    _exclude_paths_parsed = None
         

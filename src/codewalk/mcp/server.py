@@ -1,17 +1,17 @@
 """Codewalk MCP server — 20 tools for codebase onboarding, search, review, and voice.
 
 Tool categories:
-  SETUP  (1, 9-11):    Analyze repo, scan/filter files, index embeddings.
-  QUERY  (2-8, 19-20): Search code, explain functions, blast radius, reading order, execution flow, architecture health.
-  MAINT  (12-16):      Incremental reindex, refresh analysis, review diff/file, load guidelines.
-  VOICE  (17-18):      Mic record+transcribe (Copilot routes), TTS speak.
+  SETUP  (1):           Analyze repo — scans, filters, chunks, embeds in one call.
+  QUERY  (2-8, 16-17):  Search code, explain functions, blast radius, reading order, execution flow, architecture health.
+  MAINT  (9-13):        Incremental reindex, refresh analysis, review diff/file, load guidelines.
+  VOICE  (14-15):       Mic record+transcribe (Copilot routes), TTS speak.
+  DOCS   (18-20):       Index, search, and ask questions against team docs.
 """
 
 import inspect
 import logging
 import subprocess
 import sys
-from fnmatch import fnmatch
 import asyncio
 
 from mcp.server.fastmcp import FastMCP
@@ -29,7 +29,6 @@ from src.codewalk.rag.chain import format_context, retrieve_corrective
 from src.codewalk.rag.prompts import SYSTEM_PROMPT, QUESTION_PROMPT
 from src.codewalk.rag.retrieval_quality import filter_by_distance
 from src.codewalk.pipeline import full_index_parallel, index_from_paths_parallel, incremental_reindex
-from src.codewalk.ingestion.file_filter import should_skip
 from src.codewalk.config import settings
 from src.codewalk.review.guidelines_loader import get_guidelines_store
 from src.codewalk.voice.stt import record_audio, transcribe
@@ -57,18 +56,11 @@ mcp = FastMCP(
         "analysis that you cannot replicate by reading files.\n"
         "\n"
         "## SETUP WORKFLOW\n"
-        "1) codewalk_analyze_codebase — detect modules and structure.\n"
-        "   → If the response says 'INDEX READY', SKIP steps 2-6 and go straight to answering questions.\n"
-        "   → If the response says 'INDEX EMPTY', continue with steps 2-6.\n"
-        "   → If the response says 'indexed successfully', SKIP steps 2-6 (auto-indexed with pattern filter).\n"
-        "2) codewalk_scan_files(batch=1) — get file paths for filtering.\n"
-        "3) Review paths. KEEP: source code, business logic, services, models, "
-        "controllers, UI, entry points, config with logic. "
-        "SKIP: tests, generated code, assets, docs, lock files, migrations, "
-        "CI/CD, vendor/node_modules, IDE configs, __pycache__. When in doubt, keep it.\n"
-        "4) codewalk_submit_filtered_files — submit relevant paths from this batch.\n"
-        "5) Repeat 2-4 (increment batch) until response says LAST BATCH.\n"
-        "6) codewalk_index_filtered_files — embed all selected files.\n"
+        "1) codewalk_analyze_codebase — ONE CALL does everything:\n"
+        "   detects modules, filters files, chunks, embeds, and indexes.\n"
+        "   → If the response says 'INDEX READY', index already exists — go straight to answering.\n"
+        "   → If the response says 'indexed successfully', just finished — go straight to answering.\n"
+        "   That's it. No scan/filter/submit steps needed.\n"
         "\n"
         "## ANSWERING QUESTIONS (after setup)\n"
         "- 'What does X do?' → codewalk_explain_function(X) — line-by-line explanation\n"
@@ -109,10 +101,10 @@ mcp = FastMCP(
         "## PRESENTING BLAST RADIUS RESULTS\n"
         "When showing blast radius or overview results, separate files into two groups:\n"
         "1. **Core / Foundational** (design system, utils, extensions, config, constants,\n"
-        "   shared widgets, theme files, base classes) — summarize briefly, e.g.\n"
+        "   shared components, theme files, base classes) — summarize briefly, e.g.\n"
         "   '12 design system files are high-risk as expected.'\n"
-        "2. **Business Logic** (screens, controllers, services, repositories, blocs,\n"
-        "   cubits, use cases, API clients) — show these in full detail.\n"
+        "2. **Business Logic** (screens, pages, controllers, services, repositories,\n"
+        "   state management, use cases, API clients) — show these in full detail.\n"
         "Lead with the Business Logic section — that's what the user cares about.\n"
         "Foundational files being high-risk is expected and not actionable.\n"
         "\n"
@@ -135,12 +127,6 @@ mcp = FastMCP(
     ),
 )
 
-# ─── MCP-only batch filtering state ──────────────────────────────────
-_all_scanned_files: list[dict] = []
-_selected_file_paths: list[str] = []
-MCP_BATCH_SIZE = 100  # files per batch for Copilot filtering
-
-
 # ══════════════════════════════════════════════════════════════════════
 #  SETUP TOOLS — user or AI runs these to onboard a codebase
 # ══════════════════════════════════════════════════════════════════════
@@ -153,17 +139,22 @@ def codewalk_analyze_codebase() -> str:
     This must be called FIRST. It will:
     1. Detect modules, dependencies, and blast radius
     2. If an index already exists → skip to ready state (INDEX READY)
-    3. If no index exists + USE_LLM_FILTER=true → return INDEX EMPTY,
-       proceed to batch filter workflow (steps 2-6)
-    4. If no index exists + USE_LLM_FILTER=false → auto-filter with
-       pattern matching and index immediately
+    3. If no index exists → auto-index all source files (filtered by file_filter.py)
 
-    ⏩ NEXT STEP:
-      - INDEX READY → use any query tool directly
-      - INDEX EMPTY → call codewalk_scan_files(batch=1) to start filtering
+    ⏩ NEXT STEP: use any query tool directly
     """
     _log(f"[codewalk_analyze_codebase] Starting analysis: {settings.repo_path}")
-    state.rebuild_analysis_cache()
+    try:
+        state.rebuild_analysis_cache()
+    except Exception as e:
+        error_msg = str(e)
+        if "lock" in error_msg.lower() or "Could not set lock" in error_msg:
+            return (
+                f"Error: DuckDB lock conflict — another Codewalk process is using the database.\n\n"
+                f"{error_msg}\n\n"
+                f"Fix: Stop the other process (MCP server, API server, or CLI), then retry."
+            )
+        raise
 
     # Check if there's an existing index for search.
     state._store = VectorStore(persist_dir=state.chroma_path())
@@ -190,26 +181,14 @@ def codewalk_analyze_codebase() -> str:
             f"Modules found: {', '.join(modules)}\n"
             f"Search index: INDEX READY — {existing} chunks available.\n"
             f"{guidelines_msg}\n"
-            f"✅ Index already exists. SKIP scan/filter/index steps.\n"
+            f"✅ Index already exists.\n"
             f"Ready to answer questions — use query tools directly."
         )
 
-    # ── INDEX EMPTY: use_llm_filter decides the path ──
-    if settings.use_llm_filter:
-        # LLM filter ON → let Copilot filter via batch workflow (steps 2-6)
-        _log("[codewalk_analyze_codebase] INDEX EMPTY + use_llm_filter=True → batch workflow")
-        return (
-            f"Codebase analyzed successfully.\n"
-            f"Files found: {len(state._files)}\n"
-            f"Modules found: {', '.join(modules)}\n"
-            f"Search index: INDEX EMPTY — needs file filtering and indexing.\n\n"
-            f"⏩ NEXT STEP: Call codewalk_scan_files(batch=1) to start filtering files."
-        )
-
-    # LLM filter OFF → auto-index with pattern-based skip
-    _log("[codewalk_analyze_codebase] INDEX EMPTY + use_llm_filter=False → auto-indexing...")
-    all_paths = [f["file_path"] for f in state._files if not should_skip(f["file_path"])]
-    _log(f"[codewalk_analyze_codebase] Auto-filtered to {len(all_paths)} files (from {len(state._files)} total)")
+    # ── INDEX EMPTY: auto-index all source files ──
+    _log("[codewalk_analyze_codebase] INDEX EMPTY → auto-indexing...")
+    all_paths = [f["file_path"] for f in state._files]
+    _log(f"[codewalk_analyze_codebase] Indexing {len(all_paths)} files")
 
     if not all_paths:
         return (
@@ -509,184 +488,10 @@ def codewalk_get_execution_flow(module_name: str = "") -> str:
 
 
 # ══════════════════════════════════════════════════════════════════════
-#  SETUP TOOLS (continued) — user+AI indexing pipeline
+#  MAINTENANCE TOOLS — user or AI can call after code changes
 # ══════════════════════════════════════════════════════════════════════
 
-# ─── TOOL 9 [SETUP · user+AI]: codewalk_scan_files ──────────────────
-@mcp.tool()
-def codewalk_scan_files(batch: int = 1) -> str:
-    """Get the next batch of file paths for filtering.
-
-    Returns ~100 file paths per batch. Review them and submit the relevant
-    ones via codewalk_submit_filtered_files before calling the next batch.
-
-    KEEP: .py, .ts, .js, .dart, .go, .rs, .java files with business logic,
-          services, models, controllers, entry points, meaningful configs.
-    SKIP: tests/, __pycache__/, node_modules/, .git/, assets/, docs/,
-          *.lock, *.generated.*, migrations/, .github/, IDE configs.
-
-    When response says LAST BATCH → call codewalk_index_filtered_files.
-
-    ⏩ NEXT STEP: codewalk_submit_filtered_files(paths=[...relevant paths from this batch...])
-    ⏪ PREVIOUS STEP: codewalk_analyze_codebase
-
-    Args:
-        batch: Batch number (1-indexed). Start with 1, increment each call.
-    """
-    global _all_scanned_files
-
-    repo_path = settings.repo_path
-    _log(f"[codewalk_scan_files] Batch {batch} requested")
-
-    # Only scan once (batch 1), reuse for subsequent batches
-    if batch == 1:
-        _all_scanned_files = scan_directory(repo_path)
-        _log(f"[codewalk_scan_files] Scanned {len(_all_scanned_files)} total files")
-
-        # Apply EXCLUDE_PATHS filter
-        exclude_raw = settings.exclude_paths.strip()
-        if exclude_raw:
-            patterns = [p.strip() for p in exclude_raw.split(",") if p.strip()]
-            before = len(_all_scanned_files)
-            _all_scanned_files = [
-                f for f in _all_scanned_files
-                if not any(
-                    fnmatch(f["file_path"], pat) or f["file_path"].startswith(pat.rstrip("/") + "/") or ("/" + pat.rstrip("/") + "/") in ("/" + f["file_path"])
-                    for pat in patterns
-                )
-            ]
-            excluded = before - len(_all_scanned_files)
-            _log(f"[codewalk_scan_files] EXCLUDE_PATHS removed {excluded} files (patterns: {patterns})")
-
-    total = len(_all_scanned_files)
-    total_batches = (total + MCP_BATCH_SIZE - 1) // MCP_BATCH_SIZE
-    start = (batch - 1) * MCP_BATCH_SIZE
-    end = min(start + MCP_BATCH_SIZE, total)
-
-    if start >= total:
-        return f"No more batches. Total files: {total}. Call codewalk_index_filtered_files to embed."
-
-    batch_files = _all_scanned_files[start:end]
-    paths = [f["file_path"] for f in batch_files]
-
-    is_last = batch >= total_batches
-    _log(f"[codewalk_scan_files] Returning batch {batch}/{total_batches} ({len(paths)} files) {'LAST' if is_last else ''}")
-    status = "LAST BATCH — after submitting, call codewalk_index_filtered_files" if is_last else f"More batches remain — call codewalk_scan_files(batch={batch + 1}) next"
-
-    next_step = (
-        f"\n\n⏩ NEXT STEP: Call codewalk_submit_filtered_files with the relevant paths from this batch.\n"
-        f"(If the AI doesn't call it automatically, run it yourself.)"
-    )
-
-    return (
-        f"Batch {batch}/{total_batches} ({len(paths)} files, {total} total)\n"
-        f"{status}\n\n"
-        + "\n".join(paths)
-        + next_step
-    )
-
-
-# ─── TOOL 10 [SETUP · user+AI]: codewalk_submit_filtered_files ──────
-@mcp.tool()
-def codewalk_submit_filtered_files(paths: list[str]) -> str:
-    """Submit the relevant file paths from the current codewalk_scan_files batch.
-
-    Only submit paths you want indexed. Accepts file paths and directory
-    paths (a directory matches all files under it).
-    Call once per batch, then call codewalk_scan_files for the next batch.
-
-    Do NOT call with an empty list — skip the call if no files are relevant.
-
-    ⏩ NEXT STEP: codewalk_scan_files(batch=<next_batch_number>) OR codewalk_index_filtered_files (if last batch)
-    ⏪ PREVIOUS STEP: codewalk_scan_files
-
-    Args:
-        paths: File/directory paths from the current batch to index,
-               e.g. ["src/services/auth.py", "models/"]
-    """
-    global _selected_file_paths
-    _selected_file_paths.extend(paths)
-    _log(f"[codewalk_submit_filtered_files] Added {len(paths)} paths (total: {len(_selected_file_paths)})")
-    return f"Added {len(paths)} paths. Total selected so far: {len(_selected_file_paths)}\n\n" \
-           f"⏩ NEXT STEP: Call codewalk_scan_files(batch=<next_batch_number>) for the next batch, " \
-           f"or codewalk_index_filtered_files if all batches are done.\n" \
-           f"(If the AI doesn't call it automatically, run it yourself.)"
-
-
-# ─── TOOL 11 [SETUP · user+AI]: codewalk_index_filtered_files ───────
-@mcp.tool()
-def codewalk_index_filtered_files() -> str:
-    """Index all files submitted via codewalk_submit_filtered_files.
-
-    Call this after processing all codewalk_scan_files batches.
-    Chunks, embeds, and stores the selected files for search.
-
-    ⏩ NEXT STEP: codewalk_get_overview (then any query tool)
-    ⏪ PREVIOUS STEP: codewalk_submit_filtered_files (last batch)
-    """
-    global _selected_file_paths
-
-    repo_path = settings.repo_path
-    selected_count = len(_selected_file_paths)
-    _log(f"[codewalk_index_filtered_files] Starting indexing of {selected_count} selected paths")
-
-    # Open (or create) the persistent collection WITHOUT wiping it first
-    working_store = VectorStore(persist_dir=state.chroma_path())
-    working_store.create_collection(state.get_collection_name())
-    existing_count = working_store.chunk_count()
-
-    if existing_count > 0:
-        # ── Incremental path: existing index found ──────────────────────
-        # Skip files whose content hash hasn't changed; only re-embed changed/new ones.
-        _log(f"[codewalk_index_filtered_files] Existing index ({existing_count} chunks) — using incremental reindex")
-        result = incremental_reindex(_selected_file_paths, repo_path, state.get_collection_name(), persist_dir=state.chroma_path())
-
-        state._store = working_store
-        state.rebuild_analysis_cache(embedded_chunks=result.get("embedded_chunks"))
-        modules = list(state._modules_result["modules"].keys())
-        _selected_file_paths = []
-
-        return (
-            f"Incremental index update complete (existing index had {existing_count} chunks).\n"
-            f"Selected paths: {selected_count}\n"
-            f"Files on disk: {result['files_on_disk']}\n"
-            f"Skipped (unchanged): {result['files_skipped']}\n"
-            f"Re-indexed (changed/new): {result['files_reindexed']}\n"
-            f"Deleted (removed from disk): {result['files_deleted']}\n"
-            f"Chunks embedded: {result['chunks_embedded']}\n"
-            f"Time: {result['total_time']}\n"
-            f"Modules found: {', '.join(modules)}\n\n"
-            f"Ready! You can now use: codewalk_get_overview, codewalk_search_codebase, etc."
-        )
-    else:
-        # ── Full-index path: no existing data ──────────────────────────
-        result = index_from_paths_parallel(_selected_file_paths, repo_path, state.get_collection_name(), persist_dir=state.chroma_path())
-
-        state._store = working_store
-        state.rebuild_analysis_cache(embedded_chunks=result.get("embedded_chunks"))
-        modules = list(state._modules_result["modules"].keys())
-        _selected_file_paths = []
-
-        _log(f"[codewalk_index_filtered_files] Done: {result['files_scanned']} files, {result['chunks_embedded']} chunks embedded")
-
-        return (
-            f"Indexed {result['files_scanned']} files (from {selected_count} selected paths).\n"
-            f"Chunks created: {result['chunks_created']}\n"
-            f"Chunks embedded: {result['chunks_embedded']}\n"
-            f"Time: {result.get('total_time', 'N/A')}\n"
-            f"Steps: {' | '.join(result.get('steps', []))}\n"
-            f"Modules found: {', '.join(modules)}\n\n"
-            f"Ready! You can now use these tools:\n"
-            f"  - codewalk_get_overview — project summary\n"
-            f"  - codewalk_search_codebase — search code by concept\n"
-            f"  - codewalk_get_module_info — inspect a specific module\n"
-            f"  - codewalk_explain_function — explain any function/class\n"
-            f"  - codewalk_get_blast_radius_map — check change risk\n"
-            f"  - codewalk_get_reading_order — optimal file reading order\n"
-            f"  - codewalk_get_execution_flow — dependency flow diagram"
-        )
-
-# ─── TOOL 12 [MAINT · user+AI]: codewalk_incremental_reindex ────────
+# ─── TOOL 9 [MAINT · user+AI]: codewalk_incremental_reindex ────────
 @mcp.tool()
 def codewalk_incremental_reindex() -> str:
     """Re-index only files that changed since last indexing.
@@ -695,14 +500,13 @@ def codewalk_incremental_reindex() -> str:
     file content on disk. Skips unchanged files, re-embeds changed ones,
     and removes chunks for deleted files. Much faster than full re-index.
 
-    Requires: codebase must be indexed at least once via the full setup
-    workflow (scan → filter → index). After that, call this tool whenever
-    code changes to keep embeddings in sync.
+    Requires: codebase must be indexed at least once via codewalk_analyze_codebase.
+    After that, call this tool whenever code changes to keep embeddings in sync.
 
     Returns a summary showing how many files were skipped, re-indexed,
     or deleted, plus the number of new chunks embedded.
 
-    ⏪ PREVIOUS STEP: codewalk_index_filtered_files (first-time setup)
+    ⏪ PREVIOUS STEP: codewalk_analyze_codebase (first-time setup)
     ⏩ NEXT STEP: any query tool (search, explain, blast radius, etc.)
     """
     repo_path = settings.repo_path
@@ -716,12 +520,12 @@ def codewalk_incremental_reindex() -> str:
         state._store.create_collection(state.get_collection_name())
 
     if state._store.chunk_count() == 0:
-        return "❌ No index exists. Run the full setup workflow first (scan → filter → index)."
+        return "❌ No index exists. Run codewalk_analyze_codebase first."
 
-    # Use previously selected paths if available, else fall back to all indexed files
-    paths = list(_selected_file_paths) if _selected_file_paths else list(state._store.get_all_indexed_files())
+    # Fall back to all indexed files
+    paths = list(state._store.get_all_indexed_files())
     if not paths:
-        return "❌ No files to reindex. Run the full setup workflow first."
+        return "❌ No files to reindex. Run codewalk_analyze_codebase first."
     
     result = incremental_reindex(paths, repo_path, state.get_collection_name(), persist_dir=state.chroma_path())
 
@@ -737,11 +541,8 @@ def codewalk_incremental_reindex() -> str:
         f"Analysis cache refreshed."
     )
 
-# ══════════════════════════════════════════════════════════════════════
-#  MAINTENANCE TOOLS — user or AI can call after code changes
-# ══════════════════════════════════════════════════════════════════════
 
-# ─── TOOL 13 [MAINT · user+AI]: codewalk_refresh_analysis ────────────
+# ─── TOOL 10 [MAINT · user+AI]: codewalk_refresh_analysis ────────────
 @mcp.tool()
 def codewalk_refresh_analysis() -> str:
     """Refresh the cached analysis without re-embedding.
@@ -767,7 +568,7 @@ def codewalk_refresh_analysis() -> str:
     )
 
 
-# ─── TOOL 14 [MAINT · user+AI]: codewalk_review_diff ────────────
+# ─── TOOL 11 [MAINT · user+AI]: codewalk_review_diff ────────────
 @mcp.tool()
 def codewalk_review_diff(
     staged: bool = False,
@@ -864,7 +665,7 @@ def codewalk_review_diff(
 
     return "\n".join(output_parts)
 
-# ─── TOOL 15 [MAINT · user+AI]: codewalk_review_file ────────────
+# ─── TOOL 12 [MAINT · user+AI]: codewalk_review_file ────────────
 @mcp.tool()
 def codewalk_review_file(file_path: str) -> str:
     """Review a single file for bugs, security vulnerabilities, and logic errors.
@@ -971,7 +772,7 @@ def codewalk_review_file(file_path: str) -> str:
 
     return "\n".join(output_parts)
 
-# ─── TOOL 16 [MAINT · user+AI]: codewalk_load_guidelines ────────────
+# ─── TOOL 13 [MAINT · user+AI]: codewalk_load_guidelines ────────────
 @mcp.tool()
 def codewalk_load_guidelines(docs_path: str | None = None) -> str:
     """Load team coding guidelines/standards for use in code reviews.
@@ -1021,7 +822,7 @@ def codewalk_load_guidelines(docs_path: str | None = None) -> str:
 #  VOICE TOOL — natural language interface to all Codewalk tools
 # ══════════════════════════════════════════════════════════════════════
 
-# ─── TOOL 17 (COMMENTED OUT) codewalk_start_voice ────────────────────
+# ─── TOOL 14 (COMMENTED OUT) codewalk_start_voice ────────────────────
 # Launches voice companion in a separate Terminal.app window (macOS).
 # Superseded by codewalk_voice_ask which runs inside Copilot directly.
 # Kept for reference / potential CLI use outside MCP.
@@ -1070,7 +871,7 @@ def codewalk_load_guidelines(docs_path: str | None = None) -> str:
 #         return f"❌ Failed to launch Terminal: {e}\n\nRun manually:\n```\n{cmd}\n```"
 
 
-# ─── TOOL 17 [VOICE · user]: codewalk_voice_ask ──────────────────────
+# ─── TOOL 14 [VOICE · user]: codewalk_voice_ask ──────────────────────
 @mcp.tool()
 def codewalk_voice_ask() -> str:
     """Record from mic and transcribe — then YOU (Copilot) pick the right tool.
@@ -1144,7 +945,7 @@ def codewalk_voice_ask() -> str:
     )
 
 
-# ─── TOOL 18 [VOICE · user]: codewalk_speak ──────────────────────────
+# ─── TOOL 15 [VOICE · user]: codewalk_speak ──────────────────────────
 @mcp.tool()
 def codewalk_speak(text: str) -> str:
     """Speak text aloud via TTS (edge-tts, en-US-AriaNeural).
@@ -1163,7 +964,7 @@ def codewalk_speak(text: str) -> str:
         return f"❌ TTS failed: {e}"
 
 
-# ─── TOOL 19 [QUERY · user+AI]: codewalk_get_architecture_health ─────
+# ─── TOOL 16 [QUERY · user+AI]: codewalk_get_architecture_health ─────
 @mcp.tool()
 def codewalk_get_architecture_health() -> str:
     """Architecture health report: bottlenecks, key files, circular dependencies.
@@ -1243,7 +1044,7 @@ def codewalk_get_architecture_health() -> str:
 
     return "\n\n".join(sections)
 
-# ─── TOOL 20 [QUERY · user+AI]: codewalk_call_chain ──────────────────
+# ─── TOOL 17 [QUERY · user+AI]: codewalk_call_chain ──────────────────
 @mcp.tool()
 def codewalk_call_chain(source: str, target: str) -> str:
     """Trace the import chain between two files.
@@ -1284,7 +1085,7 @@ def codewalk_call_chain(source: str, target: str) -> str:
     return "\n".join(lines)
 
 
-# ─── TOOL 21 [DOCS]: codewalk_index_docs ─────────────────────────────
+# ─── TOOL 18 [DOCS]: codewalk_index_docs ─────────────────────────────
 @mcp.tool()
 def codewalk_index_docs(docs_path: str) -> str:
     """Index a folder of documents (.md, .pdf, .txt) for semantic search.
@@ -1313,7 +1114,7 @@ def codewalk_index_docs(docs_path: str) -> str:
         f"\nYou can now use `codewalk_search_docs(query)` to search these documents."
     )
 
-# ─── TOOL 22 [DOCS]: codewalk_search_docs ────────────────────────────
+# ─── TOOL 19 [DOCS]: codewalk_search_docs ────────────────────────────
 @mcp.tool()
 def codewalk_search_docs(query: str, n_results: int = 5) -> str:
     """Search indexed documents for content matching a query.
@@ -1351,7 +1152,7 @@ def codewalk_search_docs(query: str, n_results: int = 5) -> str:
     
     return "\n".join(lines)
 
-# ─── TOOL 23 [DOCS]: codewalk_ask_docs ───────────────────────────────
+# ─── TOOL 20 [DOCS]: codewalk_ask_docs ───────────────────────────────
 @mcp.tool()
 def codewalk_ask_docs(question: str, n_results: int = 5) -> str:
     """Ask a question and get an answer grounded in indexed documents.
@@ -1398,9 +1199,6 @@ _TOOL_MAP = {
     "codewalk_get_blast_radius_map": codewalk_get_blast_radius_map,
     "codewalk_get_reading_order": codewalk_get_reading_order,
     "codewalk_get_execution_flow": codewalk_get_execution_flow,
-    "codewalk_scan_files": codewalk_scan_files,
-    "codewalk_submit_filtered_files": codewalk_submit_filtered_files,
-    "codewalk_index_filtered_files": codewalk_index_filtered_files,
     "codewalk_incremental_reindex": codewalk_incremental_reindex,
     "codewalk_refresh_analysis": codewalk_refresh_analysis,
     "codewalk_review_diff": codewalk_review_diff,

@@ -37,18 +37,6 @@ TOOL_REGISTRY = {
         "description": "Dependency flow diagram. Module-level or file-level.",
         "parameters": {"module_name": {"type": "string", "description": "Optional module for file-level flow", "default": ""}},
     },
-    "codewalk_scan_files": {
-        "description": "Get batch of file paths for filtering during setup.",
-        "parameters": {"batch": {"type": "integer", "description": "Batch number, start at 1", "default": 1}},
-    },
-    "codewalk_submit_filtered_files": {
-        "description": "Submit relevant file paths from current batch to index.",
-        "parameters": {"paths": {"type": "array", "description": "List of file paths to index"}},
-    },
-    "codewalk_index_filtered_files": {
-        "description": "Embed all submitted files into the vector store.",
-        "parameters": {},
-    },
     "codewalk_incremental_reindex": {
         "description": "Re-embed only files that changed since last indexing.",
         "parameters": {},

@@ -21,7 +21,9 @@ EXTENSION_MAP = {
     ".php": "php",
     ".cs": "csharp",
     ".cpp": "cpp",
+    ".hpp": "cpp",
     ".c": "c",
+    ".h": "c",
     ".md": "markdown",
     ".json": "json",
     ".yaml": "yaml",
@@ -30,6 +32,12 @@ EXTENSION_MAP = {
     ".txt": "text",
     ".kt": "kotlin",
     ".swift": "swift",
+    ".m": "objc",
+    ".mm": "objc",
+    ".sql": "sql",
+    ".proto": "protobuf",
+    ".graphql": "graphql",
+    ".gql": "graphql",
 }
 
 def detect_language(file_path: Path) -> str:

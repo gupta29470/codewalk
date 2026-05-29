@@ -61,7 +61,7 @@ class JinaCodeEmbeddings(Embeddings):
     def embed_documents(self, texts: list[str]) -> list[list[float]]:
         """Embed a list of documents (batch)."""
         texts = [t[:_MAX_CHUNK_CHARS] for t in texts]
-        vectors = self._model.encode(texts, normalize_embeddings=True, batch_size=16)
+        vectors = self._model.encode(texts, normalize_embeddings=True, batch_size=32)
         return vectors.tolist()
     
 # Singleton — load model once, reuse everywhere
@@ -84,42 +84,52 @@ def _sanitize_text(text: str) -> str:
     return text
 
 def embed_chunks(chunks: list[dict]) -> list[dict]:
-    """Add embedding vectors to each chunk."""
-    model = get_embedding_model()
-    embedded = []
+    """Add embedding vectors to each chunk.
 
-    # Collect valid chunks for batch embedding
-    valid_chunks = []
-    valid_texts = []
+    Parent chunks are skipped — they go to parents_collection which is
+    only fetched by ID (.get()), never vector-searched (.query()).
+    Skipping their embedding cuts GPU time roughly in half.
+    """
+    model = get_embedding_model()
+
+    # ── Separate parent chunks (context-only, never vector-searched) ──
+    parents = []
+    embeddable = []
 
     for chunk in chunks:
-        text = chunk["text"]
+        text = chunk.get("text", "")
         if not text or not text.strip():
             continue
-        clean_text = _sanitize_text(text)
+        if chunk.get("chunk_type") == "parent":
+            parents.append(chunk)
+        else:
+            clean_text = _sanitize_text(text)
+            if clean_text.strip():
+                embeddable.append((chunk, clean_text))
 
-        if not clean_text.strip():
-            continue
+    # Assign zero embeddings to parents — valid for ChromaDB storage,
+    # never used in search (parents are fetched by ID only).
+    if parents:
+        dim = model._model.get_embedding_dimension()
+        zero_vec = [0.0] * dim
+        for chunk in parents:
+            chunk["embedding"] = zero_vec
 
-        valid_chunks.append(chunk)
-        valid_texts.append(clean_text)
-    
-    if not valid_texts:
-        return embedded
-    
+    if not embeddable:
+        return parents
+
     # Sort by text length so similar-sized chunks batch together.
     # Eliminates padding waste — short chunks aren't padded to the
     # length of a long outlier in the same batch.
-    indexed_pairs = list(enumerate(zip(valid_chunks, valid_texts)))
-    indexed_pairs.sort(key=lambda x: len(x[1][1]))
-    sorted_indices, sorted_pairs = zip(*indexed_pairs)
-    sorted_chunks = [p[0] for p in sorted_pairs]
-    sorted_texts = [p[1] for p in sorted_pairs]
+    embeddable.sort(key=lambda x: len(x[1]))
+    sorted_chunks = [e[0] for e in embeddable]
+    sorted_texts = [e[1] for e in embeddable]
 
-    EMBED_BATCH = 32
+    EMBED_BATCH = 64
     total = len(sorted_texts)
-    _log(f"  Embedding {total} chunks (batch_size={EMBED_BATCH}, sorted by length)...")
+    _log(f"  Embedding {total} chunks (batch={EMBED_BATCH}, {len(parents)} parents skipped)...")
 
+    embedded = []
     batch_num = 0
     for start in range(0, total, EMBED_BATCH):
         end = min(start + EMBED_BATCH, total)
@@ -157,10 +167,9 @@ def embed_chunks(chunks: list[dict]) -> list[dict]:
 
         _log(f"  Embedded {len(embedded)}/{total} chunks")
 
-        # Periodic GPU cleanup every 5 batches to prevent memory fragmentation.
-        # Cost: ~10ms per clear. Prevents OOM cascades that cost minutes.
+        # Periodic GPU cleanup to prevent MPS memory fragmentation.
         batch_num += 1
-        if batch_num % 5 == 0:
+        if batch_num % 20 == 0:
             _clear_gpu_cache()
 
-    return embedded
+    return parents + embedded

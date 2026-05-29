@@ -1,5 +1,8 @@
 import logging
 import hashlib
+import time
+import os
+import re
 from pathlib import Path
 
 import duckdb
@@ -23,11 +26,80 @@ class GraphStore:
         store.populate_from_analysis(files, deps, module_results)
         # Data persists across restarts — no rebuild needed.
     """
-    def __init__(self, db_path: str = ".codewalk/graph.duckdb"):
+    def __init__(self, db_path: str = ".codewalk/graph.duckdb", retries: int = 3, retry_delay: float = 1.0):
         self.db_path = db_path
         Path(db_path).parent.mkdir(parents=True, exist_ok=True)
-        self.conn = duckdb.connect(db_path)
+        self.conn = self._connect_with_retry(retries, retry_delay)
         self._create_tables()
+
+    def _connect_with_retry(self, retries: int, retry_delay: float) -> duckdb.DuckDBPyConnection:
+        """Connect to DuckDB with retry logic for lock conflicts.
+
+        If another process holds the lock, retries a few times, then gives
+        a clear error message with the conflicting PID and how to fix it.
+        """
+        last_error = None
+        for attempt in range(1, retries + 1):
+            try:
+                return duckdb.connect(self.db_path)
+            except duckdb.IOException as e:
+                last_error = e
+                error_msg = str(e)
+                if "Could not set lock" in error_msg or "lock" in error_msg.lower():
+                    # Extract PID from error message if possible
+                    pid = None
+                    if "PID" in error_msg:
+                        pid_match = re.search(r'PID\s+(\d+)', error_msg)
+                        if pid_match:
+                            pid = int(pid_match.group(1))
+
+                    if attempt < retries:
+                        # Check if the lock holder is still alive
+                        if pid:
+                            try:
+                                os.kill(pid, 0)  # signal 0 = check if process exists
+                            except ProcessLookupError:
+                                # Process is dead — remove stale lock files and retry
+                                logger.warning(f"[GraphStore] Lock holder PID {pid} is dead, cleaning stale lock files")
+                                for ext in [".wal", ".tmp"]:
+                                    stale = Path(self.db_path + ext)
+                                    if stale.exists():
+                                        stale.unlink(missing_ok=True)
+                                continue
+                            except PermissionError:
+                                pass  # Process exists but we can't signal it
+
+                        logger.warning(
+                            f"[GraphStore] DuckDB lock conflict (attempt {attempt}/{retries}), "
+                            f"retrying in {retry_delay}s..."
+                        )
+                        time.sleep(retry_delay)
+                    else:
+                        # All retries exhausted — give a clear, actionable error
+                        fix_msg = (
+                            f"DuckDB lock conflict on '{self.db_path}'.\n"
+                            f"Another process is holding the database lock."
+                        )
+                        if pid:
+                            fix_msg += (
+                                f"\n\nConflicting process: PID {pid}"
+                                f"\n\nTo fix this:"
+                                f"\n  1. Stop the other Codewalk process (MCP server, API server, or CLI)"
+                                f"\n  2. Or run: kill {pid}"
+                                f"\n  3. Then retry your command"
+                            )
+                        else:
+                            fix_msg += (
+                                f"\n\nTo fix this:"
+                                f"\n  1. Stop any running Codewalk processes (MCP server, API server, or CLI)"
+                                f"\n  2. Or delete the lock: rm -f '{self.db_path}.wal' '{self.db_path}.tmp'"
+                                f"\n  3. Then retry your command"
+                            )
+                        raise duckdb.IOException(fix_msg) from last_error
+                else:
+                    raise  # Non-lock error, don't retry
+
+        raise last_error  # shouldn't reach here, but safety net
 
     def _create_tables(self):
         """Create all 7 graph tables. IF NOT EXISTS = safe to call every startup."""

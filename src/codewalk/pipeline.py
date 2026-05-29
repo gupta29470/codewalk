@@ -13,7 +13,6 @@ from src.codewalk.ingestion.tech_detect import detect_tech_stack
 from src.codewalk.embeddings.chunker import chunk_file
 from src.codewalk.embeddings.embedder import embed_chunks
 from src.codewalk.embeddings.vector_store import VectorStore
-from src.codewalk.analysis.relevance_filter import filter_files_with_llm
 from src.codewalk.config import settings
 from src.codewalk.log import log as _log
 from src.codewalk import __version__ as CODEWALK_VERSION
@@ -99,10 +98,10 @@ def chunk_and_embed_parallel(files: list[dict]) -> tuple[list[dict], int]:
     return all_embedded, chunk_count[0]
 
 def full_index_parallel(repo_path: str = "", collection_name: str = "codebase",
-                        use_llm_filter: bool = True,
                         persist_dir: str = "./data/chroma") -> dict:
     """Full pipeline: scan → chunk → embed → store. Nukes old data first.
 
+    File filtering is handled by file_filter.py (deterministic, no LLM).
     Overlaps chunking (CPU) with embedding (GPU) using a producer-consumer
     pattern with threads.
     """
@@ -114,8 +113,6 @@ def full_index_parallel(repo_path: str = "", collection_name: str = "codebase",
     _log(f"[parallel] Tech stack: {tech_stack}")
 
     files = scan_directory(repo_path)
-    if use_llm_filter:
-        files = filter_files_with_llm(files)
     _log(f"[parallel] Scanned {len(files)} files")
 
     all_embedded, total_chunks = chunk_and_embed_parallel(files)
@@ -145,7 +142,7 @@ def index_from_paths_parallel(paths: list[str], repo_path: str = "",
     """Index files matching the given paths or directories.
 
     Accepts both file paths and directory paths. A directory path
-    matches all files under it (e.g. "lib" matches "lib/main.dart").
+    matches all files under it (e.g. "src" matches "src/app/main.py").
     Uses producer-consumer for parallel chunk+embed.
     """
     pipeline_start = time.time()
