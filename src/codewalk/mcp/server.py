@@ -573,6 +573,7 @@ def codewalk_refresh_analysis() -> str:
 def codewalk_review_diff(
     staged: bool = False,
     target_branch: str | None = None,
+    commit: str | None = None,
 ) -> str:
     """Review the current git diff for bugs, security vulnerabilities, and logic errors.
 
@@ -587,12 +588,14 @@ def codewalk_review_diff(
     Args:
         staged: If True, review only staged changes (--staged). Default: all unstaged.
         target_branch: Diff against a branch (e.g. "main" for full PR review).
+        commit: Review a specific commit by SHA or ref (e.g. "abc1234", "HEAD", "HEAD~2").
     """
     from src.codewalk.review.reviewer import prepare_review_context
 
     ctx = prepare_review_context(
         staged=staged,
         target_branch=target_branch,
+        commit=commit,
         store=state._store,
         deps=state._deps,
         repo_path=settings.repo_path,
@@ -630,6 +633,11 @@ def codewalk_review_diff(
         output_parts.append(ctx.guidelines_context)
         output_parts.append("")
 
+    # Architecture patterns detected
+    if ctx.architecture_context:
+        output_parts.append(ctx.architecture_context)
+        output_parts.append("")
+
     # ── Per-file diff + context ──
     output_parts.append("---\n### Files to Review\n")
 
@@ -656,7 +664,8 @@ def codewalk_review_diff(
         "- Severity: 🔴 CRITICAL / 🟡 WARNING / 🟢 SUGGESTION\n"
         "- File and line number\n"
         "- What's wrong and why it's dangerous\n"
-        "- Suggested fix\n\n"
+        "- The CORRECTED code (copy-pasteable fix, not just a description)\n"
+        "- One sentence explaining what the fix does\n\n"
         "Focus on: OWASP top 10 (injection, auth bypass, XSS, SSRF, open redirect), "
         "race conditions, resource leaks, null safety, async gaps (setState after await "
         "without mounted check), unbounded growth, hardcoded secrets, certificate pinning "
@@ -764,7 +773,8 @@ def codewalk_review_file(file_path: str) -> str:
         "- Severity: 🔴 CRITICAL / 🟡 WARNING / 🟢 SUGGESTION\n"
         "- Line number\n"
         "- What's wrong and why\n"
-        "- Suggested fix\n\n"
+        "- The CORRECTED code (copy-pasteable fix, not just a description)\n"
+        "- One sentence explaining what the fix does\n\n"
         "Compare against the codebase patterns shown above for consistency.\n"
         "Focus on: OWASP top 10, race conditions, resource leaks, null safety, "
         "async gaps, unbounded growth, hardcoded secrets, SQL injection, path traversal."

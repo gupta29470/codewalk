@@ -518,6 +518,7 @@ async def review_endpoint(request: ReviewRequest):
         result = review_diff(
             staged=request.staged,
             target_branch=request.target_branch,
+            commit=request.commit,
             use_llm=True,
             store=store,
             deps=deps,
@@ -528,18 +529,22 @@ async def review_endpoint(request: ReviewRequest):
         issues = [
             {
                 "severity": issue.severity.value,
+                "confidence": issue.confidence.value,
                 "category": issue.category.value,
                 "file_path": issue.file_path,
                 "line_number": issue.line_number,
                 "title": issue.title,
                 "explanation": issue.explanation,
                 "suggestion": issue.suggestion,
+                "fix_description": issue.fix_description,
                 "code_snippet": issue.code_snippet,
             }
             for issue in result.issues
         ]
 
         return {
+            "verdict": result.verdict.value,
+            "verdict_reason": result.verdict_reason,
             "issues": issues,
             "summary": result.summary,
             "files_reviewed": result.files_reviewed,

@@ -5,12 +5,28 @@ from src.codewalk.review.models import DiffHunk, DiffFile, ChangedLine
 from src.codewalk.ingestion.scanner import detect_language
 
 
-def get_diff(staged: bool = False, target_branch: str | None = None, repo_path: str | None = None) -> str:
-    """Run git diff and return raw unified diff text."""
+def get_diff(
+        staged: bool = False, target_branch: str | None = None,
+        commit: str | None = None, repo_path: str | None = None
+) -> str:
+    """Run git diff and return raw unified diff text.
+
+      Args:
+          staged: If True, diff staged changes (--staged).
+          target_branch: Diff current HEAD against this branch.
+          commit: Show diff for a specific commit (SHA or ref like HEAD, HEAD~2).
+          repo_path: Working directory for git command.
+
+      Priority: commit > target_branch > staged > unstaged (default).
+    """
     cmd = ["git", "diff", "--unified=5"]
-    if staged:
+
+    if commit:
+        # Show what this specific commit changed (parent → commit)
+        cmd = ["git", "diff", "--unified=5", f"{commit}~1", commit]
+    elif staged:
         cmd.append("--staged")
-    if target_branch:
+    elif target_branch:
         cmd.append(f"{target_branch}...HEAD")
 
     result = subprocess.run(

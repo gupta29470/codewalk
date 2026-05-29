@@ -60,6 +60,7 @@ class ReviewRequest(BaseModel):
     """POST /review — request body."""
     staged: bool = False
     target_branch: str | None = None
+    commit: str | None = None
 
 class ReviewFileRequest(BaseModel):
     """POST /review/file — request body."""

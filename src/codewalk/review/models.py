@@ -14,6 +14,26 @@ class Category(Enum):
     STYLE = "style"
     TEST = "test"
     BLAST_RADIUS = "blast_radius"
+    DESIGN = "design"
+    NAMING = "naming"
+    COMPLEXITY = "complexity"
+    ERROR_HANDLING = "error_handling"
+    TYPE_SAFETY = "type_safety"
+    ARCHITECTURE = "architecture"
+    LOGGING = "logging"
+    COMPATIBILITY = "compatibility"
+    PRIVACY = "privacy"
+    HYGIENE = "hygiene"
+
+class Verdict(Enum):
+    APPROVE = "approve"
+    APPROVE_WITH_NITS = "approve_with_nits"
+    REQUEST_CHANGES = "request_changes"
+
+class Confidence(Enum):
+    HIGH = "high"
+    MEDIUM = "medium"
+    LOW = "low"
 
 @dataclass
 class Issue:
@@ -24,7 +44,9 @@ class Issue:
     line_number: int | None
     title: str
     explanation: str
+    confidence: Confidence = Confidence.HIGH
     suggestion: str | None = None
+    fix_description: str | None = None
     code_snippet: str | None = None
 
 @dataclass
@@ -32,6 +54,8 @@ class ReviewResult:
     """Final output of a code review."""
     issues: list[Issue] = field(default_factory=list)
     summary: str = ""
+    verdict: Verdict = Verdict.APPROVE
+    verdict_reason: str = ""
     files_reviewed: int = 0
     lines_added: int = 0
     lines_removed: int = 0

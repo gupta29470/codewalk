@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import asyncio
 from pathlib import Path
 from dataclasses import dataclass, field
 from concurrent.futures import ThreadPoolExecutor
@@ -11,13 +10,38 @@ from src.codewalk.config import get_llm
 if TYPE_CHECKING:
     from src.codewalk.graph.graph_store import GraphStore
 from src.codewalk.review.diff_parser import get_diff, get_parsed_diff
-from src.codewalk.review.models import ReviewResult, Issue, Severity, Category, DiffFile
+from src.codewalk.review.models import ReviewResult, Issue, Severity, Category, Verdict, Confidence, DiffFile
 from src.codewalk.review.test_coverage import TestCoverage
 from src.codewalk.review.guidelines_loader import get_guidelines_store, search_guidelines
 from src.codewalk.review.review_prompts import REVIEW_SYSTEM_PROMPT, REVIEW_USER_PROMPT
 
 # Threshold: if total added lines exceed this, use per-file chunked review
 CHUNK_THRESHOLD = 200
+
+# ── Module-level maps for LLM response parsing (avoid rebuilding per call) ──
+_CATEGORY_MAP: dict[str, Category] = {
+    "bug": Category.BUG,
+    "security": Category.SECURITY,
+    "style": Category.STYLE,
+    "test": Category.TEST,
+    "blast_radius": Category.BLAST_RADIUS,
+    "design": Category.DESIGN,
+    "naming": Category.NAMING,
+    "complexity": Category.COMPLEXITY,
+    "error_handling": Category.ERROR_HANDLING,
+    "type_safety": Category.TYPE_SAFETY,
+    "architecture": Category.ARCHITECTURE,
+    "logging": Category.LOGGING,
+    "compatibility": Category.COMPATIBILITY,
+    "privacy": Category.PRIVACY,
+    "hygiene": Category.HYGIENE,
+}
+
+_CONFIDENCE_MAP: dict[str, Confidence] = {
+    "high": Confidence.HIGH,
+    "medium": Confidence.MEDIUM,
+    "low": Confidence.LOW,
+}
 
 
 @dataclass
@@ -39,6 +63,7 @@ class ReviewContext:
     pre_check_issues: list[Issue]
     blast_radius_warnings: list[str]
     guidelines_context: str
+    architecture_context: str
     total_added: int
     total_removed: int
 
@@ -183,6 +208,412 @@ def _get_security_context_for_file(diff_file: DiffFile, store) -> str:
     )
 
 
+def _detect_architecture_context(store, diff_files: list[DiffFile]) -> str:
+    """Query vector store to detect architecture patterns the codebase already uses.
+
+    For each language in the diff, runs targeted queries to identify:
+    - Framework (FastAPI, Django, React, Flutter, Spring, etc.)
+    - Architecture pattern (MVC, MVVM, BLoC, service layer, repository, etc.)
+    - State management (Redux, Provider, Riverpod, Zustand, etc.)
+    - Logging approach (structlog, winston, Timber, etc.)
+    - Error handling conventions
+
+    Returns a formatted context string for injection into the review prompt.
+    """
+    if not store:
+        return ""
+
+    from src.codewalk.rag.chain import format_context
+    from src.codewalk.rag.retrieval_quality import filter_by_distance
+
+    # Detect languages present in the diff
+    languages = set(df.language for df in diff_files if df.language != "unknown")
+
+    if not languages:
+        return ""
+
+    # Language → targeted architecture detection queries
+    lang_queries: dict[str, list[tuple[str, str]]] = {
+        "python": [
+            ("framework", "FastAPI Django Flask route handler endpoint app"),
+            ("architecture", "service repository layer use case interactor"),
+            ("logging", "logger logging structlog loguru getLogger"),
+            ("error_handling", "raise exception error handler try except"),
+        ],
+        "javascript": [
+            ("framework", "React Vue Angular Next Nuxt component"),
+            ("state", "Redux Zustand MobX Pinia store useSelector dispatch"),
+            ("api_layer", "fetch axios api service client hook"),
+            ("logging", "winston pino console logger bunyan"),
+        ],
+        "typescript": [
+            ("framework", "React Vue Angular Next Nuxt component"),
+            ("state", "Redux Zustand MobX Pinia store useSelector dispatch"),
+            ("api_layer", "fetch axios api service client hook"),
+            ("logging", "winston pino console logger bunyan"),
+        ],
+        "dart": [
+            ("state_management", "BLoC Cubit Provider Riverpod GetX ChangeNotifier"),
+            ("architecture", "repository data source service usecase domain"),
+            ("navigation", "GoRouter Navigator auto_route routes"),
+            ("di", "GetIt injectable provider service locator"),
+            ("logging", "logger print debugPrint Crashlytics Sentry"),
+        ],
+        "go": [
+            ("framework", "gin echo fiber chi http handler mux"),
+            ("architecture", "service repository handler interface struct"),
+            ("logging", "zap zerolog logrus slog log"),
+            ("error_handling", "errors fmt.Errorf wrap unwrap"),
+        ],
+        "java": [
+            ("framework", "Spring Boot Controller Service Repository Autowired"),
+            ("architecture", "DTO ViewModel UseCase Interactor Repository"),
+            ("android", "Activity Fragment ViewModel LiveData Compose"),
+            ("logging", "SLF4J Logback Log4j logger"),
+        ],
+        "kotlin": [
+            ("framework", "Spring Boot Controller Service Repository"),
+            ("android", "Activity Fragment ViewModel LiveData Compose Hilt"),
+            ("architecture", "UseCase Repository DataSource Domain"),
+            ("logging", "Timber Logger SLF4J logcat"),
+        ],
+        "swift": [
+            ("architecture", "ViewController ViewModel Coordinator VIPER MVVM"),
+            ("ui", "SwiftUI UIKit Combine ObservableObject"),
+            ("networking", "Alamofire URLSession Moya async await"),
+            ("logging", "os.log CocoaLumberjack print Logger"),
+        ],
+        "rust": [
+            ("framework", "actix axum rocket warp handler"),
+            ("architecture", "service handler mod trait impl domain"),
+            ("logging", "tracing log instrument span event"),
+            ("error_handling", "thiserror anyhow Error From impl"),
+        ],
+        "csharp": [
+            ("framework", "ASP.NET Controller MediatR CQRS Minimal API"),
+            ("architecture", "Service Repository Unit of Work DbContext"),
+            ("logging", "ILogger Serilog NLog Microsoft.Extensions.Logging"),
+            ("di", "AddScoped AddTransient AddSingleton IServiceCollection"),
+        ],
+        "ruby": [
+            ("framework", "Rails Sinatra Hanami controller action"),
+            ("architecture", "service object interactor form object concern"),
+            ("logging", "Rails.logger Logger Tagged Logging"),
+        ],
+        "php": [
+            ("framework", "Laravel Symfony controller route middleware"),
+            ("architecture", "Service Repository Action FormRequest Resource"),
+            ("logging", "Monolog Log facade logger channel"),
+        ],
+        "c": [
+            ("architecture", "header module static inline extern struct typedef"),
+            ("build", "Makefile CMake cmake_minimum_required add_executable"),
+            ("logging", "printf fprintf syslog LOG_ stderr"),
+            ("error_handling", "errno perror return -1 goto cleanup NULL"),
+        ],
+        "cpp": [
+            ("framework", "Qt Boost POCO gRPC Unreal Engine"),
+            ("architecture", "namespace class template RAII PIMPL interface"),
+            ("build", "CMake Makefile Bazel conan vcpkg"),
+            ("logging", "spdlog glog LOG_ std::cerr fmt::print"),
+            ("error_handling", "exception try catch throw std::error_code"),
+        ],
+        "objc": [
+            ("architecture", "ViewController delegate protocol category UIKit"),
+            ("ui", "UIKit AppKit Interface Builder storyboard xib"),
+            ("networking", "NSURLSession AFNetworking Alamofire NSOperationQueue"),
+            ("logging", "NSLog os_log CocoaLumberjack DDLog"),
+        ],
+    }
+
+    detected_patterns: list[str] = []
+
+    for lang in languages:
+        queries = lang_queries.get(lang)
+        if not queries:
+            continue
+
+        lang_findings: list[str] = []
+
+        for aspect, query_text in queries:
+            results = store.search(query_text, n_results=2)
+            filtered, _ = filter_by_distance(results)
+
+            if not filtered:
+                continue
+
+            # Extract key signals from the results
+            file_paths = [r.get("metadata", {}).get("file_path", "") for r in filtered]
+            snippets = [r.get("document", "")[:300] for r in filtered]
+
+            # Summarize what we found
+            signal = _extract_pattern_signal(aspect, query_text, file_paths, snippets)
+            if signal:
+                lang_findings.append(signal)
+
+        if lang_findings:
+            detected_patterns.append(
+                f"### {lang.title()}\n" + "\n".join(f"- {f}" for f in lang_findings)
+            )
+
+    if not detected_patterns:
+        return ""
+
+    return (
+        "## Detected Architecture Patterns\n"
+        "IMPORTANT: When reviewing, suggest improvements that ALIGN with these\n"
+        "existing patterns. Do NOT suggest switching to a different architecture.\n\n"
+        + "\n\n".join(detected_patterns)
+    )
+
+
+# ── Module-level constant: rebuilt once, not per call ──
+_ASPECT_REGISTRY: dict[str, tuple[str, dict[str, str], dict[str, str]]] = {
+    "framework": (
+        "Framework",
+        {
+            "fastapi": "FastAPI", "django": "Django", "flask": "Flask",
+            "from react": "React", "import react": "React",
+            "vue": "Vue", "angular": "Angular",
+            "next/": "Next.js", "nuxt": "Nuxt",
+            "spring": "Spring Boot", "gin.": "Gin", "echo.": "Echo",
+            "fiber.": "Fiber", "actix": "Actix", "axum::": "Axum",
+            "rocket::": "Rocket", "rails": "Rails", "laravel": "Laravel",
+            "symfony": "Symfony", "asp.net": "ASP.NET",
+            "qt": "Qt", "boost::": "Boost", "poco::": "POCO",
+            "grpc": "gRPC", "unreal": "Unreal Engine",
+        },
+        {
+            "/controllers/": "MVC framework",
+            "/templates/": "Django/Flask",
+        },
+    ),
+    "state": (
+        "State management",
+        {
+            "bloc": "BLoC/Cubit", "cubit": "BLoC/Cubit",
+            "riverpod": "Riverpod",
+            "getx": "GetX", "changenotifier": "ChangeNotifier",
+            "createslice": "Redux Toolkit", "useselector": "Redux",
+            "zustand": "Zustand",
+            "mobx": "MobX", "pinia": "Pinia",
+            "recoil": "Recoil", "jotai": "Jotai",
+        },
+        {
+            "/store/": "Store-based", "/stores/": "Store-based",
+            "/bloc/": "BLoC/Cubit", "/blocs/": "BLoC/Cubit",
+            "/providers/": "Provider", "/state/": "State layer",
+            "/redux/": "Redux", "/slices/": "Redux Toolkit",
+        },
+    ),
+    "state_management": None,  # alias — resolved at bottom
+    "architecture": (
+        "Architecture",
+        {
+            "repository_impl": "Repository pattern",
+            "repositoryimpl": "Repository pattern",
+            "base_repository": "Repository pattern",
+            "usecase": "Use cases / Clean Architecture",
+            "use_case": "Use cases / Clean Architecture",
+            "interactor": "Interactor pattern",
+            "data_source": "Data source abstraction",
+            "datasource": "Data source abstraction",
+            "viewmodel": "ViewModel (MVVM)",
+            "coordinator": "Coordinator pattern",
+            "viper": "VIPER",
+            "raii": "RAII",
+            "pimpl": "PIMPL idiom",
+        },
+        {
+            "/repositories/": "Repository pattern",
+            "/repository/": "Repository pattern",
+            "/services/": "Service layer",
+            "/usecases/": "Use cases / Clean Architecture",
+            "/use_cases/": "Use cases / Clean Architecture",
+            "/domain/": "Domain layer separation",
+            "/presentation/": "Presentation layer",
+            "/infrastructure/": "Infrastructure layer",
+            "/features/": "Feature-based structure",
+            "/modules/": "Modular architecture",
+            "/entities/": "Entity layer",
+            "/viewmodels/": "ViewModel (MVVM)",
+            "/coordinators/": "Coordinator pattern",
+            "/interactors/": "Interactor pattern",
+        },
+    ),
+    "logging": (
+        "Logging",
+        {
+            "structlog": "structlog", "loguru": "loguru",
+            "getlogger": "stdlib logging", "import logging": "stdlib logging",
+            "winston": "winston", "pino(": "pino", "bunyan": "bunyan",
+            "timber.": "Timber", "slf4j": "SLF4J", "logback": "Logback",
+            "zap.": "zap", "zerolog": "zerolog", "logrus.": "logrus",
+            "slog.": "slog", "serilog": "Serilog", "nlog": "NLog",
+            "os_log": "os.log", "cocoalumberjack": "CocoaLumberjack",
+            "tracing::": "tracing (Rust)", "#[instrument": "tracing (Rust)",
+            "monolog": "Monolog",
+            "rails.logger": "Rails.logger",
+            "crashlytics": "Crashlytics", "sentry_sdk": "Sentry",
+            "spdlog::": "spdlog", "glog": "glog",
+            "nslog(": "NSLog", "ddlog": "CocoaLumberjack",
+            "syslog(": "syslog",
+        },
+        {
+            "/logging/": "Logging module", "/logger/": "Logger module",
+        },
+    ),
+    "error_handling": (
+        "Error handling",
+        {
+            "thiserror": "thiserror", "anyhow::": "anyhow",
+            "fmt.errorf": "Go error wrapping", "errors.new(": "Go stdlib errors",
+            "apperror": "App-level error type", "appexception": "App-level error type",
+            "result<": "Result type pattern", "result::": "Result type pattern",
+            "errno": "errno-based", "goto cleanup": "goto cleanup pattern",
+            "std::error_code": "std::error_code",
+        },
+        {
+            "/errors/": "Error module", "/exceptions/": "Exception module",
+            "/failure/": "Failure types",
+        },
+    ),
+    "di": (
+        "Dependency injection",
+        {
+            "getit": "GetIt", "@injectable": "Injectable",
+            "service_locator": "Service Locator",
+            "@hiltandroidapp": "Hilt", "@inject": "DI framework",
+            "dagger": "Dagger", "koin": "Koin",
+            "addscoped": "Microsoft DI", "addtransient": "Microsoft DI",
+            "inversify": "Inversify", "tsyringe": "tsyringe",
+        },
+        {
+            "/di/": "DI module", "/injection/": "DI module",
+            "/container/": "DI container",
+        },
+    ),
+    "navigation": (
+        "Navigation",
+        {
+            "gorouter": "GoRouter", "go_router": "GoRouter",
+            "auto_route": "auto_route", "@autoroute": "auto_route",
+            "react-router": "React Router", "react-navigation": "React Navigation",
+        },
+        {
+            "/routes/": "Routes module", "/routing/": "Routing module",
+            "/navigation/": "Navigation module", "/router/": "Router module",
+        },
+    ),
+    "api_layer": (
+        "API layer",
+        {
+            "axios.": "axios", "axios(": "axios",
+            "react-query": "React Query", "@tanstack/query": "TanStack Query",
+            "useswr": "SWR", "rtk query": "RTK Query",
+            "retrofit": "Retrofit", "dio.": "Dio",
+        },
+        {
+            "/api/": "API module", "/client/": "Client module",
+            "/network/": "Network layer", "/remote/": "Remote data source",
+            "/http/": "HTTP layer",
+        },
+    ),
+    "android": (
+        "Android",
+        {
+            "@composable": "Jetpack Compose", "setcontent": "Jetpack Compose",
+            "viewmodel(": "ViewModel (AAC)", "livedata": "LiveData",
+            "@hiltviewmodel": "Hilt DI", "@entity": "Room DB",
+        },
+        {
+            "/compose/": "Jetpack Compose",
+            "/fragments/": "Fragments", "/activities/": "Activities",
+            "/viewmodel/": "ViewModel layer",
+        },
+    ),
+    "ui": (
+        "UI",
+        {
+            "swiftui": "SwiftUI", "uikit": "UIKit",
+            "combine": "Combine", "observableobject": "ObservableObject",
+            "appkit": "AppKit", "interface builder": "Interface Builder",
+            "storyboard": "Storyboard",
+        },
+        {
+            "/screens/": "Screens",
+            "/widgets/": "Widgets", "/components/": "Components",
+        },
+    ),
+    "networking": (
+        "Networking",
+        {
+            "alamofire": "Alamofire", "moya": "Moya",
+            "urlsession": "URLSession",
+            "afnetworking": "AFNetworking",
+            "nsurlsession": "NSURLSession",
+        },
+        {
+            "/network/": "Network layer", "/networking/": "Networking module",
+        },
+    ),
+    "build": (
+        "Build system",
+        {
+            "cmake_minimum": "CMake", "add_executable": "CMake",
+            "bazel": "Bazel", "meson": "Meson",
+            "conan": "Conan", "vcpkg": "vcpkg",
+        },
+        {
+            "cmakelists": "CMake", "makefile": "Makefile",
+            "build.gradle": "Gradle",
+        },
+    ),
+}
+_ASPECT_REGISTRY["state_management"] = _ASPECT_REGISTRY["state"]
+
+
+def _extract_pattern_signal(
+    aspect: str, query: str, file_paths: list[str], snippets: list[str]
+) -> str:
+    """Extract a human-readable signal from vector store results.
+
+    Two-sided detection:
+      1. Code content (imports, class names, function calls in snippets)
+      2. Directory structure (path segments like /services/, /bloc/, /repositories/)
+    Both sides contribute equally; results are merged and deduplicated.
+    """
+    combined = " ".join(snippets).lower()
+    paths_str = " ".join(file_paths).lower()
+
+    entry = _ASPECT_REGISTRY.get(aspect)
+    if not entry:
+        return ""
+
+    label, code_patterns, path_patterns = entry
+
+    # Side 1: Code content signals (imports, class names, function calls)
+    code_hits = [
+        name for key, name in code_patterns.items()
+        if key in combined
+    ]
+
+    # Side 2: Directory structure signals (file path segments)
+    path_hits = [
+        name for key, name in path_patterns.items()
+        if key in paths_str
+    ]
+
+    # Merge both sides, deduplicate, preserve order (code hits first — stronger signal)
+    all_hits = list(dict.fromkeys(code_hits + path_hits))
+
+    if not all_hits:
+        return ""
+
+    max_display = 3 if aspect == "architecture" else 2
+    return f"{label}: {', '.join(all_hits[:max_display])}"
+
+
 def _build_file_diff_text(diff_file: DiffFile) -> str:
     """Reconstruct unified diff text for a single file from parsed hunks."""
     lines = []
@@ -205,6 +636,7 @@ def _build_file_diff_text(diff_file: DiffFile) -> str:
 def prepare_review_context(
     staged: bool = False,
     target_branch: str | None = None,
+    commit: str | None = None,
     store=None,
     deps: dict | None = None,
     repo_path: str | None = None,
@@ -216,7 +648,8 @@ def prepare_review_context(
     Returns None if diff is empty.
     """
     # Get diff
-    diff_text = get_diff(staged=staged, target_branch=target_branch, repo_path=repo_path)
+    diff_text = get_diff(staged=staged, target_branch=target_branch,
+                         commit=commit, repo_path=repo_path)
     if not diff_text.strip():
         return None
 
@@ -246,6 +679,9 @@ def prepare_review_context(
     if guidelines_store:
         guidelines_context = search_guidelines(guidelines_store, diff_files, n_results=3)
 
+    # Architecture detection
+    architecture_context = _detect_architecture_context(store, diff_files)
+
     # Per-file context
     file_contexts = []
     for df in diff_files:
@@ -265,42 +701,46 @@ def prepare_review_context(
         pre_check_issues=pre_check_issues,
         blast_radius_warnings=blast_warnings,
         guidelines_context=guidelines_context,
+        architecture_context=architecture_context,
         total_added=total_added,
         total_removed=total_removed,
     )
 
 
 def _review_single_file(
-    diff_file: DiffFile,
-    repo_path: str | None,
-    store,
-    deps: dict | None,
+    file_ctx: FileReviewContext,
     guidelines_context: str,
-    graph_store = None,
+    architecture_context: str = "",
 ) -> list[Issue]:
-    """Review a single file — one focused LLM call."""
-    llm = get_llm(temperature=0)
+    """Review a single file — one focused LLM call.
 
-    # Build per-file context
+    Uses pre-computed FileReviewContext (file content, caller context, security
+    context) to avoid redundant I/O and vector store queries.
+    """
+    llm = get_llm(temperature=0)
+    diff_file = file_ctx.diff_file
+
+    # Build per-file context from pre-computed data
     context_parts = []
 
-    # Full file content for modified files
-    file_content = _get_file_content(diff_file, repo_path)
-    if file_content:
+    # Architecture context (detected patterns)
+    if architecture_context:
+        context_parts.append(architecture_context)
+
+    # Full file content (pre-computed)
+    if file_ctx.file_content:
         context_parts.append(
             f"## Full file content ({diff_file.file_path})\n"
-            f"```\n{file_content}\n```"
+            f"```\n{file_ctx.file_content}\n```"
         )
 
-    # Caller context
-    caller_ctx = _get_caller_context(diff_file, deps, graph_store)
-    if caller_ctx:
-        context_parts.append(caller_ctx)
+    # Caller context (pre-computed)
+    if file_ctx.caller_context:
+        context_parts.append(file_ctx.caller_context)
 
-    # Security context from vector store
-    security_ctx = _get_security_context_for_file(diff_file, store)
-    if security_ctx:
-        context_parts.append(security_ctx)
+    # Security context (pre-computed)
+    if file_ctx.security_context:
+        context_parts.append(file_ctx.security_context)
 
     # Guidelines
     if guidelines_context:
@@ -310,8 +750,8 @@ def _review_single_file(
 
     system = REVIEW_SYSTEM_PROMPT.format(context_sections=context_sections)
 
-    # Build the diff for just this file
-    file_diff = _build_file_diff_text(diff_file)
+    # Use pre-built diff text
+    file_diff = file_ctx.file_diff_text
 
     user = REVIEW_USER_PROMPT.format(
         diff_content=file_diff,
@@ -335,23 +775,21 @@ def _review_single_file(
 
         parsed = json.loads(content)
 
-        category_map = {
-            "bug": Category.BUG,
-            "security": Category.SECURITY,
-            "style": Category.STYLE,
-        }
-
         for issue in parsed.get("issues", []):
             issues.append(Issue(
                 severity=Severity[issue["severity"].upper()],
-                category=category_map.get(
+                category=_CATEGORY_MAP.get(
                     issue.get("category", "bug"), Category.BUG
                 ),
                 file_path=issue.get("file", diff_file.file_path),
                 line_number=issue.get("line"),
                 title=issue.get("title", ""),
                 explanation=issue.get("explanation", ""),
+                confidence=_CONFIDENCE_MAP.get(
+                    issue.get("confidence", "high"), Confidence.HIGH
+                ),
                 suggestion=issue.get("suggestion"),
+                fix_description=issue.get("fix_description"),
                 code_snippet=issue.get("code_snippet"),
             ))
     except (json.JSONDecodeError, KeyError, IndexError):
@@ -367,12 +805,17 @@ def _review_all_at_once(
     store,
     deps: dict | None,
     pre_check_issues: list[Issue],
-) -> tuple[list[Issue], str]:
+    architecture_context: str = "",
+) -> tuple[list[Issue], str, Verdict, str]:
     """Original single-pass review for small diffs (< CHUNK_THRESHOLD lines)."""
     llm = get_llm(temperature=0)
 
     # Build context
     context_parts = []
+
+    # Architecture context (detected patterns — goes first so LLM sees it early)
+    if architecture_context:
+        context_parts.append(architecture_context)
 
     # Blast radius
     if deps:
@@ -445,34 +888,43 @@ def _review_all_at_once(
         parsed = json.loads(content)
         summary = parsed.get("summary", "")
 
-        category_map = {
-            "bug": Category.BUG,
-            "security": Category.SECURITY,
-            "style": Category.STYLE,
+        verdict_map = {
+            "approve": Verdict.APPROVE,
+            "approve_with_nits": Verdict.APPROVE_WITH_NITS,
+            "request_changes": Verdict.REQUEST_CHANGES,
         }
+        verdict = verdict_map.get(parsed.get("verdict", "approve"), Verdict.APPROVE)
+        verdict_reason = parsed.get("verdict_reason", "")
 
         for issue in parsed.get("issues", []):
             issues.append(Issue(
                 severity=Severity[issue["severity"].upper()],
-                category=category_map.get(
+                category=_CATEGORY_MAP.get(
                     issue.get("category", "bug"), Category.BUG
                 ),
                 file_path=issue.get("file", "unknown"),
                 line_number=issue.get("line"),
                 title=issue.get("title", ""),
                 explanation=issue.get("explanation", ""),
+                confidence=_CONFIDENCE_MAP.get(
+                    issue.get("confidence", "high"), Confidence.HIGH
+                ),
                 suggestion=issue.get("suggestion"),
+                fix_description=issue.get("fix_description"),
                 code_snippet=issue.get("code_snippet"),
             ))
     except (json.JSONDecodeError, KeyError, IndexError):
         summary = response.content
+        verdict = Verdict.APPROVE
+        verdict_reason = ""
 
-    return issues, summary
+    return issues, summary, verdict, verdict_reason
 
 
 def review_diff(
     staged: bool = False,
     target_branch: str | None = None,
+    commit: str | None = None,
     use_llm: bool = True,
     store=None,
     deps: dict | None = None,
@@ -487,6 +939,7 @@ def review_diff(
     ctx = prepare_review_context(
         staged=staged,
         target_branch=target_branch,
+        commit=commit,
         store=store,
         deps=deps,
         repo_path=repo_path,
@@ -499,6 +952,8 @@ def review_diff(
     # ── LLM review ──
     llm_issues = []
     llm_summary = ""
+    verdict = Verdict.APPROVE
+    verdict_reason = ""
 
     if use_llm:
         if ctx.total_added > CHUNK_THRESHOLD:
@@ -508,10 +963,10 @@ def review_diff(
                 futures = [
                     executor.submit(
                         _review_single_file,
-                        df, repo_path, store, deps, ctx.guidelines_context,
-                        graph_store,
+                        fc, ctx.guidelines_context,
+                        ctx.architecture_context,
                     )
-                    for df in ctx.diff_files
+                    for fc in ctx.file_contexts
                 ]
                 for i, future in enumerate(futures):
                     try:
@@ -534,18 +989,36 @@ def review_diff(
                 )
         else:
             # ─── SINGLE PASS: Small diff, one call ───
-            llm_issues, llm_summary = _review_all_at_once(
+            llm_issues, llm_summary, verdict, verdict_reason = _review_all_at_once(
                 ctx.diff_text, ctx.diff_files, repo_path, store, deps,
-                ctx.pre_check_issues,
+                ctx.pre_check_issues, ctx.architecture_context,
             )
 
     # ── Merge and return ──
     all_issues = ctx.pre_check_issues + llm_issues
 
+    # Determine verdict (if chunked path, derive from issues)
+    if ctx.total_added > CHUNK_THRESHOLD or not use_llm:
+        has_high_confidence_critical = any(
+            i.severity == Severity.CRITICAL and i.confidence == Confidence.HIGH
+            for i in all_issues
+        )
+        if has_high_confidence_critical:
+            verdict = Verdict.REQUEST_CHANGES
+            verdict_reason = "Critical issues found that must be fixed before merge."
+        elif all_issues:
+            verdict = Verdict.APPROVE_WITH_NITS
+            verdict_reason = "Non-critical issues found. Fix recommended but not blocking."
+        else:
+            verdict = Verdict.APPROVE
+            verdict_reason = "No issues found. Code looks good."
+
     return ReviewResult(
         issues=all_issues,
         summary=llm_summary or f"Reviewed {len(ctx.diff_files)} files. "
                                 f"Found {len(all_issues)} issues.",
+        verdict=verdict,
+        verdict_reason=verdict_reason,
         files_reviewed=len(ctx.diff_files),
         lines_added=ctx.total_added,
         lines_removed=ctx.total_removed,
