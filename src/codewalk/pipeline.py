@@ -5,7 +5,9 @@ from pathlib import Path
 import threading
 import queue
 import os
-import time
+import json
+from datetime import datetime, timezone
+from pathlib import Path as _Path
 
 from src.codewalk.embeddings.chunker import file_hash, read_file_content
 from src.codewalk.ingestion.scanner import scan_directory
@@ -98,12 +100,12 @@ def chunk_and_embed_parallel(files: list[dict]) -> tuple[list[dict], int]:
     return all_embedded, chunk_count[0]
 
 def full_index_parallel(repo_path: str = "", collection_name: str = "codebase",
-                        persist_dir: str = "./data/chroma") -> dict:
+                        persist_dir: str = "./data/chroma", team_config=None) -> dict:
     """Full pipeline: scan → chunk → embed → store. Nukes old data first.
 
-    File filtering is handled by file_filter.py (deterministic, no LLM).
-    Overlaps chunking (CPU) with embedding (GPU) using a producer-consumer
-    pattern with threads.
+    Args:
+        team_config: If provided, uses team_scan_directory (exclude-only).
+                     If None, uses scan_directory (file_filter defaults).
     """
     repo_path = repo_path or settings.repo_path
     _log(f"[parallel] Starting: {repo_path}")
@@ -112,7 +114,11 @@ def full_index_parallel(repo_path: str = "", collection_name: str = "codebase",
     tech_stack = detect_tech_stack(repo_path)
     _log(f"[parallel] Tech stack: {tech_stack}")
 
-    files = scan_directory(repo_path)
+    if team_config:
+        from src.codewalk.team_config import team_scan_directory
+        files = team_scan_directory(repo_path, team_config)
+    else:
+        files = scan_directory(repo_path)
     _log(f"[parallel] Scanned {len(files)} files")
 
     all_embedded, total_chunks = chunk_and_embed_parallel(files)
@@ -122,7 +128,7 @@ def full_index_parallel(repo_path: str = "", collection_name: str = "codebase",
     store.create_collection(collection_name)
     store.clear_collection()
     store.add_parent_child_chunks(all_embedded)
-    _write_meta(repo_path, len(files)) 
+    write_manifest(f"{repo_path.rstrip('/')}/.codewalk", file_count=len(files), chunk_count=len(all_embedded))
 
     total_time = time.time() - pipeline_start
     _log(f"[parallel] Complete: {len(all_embedded)} chunks in {total_time:.1f}s")
@@ -134,6 +140,7 @@ def full_index_parallel(repo_path: str = "", collection_name: str = "codebase",
         "chunks_created": total_chunks,
         "chunks_embedded": len(all_embedded),
         "embedded_chunks": all_embedded,
+        "files": files,
     }
 
 def index_from_paths_parallel(paths: list[str], repo_path: str = "",
@@ -148,38 +155,60 @@ def index_from_paths_parallel(paths: list[str], repo_path: str = "",
     pipeline_start = time.time()
     repo_path = repo_path or settings.repo_path
 
-    # Step 1: Match files (same as original — fast, no parallelism needed)
+    # Step 1: Match files — avoid full repo scan when possible
     t0 = time.time()
-    _log("[parallel-paths] Scanning files...")
-    all_files = scan_directory(repo_path)
-
+    _log("[parallel-paths] Matching files...")
     path_set = set(paths)
-    files = []
 
-    for file in all_files:
-        file_path = file["file_path"]
-        if file_path in path_set:
-            files.append(file)
-            continue
-        for path in path_set:
-            if file_path.startswith(path + "/") or file_path.startswith(path.rstrip("/") + "/"):
+    # Fast path: if all paths are individual files, use them directly
+    from src.codewalk.ingestion.scanner import detect_language
+    files = []
+    dirs_to_scan = []
+    for path in path_set:
+        full = os.path.join(repo_path, path)
+        if os.path.isfile(full):
+            files.append({
+                "file_path": path,
+                "absolute_path": full,
+                "language": detect_language(__import__("pathlib").Path(full)),
+                "size_bytes": os.path.getsize(full),
+            })
+        else:
+            dirs_to_scan.append(path)
+
+    # Only scan repo if we have directory paths or non-existent files
+    if dirs_to_scan:
+        all_files = scan_directory(repo_path)
+        for file in all_files:
+            file_path = file["file_path"]
+            if file_path in path_set:
                 files.append(file)
-                break
+                continue
+            for path in path_set:
+                if file_path.startswith(path.rstrip("/") + "/"):
+                    files.append(file)
+                    break
 
     match_time = time.time() - t0
-    _log(f"[parallel-paths] Matched {len(files)} of {len(all_files)} files ({match_time:.1f}s)")
+    _log(f"[parallel-paths] Matched {len(files)} files ({match_time:.1f}s)")
 
-    # Step 2+3: Parallel chunk + embed
+    # Step 2: Delete old chunks for matched files to prevent orphans
+    t0 = time.time()
+    store = VectorStore(persist_dir=persist_dir)
+    store.create_collection(collection_name)
+    for file_info in files:
+        store.delete_by_file(file_info["file_path"])
+    _log(f"[parallel-paths] Deleted old chunks for {len(files)} files ({time.time() - t0:.1f}s)")
+
+    # Step 3: Parallel chunk + embed
     t0 = time.time()
     all_embedded, total_chunks = chunk_and_embed_parallel(files)
     parallel_time = time.time() - t0
 
     # Step 4: Store
     t0 = time.time()
-    store = VectorStore(persist_dir=persist_dir)
-    store.create_collection(collection_name)
     store.add_parent_child_chunks(all_embedded)
-    _write_meta(repo_path, len(files))
+    write_manifest(f"{repo_path.rstrip('/')}/.codewalk", file_count=len(files), chunk_count=len(all_embedded))
     store_time = time.time() - t0
 
     total_time = time.time() - pipeline_start
@@ -220,11 +249,11 @@ def reindex(repo_path: str = "", collection_name: str = "codebase",
 
     result = incremental_reindex(indexed_files, repo_path, collection_name, persist_dir=persist_dir)
 
-    # Map to legacy return format for /analyze callers
+    # Map to return format for /analyze callers
     return {
         "repo_path": result["repo_path"],
-        "new_files": result["files_reindexed"],
-        "changed_files": result["files_reindexed"],
+        "new_files": result.get("new_files", result["files_reindexed"]),
+        "changed_files": result.get("changed_files", result["files_reindexed"]),
         "deleted_files": result["files_deleted"],
         "unchanged_files": result["files_skipped"],
         "files_scanned": result["files_on_disk"],
@@ -239,6 +268,7 @@ def incremental_reindex(
     repo_path: str = "",
     collection_name: str = "codebase",
     persist_dir: str = "./data/chroma",
+    team_config=None,
 ) -> dict:
     """Incremental reindex — only re-embeds files whose content changed.
 
@@ -246,13 +276,12 @@ def incremental_reindex(
     changes. For each file: hash on disk vs stored hash → skip if equal,
     delete old chunks + re-embed if different, remove if deleted from disk.
 
-    Based on the "ChromaDB metadata as document registry" pattern from
-    Arpit Bhayani's "What Matters in Production RAG".
-
     Args:
         paths: File or directory paths to consider for reindexing.
         repo_path: Root of the repository (defaults to settings.repo_path).
         collection_name: ChromaDB collection name (default "codebase").
+        persist_dir: ChromaDB directory.
+        team_config: If provided, uses team_scan_directory instead of scan_directory.
 
     Returns:
         dict with keys: repo_path, files_on_disk, files_skipped,
@@ -262,7 +291,11 @@ def incremental_reindex(
     repo_path = repo_path or settings.repo_path
 
     # Step 1: Scan disk → match against selected paths
-    all_files = scan_directory(repo_path)
+    if team_config:
+        from src.codewalk.team_config import team_scan_directory
+        all_files = team_scan_directory(repo_path, team_config)
+    else:
+        all_files = scan_directory(repo_path)
     path_set = set(paths)
     disk_files = []
 
@@ -286,6 +319,8 @@ def incremental_reindex(
     # Step 4: Classify each disk file
     to_embed = []    # new or changed
     skipped = 0
+    new_files = 0
+    changed_files = 0
     disk_paths = set()
 
     for file_info in disk_files:
@@ -306,6 +341,9 @@ def incremental_reindex(
             # Changed or new → delete old chunks first, then re-embed
             if file_path in indexed_files:
                 store.delete_by_file(file_path)
+                changed_files += 1
+            else:
+                new_files += 1
             to_embed.append(file_info)
     
     # Step 5: Delete chunks for files removed from disk
@@ -323,7 +361,7 @@ def incremental_reindex(
         store.add_parent_child_chunks(all_embedded)
         embedded_count = len(all_embedded)
     
-    _write_meta(repo_path, len(disk_files))
+    write_manifest(f"{repo_path.rstrip('/')}/.codewalk", file_count=len(disk_files), chunk_count=embedded_count)
 
     total_time = time.time() - pipeline_start
 
@@ -332,33 +370,122 @@ def incremental_reindex(
         "files_on_disk": len(disk_files),
         "files_skipped": skipped,
         "files_reindexed": len(to_embed),
+        "new_files": new_files,
+        "changed_files": changed_files,
         "files_deleted": deleted,
         "chunks_embedded": embedded_count,
         "embedded_chunks": all_embedded,
         "total_time": f"{total_time:.1f}s",
     }
 
-def _write_meta(repo_path: str, file_count: int):
-    """Write .codewalk/meta.json after indexing."""
-    import json
-    from datetime import datetime, timezone
-    from pathlib import Path
+def write_manifest(
+    index_dir: str,
+    file_count: int,
+    chunk_count: int = 0,
+    repo_name: str = "",
+    commit_sha: str = "",
+    commit_message: str = "",
+    branch: str = "",
+):
+    """Write manifest.json into index_dir (.codewalk/ or incoming/).
 
-    meta_path = f"{repo_path.rstrip('/')}/.codewalk/meta.json"
-
-    meta = {
+    Single source of truth for index metadata — used by:
+      - Local indexing (file_count + chunk_count, commit fields empty)
+      - Cloud worker (all fields populated after git clone)
+      - MCP ensure_local_index (reads commit_sha to check staleness)
+      - state._check_upgrade_banner (reads codewalk_version)
+    """
+    manifest = {
         "codewalk_version": CODEWALK_VERSION,
-        "analyzed_at": datetime.now(timezone.utc).isoformat(),
+        "indexed_at": datetime.now(timezone.utc).isoformat(),
         "file_count": file_count,
-        "has_graph": True,
+        "chunk_count": chunk_count,
+        "repo": repo_name,
+        "commit_sha": commit_sha,
+        "commit_message": commit_message,
+        "branch": branch,
     }
+    out = _Path(index_dir) / "manifest.json"
+    out.parent.mkdir(parents=True, exist_ok=True)
+    with open(out, "w") as f:
+        json.dump(manifest, f, indent=2)
+    _log(f"[manifest] Wrote {out} (v{CODEWALK_VERSION})")
 
-    Path(meta_path).parent.mkdir(parents=True, exist_ok=True)
 
-    with open(meta_path, "w") as file:
-        json.dump(meta, file, indent=2)
+def build_full_analysis(
+    db_path: str,
+    files: list[dict],
+    embedded_chunks: list[dict] | None = None,
+    guidelines_path: str = "",
+    docs_path: str = "",
+    force_reindex_extras: bool = False,
+) -> dict:
+    """Stateless analysis: deps → modules → DuckDB → docs → guidelines.
 
-    _log(f"[meta] Wrote {meta_path} (v{CODEWALK_VERSION})")
+    Caller must scan first (scan_directory or team_scan_directory) and pass files.
+    Shared by CLI, worker, MCP, and API — zero duplication.
+
+    Args:
+        db_path:               Path to graph.duckdb.
+        files:                 Scanned file list (required).
+        embedded_chunks:       Optional chunks from ChromaDB indexing.
+        guidelines_path:       Folder with .md/.txt/.rst guidelines (absolute).
+        docs_path:             Folder with .md/.pdf/.txt docs (absolute).
+        force_reindex_extras:  If True, wipe + re-embed docs/guidelines.
+
+    Returns: {"files", "deps", "modules_result", "docs_indexed", "guidelines_indexed"}
+    """
+    from src.codewalk.analysis.dependency_graph import build_dependency_graph
+    from src.codewalk.analysis.module_detector import detect_modules
+    from src.codewalk.graph.graph_store import GraphStore
+
+    deps = build_dependency_graph(files)
+    modules_result = detect_modules(files, deps)
+
+    graph_store = GraphStore(db_path)
+    graph_store.populate_from_analysis(
+        files, deps, modules_result,
+        embedded_chunks=embedded_chunks,
+    )
+    graph_store.close()
+
+    _log(f"[analysis] {len(files)} files, {len(deps['graph'])} in graph, "
+         f"{len(modules_result['modules'])} modules → {db_path}")
+
+    # ── Index docs + guidelines into same ChromaDB (after DuckDB) ──
+    chroma_dir = str(Path(db_path).parent / "chroma")
+    docs_indexed = None
+    guidelines_indexed = None
+
+    if docs_path and os.path.isdir(docs_path):
+        from src.codewalk.doc_knowledge.doc_store import DocStore
+        repo_name = Path(db_path).parent.parent.name
+        doc_store = DocStore(persist_dir=chroma_dir, collection_name=f"{repo_name}_docs")
+        doc_store.create_collection()
+        if force_reindex_extras or doc_store.chunk_count() == 0:
+            if force_reindex_extras and doc_store.chunk_count() > 0:
+                doc_store.clear()
+            docs_indexed = doc_store.index_docs(docs_path)
+            _log(f"[analysis] Docs indexed: {docs_indexed}")
+
+    if guidelines_path and os.path.isdir(guidelines_path):
+        from src.codewalk.review.guidelines_loader import get_guidelines_store
+        gl_store = get_guidelines_store(
+            guidelines_path=guidelines_path,
+            persist_dir=chroma_dir,
+            force=force_reindex_extras,
+        )
+        if gl_store:
+            guidelines_indexed = gl_store.chunk_count()
+            _log(f"[analysis] Guidelines indexed: {guidelines_indexed} chunks")
+
+    return {
+        "files": files,
+        "deps": deps,
+        "modules_result": modules_result,
+        "docs_indexed": docs_indexed,
+        "guidelines_indexed": guidelines_indexed,
+    }
 
 
 

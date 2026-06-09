@@ -7,7 +7,6 @@ from typing_extensions import TypedDict
 from langgraph.graph import StateGraph, START, END
 from langgraph.graph.message import add_messages
 from langgraph.prebuilt import ToolNode
-from langgraph.checkpoint.memory import MemorySaver
 from langchain_core.messages import AIMessage, SystemMessage
 
 from src.codewalk.config import settings, get_llm
@@ -19,7 +18,6 @@ from src.codewalk.agent.tools import create_tools
 from src.codewalk.embeddings.vector_store import VectorStore
 from src.codewalk.graph.graph_runtime import GraphRuntime
 from src.codewalk.graph.graph_store import GraphStore
-
 # ─── STATE DEFINITION ────────────────────────────────────────────────
 class AgentState(TypedDict):
     """The state that flows through the graph.
@@ -54,9 +52,10 @@ def create_agent(store: VectorStore, modules_result: dict, files: list[dict] = N
     llm_with_tools = llm.bind_tools(tools)
 
     # ── Step 3: Define the agent node ────────────────────────────
-    # Regex to find {"name": "tool_name", "arguments": {...}} in text
+    # Regex to find {"name": "tool_name", "arguments": {...}} in text.
+    # Uses recursive brace matching to handle nested JSON in arguments.
     _TOOL_CALL_RE = re.compile(
-        r'\{\s*"name"\s*:\s*"(\w+)"\s*,\s*"arguments"\s*:\s*(\{[^{}]*\})\s*\}',
+        r'\{\s*"name"\s*:\s*"(\w+)"\s*,\s*"arguments"\s*:\s*(\{(?:[^{}]|\{(?:[^{}]|\{[^{}]*\})*\})*\})\s*\}',
         re.DOTALL,
     )
 
@@ -111,7 +110,6 @@ def create_agent(store: VectorStore, modules_result: dict, files: list[dict] = N
     graph.add_edge("tools", "agent")     
 
     # ── Step 6: Compile with memory ──────────────────────────────
-    memory = MemorySaver()
-    return graph.compile(checkpointer=memory)
+    from src.codewalk.core.hitl import compile_with_hitl
+    return compile_with_hitl(graph, interrupt_nodes=["tools"])
 
-    

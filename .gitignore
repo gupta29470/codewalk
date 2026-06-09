@@ -1,44 +1,52 @@
-# Secrets
 .env
+.env.*
+*.pem
+*.key
 
-# Python
 __pycache__/
-*.pyc
-*.pyo
+*.py[cod]
+*.egg-info/
+dist/
+build/
 
-# Virtual environment
 .venv/
 .codewalk-env/
 
-# Vector store data
-data/
+.pytest_cache/
+.coverage
+htmlcov/
 
-# IDE
+.vscode/
 .idea/
+*.swp
+*~
 
-# Frontend
+.DS_Store
+
+*.log
+*.sqlite
+*.db
+.codewalk/
+
 frontend/node_modules/
 frontend/.next/
+frontend/out/
+frontend/.env.local
 
-# Scratch/teaching files
+data/
+
 teach.py
 explain.py
 explain/
-
-codewalk_plan.md
-
 SESSION_SUMMARY.md
-
-# OS
-.DS_Store
-
-blogs/
-
-.codewalk/
-
-tests/
 
 # Wiki documentation
 wiki/
 
 details.md
+
+codewalk_plan.md
+
+blogs/
+
+tests/

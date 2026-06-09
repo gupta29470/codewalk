@@ -4,7 +4,7 @@ from langchain_core.prompts import ChatPromptTemplate
 from src.codewalk.config import get_llm
 from src.codewalk.log import log as _log
 
-
+KEYWORD_OVERLAP_THRESHOLD = 0.2
 class ChunkRelevance(BaseModel):
     """LLM verdict on whether a single chunk is relevant to the query."""
     index: int = Field(description="The chunk index (0-based)")
@@ -154,7 +154,7 @@ def grade_chunks_free(question: str, results: list[dict]) -> list[dict]:
         scored.append((score, result))
 
     # Keep chunks with at least 20% keyword overlap
-    threshold = 0.2
+    threshold = KEYWORD_OVERLAP_THRESHOLD
     filtered = [r for score, r in scored if score >= threshold]
 
     if not filtered:

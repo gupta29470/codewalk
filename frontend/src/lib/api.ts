@@ -75,6 +75,87 @@ export interface ExecutionFlowResponse {
     flow: string;
 }
 
+export interface ArchitectureStats {
+    file_graph: {
+        vertices: number;
+        edges: number;
+        is_dag: boolean;
+    };
+    module_graph: {
+        vertices: number;
+        edges: number;
+    };
+}
+
+export interface CentralityItem {
+    file: string;
+    score: number;
+}
+
+export interface ArchitectureCentrality {
+    betweenness: CentralityItem[];
+    pagerank: CentralityItem[];
+}
+
+export interface CycleGroup {
+    cycle_groups: string[][];
+    has_cycles: boolean;
+    edges_to_break: [string, string][];
+}
+
+export interface ArchitectureResponse {
+    stats: ArchitectureStats;
+    centrality: ArchitectureCentrality;
+    cycles: CycleGroup;
+}
+
+export interface FixItem {
+    file_path: string;
+    old_code: string;
+    new_code: string;
+}
+
+export interface AppliedFix {
+    file_path: string;
+    old_code: string;
+    new_code: string;
+    message: string;
+}
+
+export interface ApplyFixesResponse {
+    applied: AppliedFix[];
+    failed: { index: number; error: string } | null;
+    total: number;
+}
+
+export interface DocsIndexResponse {
+    status: string;
+    files_indexed: number;
+    chunks_created: number;
+}
+
+export interface DocsSearchResult {
+    text: string;
+    metadata: Record<string, unknown>;
+    distance: number;
+}
+
+export interface DocsSearchResponse {
+    query: string;
+    results: DocsSearchResult[];
+}
+
+export interface DocsAskResponse {
+    answer: string;
+    sources: { doc_path: string; section: string }[];
+}
+
+export interface ResearchResponse {
+    question: string;
+    report: string;
+    sources: string[];
+}
+
 export interface ReviewIssue {
     severity: string;
     category: string;
@@ -104,10 +185,27 @@ export interface IncrementalReindexResponse {
     total_time: string;
 }
 
+export interface AdminRepo {
+    name: string;
+    branch: string;
+    status: string | null;
+    commit_sha: string | null;
+    finished_at: string | null;
+    error: string | null;
+}
+
 export interface ProgressEvent {
     step: string;
     message: string;
     result?: AnalyzeResponse;
+}
+
+export interface StreamEvent {
+    type: "token" | "tool_start" | "tool_end" | "done" | "error" | "interrupted";
+    content?: string;           // present for type="token"
+    name?: string;              // present for type="tool_start" | "tool_end"
+    message?: string;           // present for type="error"
+    proposed_action?: string;   // present for type="interrupted"
 }
 
 // ─── API Client ─────────────────────────────────────────────────────
@@ -207,6 +305,49 @@ export const api = {
             body: JSON.stringify({ message, thread_id: threadId }),
         }),
 
+    streamChat: async (
+        message: string,
+        threadId: string = "default",
+        onEvent: (event: StreamEvent) => void
+    ) => {
+        const res = await fetch(`${API_BASE}/chat/stream`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ message, thread_id: threadId }),
+        });
+
+        if (!res.ok) {
+            const error = await res.json().catch(() => ({ detail: res.statusText }));
+            throw new Error(error.detail || `API error: ${res.status}`);
+        }
+
+        const reader = res.body?.getReader();
+        if (!reader) throw new Error("No response stream");
+
+        const decoder = new TextDecoder();
+        let buffer = "";
+
+        while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+
+            buffer += decoder.decode(value, { stream: true });
+            const lines = buffer.split("\n");
+            buffer = lines.pop() || "";
+
+            for (const line of lines) {
+                if (line.startsWith("data: ")) {
+                    try {
+                        const event: StreamEvent = JSON.parse(line.slice(6));
+                        onEvent(event);
+                    } catch {
+                        // Malformed SSE chunk — skip
+                    }
+                }
+            }
+        }
+    },
+
     reviewDiff: (staged: boolean = false, targetBranch?: string) =>
         apiFetch<ReviewResponse>("/review", {
             method: "POST",
@@ -233,6 +374,73 @@ export const api = {
             method: "POST",
         }),
 
+    getArchitecture: () => apiFetch<ArchitectureResponse>("/architecture"),
+
+    refreshAnalysis: () =>
+        apiFetch<{ status: string; files: number; modules: string[] }>("/refresh", {
+            method: "POST",
+        }),
+
+    applyFixes: (fixes: FixItem[]) =>
+        apiFetch<ApplyFixesResponse>("/review/apply", {
+            method: "POST",
+            body: JSON.stringify({ fixes }),
+        }),
+
+    indexDocs: (docsPath: string) =>
+        apiFetch<DocsIndexResponse>("/docs/index", {
+            method: "POST",
+            body: JSON.stringify({ docs_path: docsPath }),
+        }),
+
+    searchDocs: (query: string, nResults: number = 5) =>
+        apiFetch<DocsSearchResponse>("/docs/search", {
+            method: "POST",
+            body: JSON.stringify({ query, n_results: nResults }),
+        }),
+
+    askDocs: (question: string, nResults: number = 5) =>
+        apiFetch<DocsAskResponse>("/docs/ask", {
+            method: "POST",
+            body: JSON.stringify({ question, n_results: nResults }),
+        }),
+
+    research: (question: string, depth: string = "standard") =>
+        apiFetch<ResearchResponse>("/research", {
+            method: "POST",
+            body: JSON.stringify({ question, depth }),
+        }),
+
+    chatApprove: (threadId: string, action: "approve" | "reject") =>
+        apiFetch<{ status: string; message?: string; result?: string }>("/chat/approve", {
+            method: "POST",
+            body: JSON.stringify({ thread_id: threadId, action }),
+        }),
+
+    adminRepos: (adminKey: string) =>
+        apiFetch<{ repos: AdminRepo[] }>("/admin/repos", {
+            method: "POST",
+            headers: { "X-Admin-Key": adminKey },
+        }),
+
+    registerRepo: (
+        adminKey: string,
+        name: string,
+        githubUrl: string,
+        branch: string = "main",
+        installationId: string = ""
+    ) =>
+        apiFetch<{ repo_token: string }>("/admin/register", {
+            method: "POST",
+            headers: { "X-Admin-Key": adminKey },
+            body: JSON.stringify({
+                name,
+                github_url: githubUrl,
+                branch,
+                installation_id: installationId,
+            }),
+        }),
+
     voiceAsk: async (audioBlob: Blob, threadId: string = "voice") => {
         const form = new FormData();
         form.append("audio", audioBlob, "recording.webm");
@@ -250,7 +458,6 @@ export const api = {
 
         return res.json() as Promise<{
             question: string;
-            tool: string | null;
             answer: string;
             speech: string;
             audio_base64: string;

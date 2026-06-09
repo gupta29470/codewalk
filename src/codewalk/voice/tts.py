@@ -29,17 +29,18 @@ def synthesize(text: str, voice: str = DEFAULT_VOICE) -> bytes:
     """Generate MP3 audio bytes from text (sync wrapper).
 
     Safe to call from inside an existing event loop (e.g. MCP server)
-    — runs TTS in a separate thread with its own loop.
+    — offloads to a background thread to avoid blocking.
     """
     try:
-        asyncio.get_running_loop()
-        # Inside an event loop (MCP server) — run in a new thread
-        import concurrent.futures
-        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
-            return pool.submit(asyncio.run, _synthesize_async(text, voice)).result()
+        loop = asyncio.get_running_loop()
     except RuntimeError:
         # No loop running — safe to call directly
         return asyncio.run(_synthesize_async(text, voice))
+
+    # Inside an event loop — offload to thread pool
+    import concurrent.futures
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+        return pool.submit(asyncio.run, _synthesize_async(text, voice)).result()
 
 def speak(text: str, voice: str = DEFAULT_VOICE):
     """Generate audio and play it immediately (CLI use).

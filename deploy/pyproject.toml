@@ -1,0 +1,15 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "codewalk"
+version = "1.0.0"
+description = "AI-powered codebase intelligence"
+requires-python = ">=3.10"
+dependencies = [
+    # (all packages from requirements.txt)
+]
+
+[project.scripts]
+codewalk = "src.codewalk.cli:main"

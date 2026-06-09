@@ -59,6 +59,7 @@ class ReviewResult:
     files_reviewed: int = 0
     lines_added: int = 0
     lines_removed: int = 0
+    diff_text: str = ""  # raw diff — used by reflect_on_review() at the call site
 
 @dataclass
 class ChangedLine:
@@ -79,6 +80,8 @@ class DiffHunk:
     start_line: int
     end_line: int
     lines: list[ChangedLine] = field(default_factory=list)
+    source_start: int = 0      # old file start line
+    source_length: int = 0     # old file line count
 
 @dataclass
 class DiffFile:

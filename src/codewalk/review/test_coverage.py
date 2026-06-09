@@ -31,7 +31,7 @@ class TestCoverage:
         "main", "config", "settings", "constants", "types", "interfaces",
     }
 
-    def analyze(self, diff_files: list) -> list[Issue]:
+    def analyze(self, diff_files: list, repo_path: str | None = None) -> list[Issue]:
         """Flag source files changed without corresponding test updates."""
         changed_source = set()
         changed_tests = set()
@@ -46,6 +46,12 @@ class TestCoverage:
         for src_file in changed_source:
             expected_tests = self._guess_test_file(src_file)
             if not expected_tests:
+                continue
+
+            # Skip if no expected test file exists on disk — project may not have tests for this file
+            if repo_path and not any(
+                (Path(repo_path) / t).exists() for t in expected_tests
+            ):
                 continue
 
             # Check if ANY of the expected test files were updated

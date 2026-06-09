@@ -1,18 +1,22 @@
-"""Codewalk MCP server — 20 tools for codebase onboarding, search, review, and voice.
+"""Codewalk MCP server — 22 tools for codebase onboarding, search, review, and voice.
 
 Tool categories:
   SETUP  (1):           Analyze repo — scans, filters, chunks, embeds in one call.
   QUERY  (2-8, 16-17):  Search code, explain functions, blast radius, reading order, execution flow, architecture health.
   MAINT  (9-13):        Incremental reindex, refresh analysis, review diff/file, load guidelines.
+  REVIEW (11, 11b):     Review git diff, self-critique review (reflection pass).
   VOICE  (14-15):       Mic record+transcribe (Copilot routes), TTS speak.
   DOCS   (18-20):       Index, search, and ask questions against team docs.
+  HITL   (21):          Human-in-the-loop approval gate before any code/file action.
 """
 
 import inspect
 import logging
+import os
+import json
 import subprocess
-import sys
-import asyncio
+from pathlib import Path
+import requests
 
 from mcp.server.fastmcp import FastMCP
 
@@ -21,13 +25,11 @@ from src.codewalk.log import log as _log
 
 logger = logging.getLogger("codewalk")
 
-from src.codewalk.analysis.dependency_graph import build_dependency_graph
-from src.codewalk.analysis.module_detector import detect_modules
 from src.codewalk.generation.diagram_generator import generate_module_diagram
 from src.codewalk.embeddings.vector_store import VectorStore
 from src.codewalk.rag.chain import format_context, retrieve_corrective
 from src.codewalk.rag.prompts import SYSTEM_PROMPT, QUESTION_PROMPT
-from src.codewalk.rag.retrieval_quality import filter_by_distance
+
 from src.codewalk.pipeline import full_index_parallel, index_from_paths_parallel, incremental_reindex
 from src.codewalk.config import settings
 from src.codewalk.review.guidelines_loader import get_guidelines_store
@@ -41,6 +43,7 @@ from src.codewalk.query import (
     reading_order_text, execution_flow_text,
 )
 from src.codewalk.doc_knowledge.prompts import DOC_ASK_PROMPT
+from src.codewalk.review.reflector import REVIEW_CRITIC_PROMPT
 
 
 # ─── Create the MCP server ──────────────────────────────────────────
@@ -72,15 +75,43 @@ mcp = FastMCP(
         "- 'Where should I start reading?' → codewalk_get_reading_order — returns ALL files\n"
         "- 'Show me the dependency flow' → codewalk_get_execution_flow — "
         "no arg = module-to-module flow, with module_name = file-to-file flow\n"
+        "- 'Fix this bug / apply this change' → search + produce fix → codewalk_approve_action FIRST → then apply\n"
         "\n"
         "## MAINTENANCE (after code changes)\n"
         "- codewalk_incremental_reindex — re-embed only changed files (hash-based skip)\n"
         "- codewalk_refresh_analysis — rebuild deps/modules without re-embedding\n"
         "\n"
-        "## CODE REVIEW\n"
-        "- codewalk_review_diff — review git diff for bugs, security, style\n"
-        "- codewalk_review_file(path) — review one file against codebase patterns\n"
-        "- codewalk_load_guidelines(path) — load team coding standards for reviews\n"
+        "## CODE REVIEW — FULL FLOW (follow all 4 steps in order)\n"
+        "\n"
+        "Step 1: PARALLEL CONTEXT GATHERING — call ALL THREE simultaneously in one response:\n"
+        "        a) codewalk_review_diff       — diff + per-file caller/security/blast context\n"
+        "        b) codewalk_get_architecture_health — bottleneck files, circular deps, PageRank\n"
+        "        c) codewalk_get_module_info(<affected_module>) — full symbol map of changed module\n"
+        "        Wait for all three results before moving to Step 2.\n"
+        "\n"
+        "Step 2: WRITE YOUR REVIEW merging all three results:\n"
+        "        - Use codewalk_review_diff for per-file issues (bugs, security, logic)\n"
+        "        - Use codewalk_get_architecture_health to flag if any changed file is a\n"
+        "          bottleneck (high centrality) or part of a circular dependency\n"
+        "        - Use codewalk_get_module_info to check if changed symbols are widely used\n"
+        "        Then ALWAYS call codewalk_reflect_review(initial_review=<your review text>)\n"
+        "        Read the returned critic prompt and produce an improved final review.\n"
+        "\n"
+        "Step 3: For EACH fix you want to apply (iterate ONE BY ONE):\n"
+        "        a) Present the fix to the user with:\n"
+        "           - File path and line number\n"
+        "           - The EXACT old code (what's currently in the file)\n"
+        "           - The EXACT new code (the corrected version)\n"
+        "        b) Call codewalk_approve_action(proposed_action='<summary of fix>')\n"
+        "        c) Show the returned message to the user. Wait for explicit 'yes' or 'no'.\n"
+        "        d) If YES: call codewalk_apply_fix(file_path, old_code, new_code) to apply it\n"
+        "        e) If NO: skip that fix and move to the next issue\n"
+        "\n"
+        "IMPORTANT: Only call codewalk_apply_fix AFTER the user has explicitly said 'yes'.\n"
+        "Never apply fixes without approval.\n"
+        "\n"
+        "- codewalk_load_guidelines(path) — load team coding standards (run once per project)\n"
+        "- codewalk_review_file(path) — review a single file (use same parallel pattern above)\n"
         "\n"
         "## ARCHITECTURE ANALYSIS\n"
         "- codewalk_get_architecture_health — bottlenecks, key files, circular dependencies, refactoring priorities\n"
@@ -97,6 +128,14 @@ mcp = FastMCP(
         "    2. Show the FULL result as text in the chat (same detail as typed)\n"
         "    3. Call codewalk_speak() with a 2-4 sentence spoken summary\n"
         "- codewalk_speak(text) — speak a plain-English summary aloud via TTS\n"
+        "\n"
+        "## HUMAN-IN-THE-LOOP — GLOBAL RULE\n"
+        "Before taking ANY action that modifies code, files, or external systems:\n"
+        "  1. Call codewalk_approve_action(proposed_action='<exactly what you will do>')\n"
+        "  2. Show the returned message to the user. Wait for explicit 'yes'.\n"
+        "  3. If user says no — do NOT take the action. Ask what they want instead.\n"
+        "This applies to: applying code fixes, creating/editing/deleting files, committing,\n"
+        "raising PRs, updating Jira, or ANY irreversible operation.\n"
         "\n"
         "## PRESENTING BLAST RADIUS RESULTS\n"
         "When showing blast radius or overview results, separate files into two groups:\n"
@@ -119,6 +158,28 @@ mcp = FastMCP(
         "   - Max 3 retries, then answer with best available chunks\n"
         "4. Always cite file paths and line numbers from chunk metadata\n"
         "\n"
+        "## DEEP RESEARCH (for complex cross-cutting questions)\n"
+        "When a question spans multiple modules or needs understanding how multiple\n"
+        "parts connect (e.g. 'How does error handling work across the codebase?',\n"
+        "'Explain the full auth flow end to end'), do NOT use a single search.\n"
+        "Instead, follow this pattern:\n"
+        "1. DECOMPOSE: Break the question into 3-any number of independent sub-questions,\n"
+        "   each targeting a different angle of the answer\n"
+        "2. PARALLEL SEARCH: Call codewalk_search_codebase for EACH sub-question\n"
+        "   simultaneously in one response (parallel tool calls)\n"
+        "3. SYNTHESIZE: Merge all chunk results into one structured report:\n"
+        "   - Summary of findings per sub-question\n"
+        "   - Cross-references between sub-questions (patterns, shared files)\n"
+        "   - Cite file paths and line numbers from chunk metadata\n"
+        "4. SELF-CRITIQUE: Review your report — did you miss an angle?\n"
+        "   If so, run one more codewalk_search_codebase for the gap\n"
+        "\n"
+        "Example: 'How does the payment retry system handle edge cases?'\n"
+        "  → sq1: codewalk_search_codebase('payment retry logic implementation')\n"
+        "  → sq2: codewalk_search_codebase('payment failure timeout conditions')\n"
+        "  → sq3: codewalk_search_codebase('max retries exceeded dead letter queue')\n"
+        "  → Synthesize all 3 into one report with citations\n"
+        "\n"
         "## ERROR HANDLING\n"
         "If any tool returns a message starting with 'Error:':\n"
         "- 'No codebase indexed' → tell user to run codewalk_analyze_codebase first\n"
@@ -126,6 +187,61 @@ mcp = FastMCP(
         "- Never retry the same tool with identical arguments after an error\n"
     ),
 )
+
+# For cloud support
+def ensure_local_index():
+    """Called once on MCP startup. Downloads index if missing; shows banner if stale."""
+    server_url = os.getenv("CODEWALK_SERVER_URL")
+    repo_name  = os.getenv("CODEWALK_REPO_NAME")
+    repo_token = os.getenv("CODEWALK_REPO_TOKEN")
+
+    if not all([server_url, repo_name, repo_token]):
+        return None
+    
+    local_meta = Path(".codewalk/manifest.json")
+     
+    if not local_meta.exists():
+        _download_index(server_url, repo_name, repo_token)
+        return
+    
+    try:
+        remote = requests.get(
+            f"{server_url}/indexes/{repo_name}/manifest",
+            headers={"X-Repo-Token": repo_token},
+            timeout=5
+        ).json()
+    except Exception:
+        return
+    
+    local_sha = json.loads(local_meta.read_text()).get("commit_sha", "")
+    remote_sha = remote.get("commit_sha", "")
+
+    if local_sha != remote_sha:
+        from src.codewalk.api import state
+        state.pending_update = (
+            f"⚡ NEWER INDEX AVAILABLE\n"
+            f"  Remote: {remote.get('commit_message','?')} ({remote_sha[:7]})\n"
+            f"  Local:  {local_sha[:7]}\n"
+            f"  Run codewalk_pull_index to update.\n"
+        )
+
+
+def _download_index(server_url: str, repo_name: str, repo_token: str):
+    print(f"⏳ Downloading index for {repo_name} ...")
+    request = requests.get(
+        f"{server_url}/indexes/{repo_name}",
+        headers={"X-Repo-Token": repo_token},
+        stream=True, timeout=120,
+    )
+
+    request.raise_for_status()
+    tarball = Path("/tmp/codewalk-index.tar.gz")
+    with open(tarball, "wb") as file:
+        for chunk in request.iter_content(chunk_size=8192):
+            file.write(chunk)
+
+    subprocess.run(["tar", "-xzf", str(tarball), "-C", "."], check=True)
+    print(f"✅ Index ready ({repo_name})")
 
 # ══════════════════════════════════════════════════════════════════════
 #  SETUP TOOLS — user or AI runs these to onboard a codebase
@@ -144,8 +260,23 @@ def codewalk_analyze_codebase() -> str:
     ⏩ NEXT STEP: use any query tool directly
     """
     _log(f"[codewalk_analyze_codebase] Starting analysis: {settings.repo_path}")
+
+    # Validate repo path
+    repo_path = settings.repo_path
+    if not repo_path or not os.path.isdir(repo_path):
+        return f"❌ Invalid repo path: '{repo_path}' is not a directory."
+
+    # Cloud mode: auto-download index if missing; flag if remote is newer
+    ensure_local_index()
+    pending_msg = state.pending_update or ""
+
     try:
-        state.rebuild_analysis_cache()
+        guidelines_path = os.getenv("REVIEW_GUIDELINES_PATH", "")
+        docs_path = os.getenv("CODE_DOCS_PATH", "")
+        state.rebuild_analysis_cache(
+            guidelines_path=guidelines_path,
+            docs_path=docs_path,
+        )
     except Exception as e:
         error_msg = str(e)
         if "lock" in error_msg.lower() or "Could not set lock" in error_msg:
@@ -168,21 +299,35 @@ def codewalk_analyze_codebase() -> str:
         if state._graph_store:
             state._graph_store.populate_chunks_from_chromadb(state._store)
 
-        # ── Embed guidelines if REVIEW_GUIDELINES_PATH is set ──
+        # Docs + guidelines already indexed by build_full_analysis
         guidelines_msg = ""
-        gl_store = get_guidelines_store()
-        if gl_store:
+        if guidelines_path:
+            gl_store = VectorStore(persist_dir=state.chroma_path())
+            gl_store.create_collection("guidelines")
             gl_count = gl_store.chunk_count()
-            guidelines_msg = f"Guidelines: {gl_count} chunks embedded\n"
+            if gl_count > 0:
+                guidelines_msg = f"Guidelines: {gl_count} chunks embedded\n"
 
+        docs_msg = ""
+        if docs_path:
+            from src.codewalk.doc_knowledge.doc_store import DocStore as _DocStore
+            _ds = _DocStore(persist_dir=state.chroma_path(), collection_name=f"{state.get_collection_name()}_docs")
+            _ds.create_collection()
+            dc = _ds.chunk_count()
+            if dc > 0:
+                docs_msg = f"Docs: {dc} chunks embedded\n"
+
+        header = f"{pending_msg}\n\n" if pending_msg else ""
         return (
-            f"Codebase analyzed successfully.\n"
-            f"Files found: {len(state._files)}\n"
-            f"Modules found: {', '.join(modules)}\n"
-            f"Search index: INDEX READY — {existing} chunks available.\n"
-            f"{guidelines_msg}\n"
-            f"✅ Index already exists.\n"
-            f"Ready to answer questions — use query tools directly."
+            header
+            + f"Codebase analyzed successfully.\n"
+            + f"Files found: {len(state._files)}\n"
+            + f"Modules found: {', '.join(modules)}\n"
+            + f"Search index: INDEX READY — {existing} chunks available.\n"
+            + f"{guidelines_msg}"
+            + f"{docs_msg}\n"
+            + f"✅ Index already exists.\n"
+            + f"Ready to answer questions — use query tools directly."
         )
 
     # ── INDEX EMPTY: auto-index all source files ──
@@ -191,12 +336,14 @@ def codewalk_analyze_codebase() -> str:
     _log(f"[codewalk_analyze_codebase] Indexing {len(all_paths)} files")
 
     if not all_paths:
+        header = f"{pending_msg}\n\n" if pending_msg else ""
         return (
-            f"Codebase analyzed successfully.\n"
-            f"Files found: {len(state._files)}\n"
-            f"Modules found: {', '.join(modules)}\n"
-            f"⚠️ No indexable files found after filtering.\n"
-            f"Check .codewalkignore or file patterns."
+            header
+            + f"Codebase analyzed successfully.\n"
+            + f"Files found: {len(state._files)}\n"
+            + f"Modules found: {', '.join(modules)}\n"
+            + f"⚠️ No indexable files found after filtering.\n"
+            + f"Check .codewalkignore or file patterns."
         )
 
     # ── Auto-index: chunk + embed + store ──
@@ -216,23 +363,38 @@ def codewalk_analyze_codebase() -> str:
 
     _log(f"[codewalk_analyze_codebase] Indexed {result['chunks_embedded']} chunks in {result.get('total_time', 'N/A')}")
 
-    # ── Embed guidelines if REVIEW_GUIDELINES_PATH is set ──
+    # Docs + guidelines already indexed by build_full_analysis (via rebuild_analysis_cache)
     guidelines_msg = ""
-    gl_store = get_guidelines_store()
-    if gl_store:
+    if guidelines_path:
+        gl_store = VectorStore(persist_dir=state.chroma_path())
+        gl_store.create_collection("guidelines")
         gl_count = gl_store.chunk_count()
-        guidelines_msg = f"Guidelines: {gl_count} chunks embedded\n"
-        _log(f"[codewalk_analyze_codebase] Guidelines embedded: {gl_count} chunks")
+        if gl_count > 0:
+            guidelines_msg = f"Guidelines: {gl_count} chunks embedded\n"
+            _log(f"[codewalk_analyze_codebase] Guidelines embedded: {gl_count} chunks")
 
+    docs_msg = ""
+    if docs_path:
+        from src.codewalk.doc_knowledge.doc_store import DocStore as _DocStore
+        _ds = _DocStore(persist_dir=state.chroma_path(), collection_name=f"{state.get_collection_name()}_docs")
+        _ds.create_collection()
+        dc = _ds.chunk_count()
+        if dc > 0:
+            docs_msg = f"Docs: {dc} chunks embedded\n"
+            _log(f"[codewalk_analyze_codebase] Docs embedded: {dc} chunks")
+
+    header = f"{pending_msg}\n\n" if pending_msg else ""
     return (
-        f"Codebase analyzed and indexed successfully.\n"
-        f"Files found: {len(state._files)}\n"
-        f"Files indexed: {result['files_scanned']}\n"
-        f"Chunks embedded: {result['chunks_embedded']}\n"
-        f"Time: {result.get('total_time', 'N/A')}\n"
-        f"{guidelines_msg}"
-        f"Modules found: {', '.join(modules)}\n\n"
-        f"✅ Ready to answer questions — use query tools directly."
+        header
+        + f"Codebase analyzed and indexed successfully.\n"
+        + f"Files found: {len(state._files)}\n"
+        + f"Files indexed: {result['files_scanned']}\n"
+        + f"Chunks embedded: {result['chunks_embedded']}\n"
+        + f"Time: {result.get('total_time', 'N/A')}\n"
+        + f"{guidelines_msg}"
+        + f"{docs_msg}"
+        + f"Modules found: {', '.join(modules)}\n\n"
+        + f"✅ Ready to answer questions — use query tools directly."
     )
 
 # ══════════════════════════════════════════════════════════════════════
@@ -509,7 +671,7 @@ def codewalk_incremental_reindex() -> str:
     ⏪ PREVIOUS STEP: codewalk_analyze_codebase (first-time setup)
     ⏩ NEXT STEP: any query tool (search, explain, blast radius, etc.)
     """
-    repo_path = settings.repo_path
+    repo_path = state.get_repo_path()
     if not repo_path:
         return "❌ No repo path set. Run codewalk_analyze_codebase first."
 
@@ -529,7 +691,14 @@ def codewalk_incremental_reindex() -> str:
     
     result = incremental_reindex(paths, repo_path, state.get_collection_name(), persist_dir=state.chroma_path())
 
-    state.rebuild_analysis_cache(embedded_chunks=result.get("embedded_chunks"))
+    guidelines_path = os.getenv("REVIEW_GUIDELINES_PATH", "")
+    docs_path = os.getenv("CODE_DOCS_PATH", "")
+    state.rebuild_analysis_cache(
+        embedded_chunks=result.get("embedded_chunks"),
+        guidelines_path=guidelines_path,
+        docs_path=docs_path,
+        force_reindex_extras=True,
+    )
 
     return (
         f"Incremental reindex complete ({result['total_time']})\n\n"
@@ -538,7 +707,7 @@ def codewalk_incremental_reindex() -> str:
         f"  Re-indexed:      {result['files_reindexed']}\n"
         f"  Deleted:         {result['files_deleted']}\n"
         f"  Chunks embedded: {result['chunks_embedded']}\n\n"
-        f"Analysis cache refreshed."
+        f"Analysis cache refreshed (docs + guidelines re-indexed)."
     )
 
 
@@ -592,13 +761,18 @@ def codewalk_review_diff(
     """
     from src.codewalk.review.reviewer import prepare_review_context
 
+    try:
+        state.ensure_initialized()
+    except Exception:
+        pass  # review works without full indexing — just less context
+
     ctx = prepare_review_context(
         staged=staged,
         target_branch=target_branch,
         commit=commit,
         store=state._store,
         deps=state._deps,
-        repo_path=settings.repo_path,
+        repo_path=state.get_repo_path(),
         graph_store=state._graph_store,
     )
 
@@ -633,6 +807,11 @@ def codewalk_review_diff(
         output_parts.append(ctx.guidelines_context)
         output_parts.append("")
 
+    # Team docs (architecture, naming conventions, folder structure)
+    if ctx.docs_context:
+        output_parts.append(ctx.docs_context)
+        output_parts.append("")
+
     # Architecture patterns detected
     if ctx.architecture_context:
         output_parts.append(ctx.architecture_context)
@@ -664,17 +843,74 @@ def codewalk_review_diff(
         "- Severity: 🔴 CRITICAL / 🟡 WARNING / 🟢 SUGGESTION\n"
         "- File and line number\n"
         "- What's wrong and why it's dangerous\n"
-        "- The CORRECTED code (copy-pasteable fix, not just a description)\n"
+        "- The EXACT old code (the problematic code as it currently exists in the file)\n"
+        "- The EXACT new code (the corrected replacement — copy-pasteable)\n"
         "- One sentence explaining what the fix does\n\n"
+        "IMPORTANT: When presenting fixes to the user later, you will use codewalk_apply_fix.\n"
+        "That tool requires the EXACT old_code (search text) and EXACT new_code (replacement).\n"
+        "Make sure your old_code matches the file content exactly, including whitespace.\n\n"
         "Focus on: OWASP top 10 (injection, auth bypass, XSS, SSRF, open redirect), "
         "race conditions, resource leaks, null safety, async gaps (setState after await "
         "without mounted check), unbounded growth, hardcoded secrets, certificate pinning "
-        "bypass, SQL injection, path traversal. Be AGGRESSIVE — better to over-flag."
+        "bypass, SQL injection, path traversal. Be AGGRESSIVE — better to over-flag.\n\n"
+        "⏩ NEXT STEPS (if you haven't already called them in parallel):\n"
+        "  - codewalk_get_architecture_health — check if changed files are bottlenecks or in cycles\n"
+        "  - codewalk_get_module_info(<module>) — check blast radius of changed symbols\n"
+        "  Then merge all results and call codewalk_reflect_review(initial_review=<your review>)"
     )
 
     return "\n".join(output_parts)
 
-# ─── TOOL 12 [MAINT · user+AI]: codewalk_review_file ────────────
+# ─── TOOL 11b [MAINT · AI]: codewalk_reflect_review ────────────
+@mcp.tool()
+def codewalk_reflect_review(
+    initial_review: str,
+    staged: bool = False,
+    target_branch: str | None = None,
+    commit: str | None = None,
+) -> str:
+    """Self-critique an initial code review to catch missed issues and remove false positives.
+
+    Call this immediately after YOU have written a review from codewalk_review_diff.
+    Returns the diff + your initial review + critic instructions — YOU then apply the
+    critic role and produce an improved final review.
+
+    No LLM is called here. YOU are the LLM — this tool just formats the reflection input.
+
+    ⏩ AFTER producing your improved review:
+    - For each fix you want to apply, call codewalk_approve_action(proposed_action=<exact file + diff>)
+    - Show the message to the user and wait for 'yes' before making any code change.
+
+    Args:
+        initial_review: The review you just wrote after calling codewalk_review_diff.
+        staged:         Same value you passed to codewalk_review_diff (default: False).
+        target_branch:  Same value you passed to codewalk_review_diff (if any).
+        commit:         Same value you passed to codewalk_review_diff (if any).
+    """
+    from src.codewalk.review.reviewer import prepare_review_context
+
+    state.ensure_initialized()
+
+    ctx = prepare_review_context(
+        staged=staged,
+        target_branch=target_branch,
+        commit=commit,
+        store=state._store,
+        deps=state._deps,
+        repo_path=state.get_repo_path(),
+        graph_store=state._graph_store,
+    )
+
+    if ctx is None:
+        return "No diff available to reflect on."
+
+    return (
+        f"{REVIEW_CRITIC_PROMPT}\n\n"
+        f"DIFF:\n```\n{ctx.diff_text[:10000]}\n```\n\n"
+        f"INITIAL REVIEW:\n{initial_review}"
+    )
+
+
 @mcp.tool()
 def codewalk_review_file(file_path: str) -> str:
     """Review a single file for bugs, security vulnerabilities, and logic errors.
@@ -698,14 +934,20 @@ def codewalk_review_file(file_path: str) -> str:
     from src.codewalk.review.guidelines_loader import get_guidelines_store, search_guidelines
     from src.codewalk.rag.chain import format_context
 
-    repo_path = settings.repo_path
+    try:
+        state.ensure_initialized()
+    except Exception:
+        pass  # review works without full indexing — just less context
+
+    repo_path = state.get_repo_path()
     full_path = os.path.join(repo_path, file_path) if not os.path.isabs(file_path) else file_path
 
     if not os.path.exists(full_path):
         return f"❌ File '{file_path}' not found."
 
     try:
-        content = open(full_path, "r", errors="replace").read()
+        with open(full_path, "r", errors="replace") as f:
+            content = f.read()
     except OSError as e:
         return f"❌ Cannot read file: {e}"
 
@@ -729,7 +971,7 @@ def codewalk_review_file(file_path: str) -> str:
     output_parts.append(f"## File Review: {file_path} ({len(lines)} lines)\n")
 
     # Caller context (who imports this file)
-    caller_ctx = _get_caller_context(synthetic_diff, state._deps)
+    caller_ctx = _get_caller_context(synthetic_diff, state._deps, state._graph_store)
     if caller_ctx:
         output_parts.append(caller_ctx)
         output_parts.append("")
@@ -743,15 +985,17 @@ def codewalk_review_file(file_path: str) -> str:
 
     # Codebase patterns (similar code elsewhere)
     if state._store:
-        results = state._store.search(f"code in {file_path}", n_results=5)
-        filtered, _ = filter_by_distance(results)
-        if filtered:
+        result = retrieve_corrective(
+            f"code in {file_path}", state._store,
+            graph_store=state._graph_store,
+        )
+        if result["chunks"]:
             output_parts.append("## Similar patterns elsewhere in the codebase")
-            output_parts.append(format_context(filtered))
+            output_parts.append(format_context(result["chunks"]))
             output_parts.append("")
 
     # Guidelines
-    guidelines_store = get_guidelines_store()
+    guidelines_store = get_guidelines_store(persist_dir=state.chroma_path())
     if guidelines_store:
         gl = search_guidelines(guidelines_store, [synthetic_diff], n_results=3)
         if gl:
@@ -777,7 +1021,11 @@ def codewalk_review_file(file_path: str) -> str:
         "- One sentence explaining what the fix does\n\n"
         "Compare against the codebase patterns shown above for consistency.\n"
         "Focus on: OWASP top 10, race conditions, resource leaks, null safety, "
-        "async gaps, unbounded growth, hardcoded secrets, SQL injection, path traversal."
+        "async gaps, unbounded growth, hardcoded secrets, SQL injection, path traversal.\n\n"
+        "⏩ NEXT STEP: Once you have written your review, call\n"
+        "  codewalk_reflect_review(initial_review=<your review text>)\n"
+        "  to self-critique and produce an improved final review.\n"
+        "  Then for each fix: call codewalk_approve_action before applying."
     )
 
     return "\n".join(output_parts)
@@ -816,7 +1064,10 @@ def codewalk_load_guidelines(docs_path: str | None = None) -> str:
     if not os.path.isdir(path):
         return f"❌ Directory not found: {path}"
     
-    store = get_guidelines_store()
+    store = get_guidelines_store(
+        guidelines_path=path,
+        persist_dir=state.chroma_path(),
+    )
     if not store:
         return f"❌ No guideline files found in {path}"
     
@@ -847,7 +1098,7 @@ def codewalk_load_guidelines(docs_path: str | None = None) -> str:
 #     Use this when user says "start voice", "open voice companion", or
 #     "I want to talk to Codewalk".
 #
-#     Requires: Ollama running with qwen2.5:1.5b pulled.
+#     Requires: Microphone access.
 #
 #     Args:
 #         backend: "direct" (default, fastest) or "mcp" (MCP stdio protocol).
@@ -900,9 +1151,19 @@ def codewalk_voice_ask() -> str:
     Requires: Microphone access
     """
 
+    def _play_beep(sound_name: str):
+        """Play a system beep sound. Falls back silently on non-macOS."""
+        sounds = {
+            "tink": "/System/Library/Sounds/Tink.aiff",
+            "pop": "/System/Library/Sounds/Pop.aiff",
+        }
+        path = sounds.get(sound_name)
+        if path and os.path.exists(path):
+            subprocess.run(["afplay", path], check=False)
+
     # ── 0. Stop any playing audio + beep to signal "start talking" ──
     stop_speaking()
-    subprocess.run(["afplay", "/System/Library/Sounds/Tink.aiff"], check=False)
+    _play_beep("tink")
 
     # ── 1. Record from mic ──────────────────────────────────────────
     _log("[codewalk_voice_ask] Recording from mic...")
@@ -915,7 +1176,7 @@ def codewalk_voice_ask() -> str:
         return "❌ No audio captured. Make sure your microphone is working."
 
     # ── Beep to signal "recording stopped" ──
-    subprocess.run(["afplay", "/System/Library/Sounds/Pop.aiff"], check=False)
+    _play_beep("pop")
 
     # ── 2. Transcribe (faster-whisper, local) ───────────────────────
     _log("[codewalk_voice_ask] Transcribing...")
@@ -932,7 +1193,7 @@ def codewalk_voice_ask() -> str:
         return "🔇 Stopped playback."
 
     # ── 3. Beep to signal "got it, processing..." ──────────────────
-    subprocess.run(["afplay", "/System/Library/Sounds/Tink.aiff"], check=False)
+    _play_beep("tink")
 
     return (
         f'🎤 **Transcript:** "{transcript}"\n\n'
@@ -945,7 +1206,8 @@ def codewalk_voice_ask() -> str:
         f"   - User asks about risk or what breaks → `codewalk_get_blast_radius_map(target)`\n"
         f"   - User asks about dependencies or execution flow → `codewalk_get_execution_flow()`\n"
         f"   - User asks where to start reading → `codewalk_get_reading_order()`\n"
-        f"   - User asks to review changes → `codewalk_review_diff()`\n"
+        f"   - User asks to review changes → call codewalk_review_diff + codewalk_get_architecture_health + codewalk_get_module_info simultaneously\n"
+        f"   - User says 'apply that fix' / 'make that change' → `codewalk_approve_action(proposed_action=<fix>)` first, wait for yes\n"
         f"   - User asks about docs/guides/runbooks → `codewalk_ask_docs(question)`\n"
         f"   - User asks to index/load documents → `codewalk_index_docs(path)`\n"
         f"   - DEFAULT: if user names something that could be a module → `codewalk_get_module_info`, otherwise → `codewalk_search_codebase`\n"
@@ -1198,6 +1460,169 @@ def codewalk_ask_docs(question: str, n_results: int = 5) -> str:
     return DOC_ASK_PROMPT.format(context=context, question=question)
 
 
+# ─── TOOL 21 [HITL · AI]: codewalk_approve_action ─────
+@mcp.tool()
+def codewalk_approve_action(proposed_action: str) -> str:
+    """Request user approval before taking any action that modifies code, files, or external systems.
+
+    Call this BEFORE taking ANY of the following:
+    - Applying a suggested fix or code change to a file
+    - Creating, modifying, or deleting files
+    - Creating a branch, committing, or raising a PR
+    - Updating a Jira ticket or any external system
+
+    Show the returned message to the user and wait for explicit confirmation
+    before proceeding. If the user says no — do NOT take the action.
+
+    Args:
+        proposed_action: What you intend to do. Be specific — include the exact
+                         file paths, diff, PR title, or command that will run.
+                         e.g. "Apply this fix to auth/login.py:\n+  if not rate_limit..."
+    """
+    return (
+        f"⏸ ACTION REQUIRES YOUR APPROVAL\n\n"
+        f"{proposed_action}\n\n"
+        f"Do you approve? Reply **yes** to proceed or **no** to cancel.\n"
+        f"If no — tell me what changes you want instead."
+    )
+
+# ─── TOOL 21b [HITL · AI]: codewalk_apply_fix ─────
+@mcp.tool()
+def codewalk_apply_fix(file_path: str, old_code: str, new_code: str) -> str:
+    """Apply a code fix by replacing old_code with new_code in the file.
+
+    This tool ACTUALLY EDITS FILES ON DISK. Only call it AFTER the user has
+    explicitly approved the fix via codewalk_approve_action.
+
+    Performs an exact text replacement: searches for old_code in the file and
+    replaces it with new_code. Fails if old_code is not found or appears multiple
+    times (to prevent accidental replacements).
+
+    Args:
+        file_path: Relative path to the file (e.g. "src/auth/login.py")
+        old_code: The EXACT code to search for (must match file content precisely)
+        new_code: The replacement code
+
+    Returns:
+        Success message with the applied change, or error message if replacement failed.
+    """
+    import os
+
+    repo_path = state.get_repo_path()
+    full_path = os.path.join(repo_path, file_path) if not os.path.isabs(file_path) else file_path
+
+    # Prevent path traversal outside the repo
+    resolved_repo = os.path.realpath(repo_path)
+    resolved_target = os.path.realpath(full_path)
+    if not resolved_target.startswith(resolved_repo + os.sep) and resolved_target != resolved_repo:
+        return f"❌ Invalid file path: {file_path} is outside the repository."
+
+    if not os.path.exists(full_path):
+        return f"❌ File not found: {file_path}"
+
+    try:
+        with open(full_path, "r", errors="replace") as f:
+            content = f.read()
+    except OSError as e:
+        return f"❌ Cannot read file: {e}"
+
+    # Count occurrences to prevent ambiguous replacements
+    count = content.count(old_code)
+    if count == 0:
+        return (
+            f"❌ Could not find the specified code in {file_path}.\n\n"
+            f"The old_code you provided does not match the file content exactly.\n"
+            f"Please re-read the file and provide the exact text to replace."
+        )
+    if count > 1:
+        return (
+            f"❌ Ambiguous replacement: the old_code appears {count} times in {file_path}.\n\n"
+            f"Please provide a more specific old_code that includes surrounding context "
+            f"(2-3 extra lines above and below) to make the match unique."
+        )
+
+    new_content = content.replace(old_code, new_code, 1)
+
+    try:
+        with open(full_path, "w", errors="replace") as f:
+            f.write(new_content)
+    except OSError as e:
+        return f"❌ Cannot write file: {e}"
+
+    # Show a mini diff of the change
+    old_lines = old_code.splitlines()
+    new_lines = new_code.splitlines()
+    max_lines = max(len(old_lines), len(new_lines))
+    diff_lines = []
+    for index in range(max_lines):
+        old_line = old_lines[index] if index < len(old_lines) else ""
+        new_line = new_lines[index] if index < len(new_lines) else ""
+        if old_line != new_line:
+            if old_line:
+                diff_lines.append(f"- {old_line}")
+            if new_line:
+                diff_lines.append(f"+ {new_line}")
+
+    diff_preview = "\n".join(diff_lines[:20])
+    if len(diff_lines) > 20:
+        diff_preview += "\n... (truncated)"
+
+    return (
+        f"✅ Fix applied to {file_path}\n\n"
+        f"---\n"
+        f"{diff_preview}\n"
+        f"---\n\n"
+        f"Moving to the next issue..."
+    )
+
+
+# ─── TOOL 22 [CLOUD · AI]: codewalk_pull_index ─────
+@mcp.tool()
+def codewalk_pull_index() -> str:
+    """Download the latest cloud index, replacing local .codewalk/.
+    Requires: CODEWALK_SERVER_URL, CODEWALK_REPO_NAME, CODEWALK_REPO_TOKEN in env."""
+    server_url = os.getenv("CODEWALK_SERVER_URL")
+    repo_name  = os.getenv("CODEWALK_REPO_NAME")
+    repo_token = os.getenv("CODEWALK_REPO_TOKEN")
+    if not all([server_url, repo_name, repo_token]):
+        return "Not configured for cloud. Set CODEWALK_SERVER_URL, CODEWALK_REPO_NAME, CODEWALK_REPO_TOKEN."
+    _download_index(server_url, repo_name, repo_token)
+    return "Index updated. Using latest version now."
+
+# ─── TOOL 23 [CLOUD · AI]: codewalk_index_status ─────
+@mcp.tool()
+def codewalk_index_status() -> str:
+    """Show local vs remote index freshness (commit SHA, indexed_at, file count)."""
+    server_url = os.getenv("CODEWALK_SERVER_URL")
+    repo_name  = os.getenv("CODEWALK_REPO_NAME")
+    repo_token = os.getenv("CODEWALK_REPO_TOKEN")
+
+    local_meta = Path(".codewalk/manifest.json")
+    local = json.loads(local_meta.read_text()) if local_meta.exists() else {}
+
+    try:
+        remote = requests.get(
+            f"{server_url}/indexes/{repo_name}/manifest",
+            headers={"X-Repo-Token": repo_token}, timeout=5,
+        ).json()
+    except Exception as e:
+        remote = {"error": str(e)}
+
+    lines = [
+        f"LOCAL:  {local.get('commit_sha','none')[:7]}  {local.get('indexed_at','?')}  {local.get('file_count','?')} files",
+        f"REMOTE: {remote.get('commit_sha','none')[:7]}  {remote.get('indexed_at','?')}  {remote.get('file_count','?')} files",
+    ]
+
+    if local.get("commit_sha") == remote.get("commit_sha"):
+        lines.append("✅ Up to date")
+    else:
+        lines.append("⚡ Remote is newer — run codewalk_pull_index to update")
+
+    return "\n".join(lines)
+
+
+
+
 # ─── Shared tool lookup map (used by voice_ask, backends.py) ──
 # NOTE: Must be defined AFTER all tool functions.
 _TOOL_MAP = {
@@ -1212,6 +1637,7 @@ _TOOL_MAP = {
     "codewalk_incremental_reindex": codewalk_incremental_reindex,
     "codewalk_refresh_analysis": codewalk_refresh_analysis,
     "codewalk_review_diff": codewalk_review_diff,
+    "codewalk_reflect_review": codewalk_reflect_review,
     "codewalk_review_file": codewalk_review_file,
     "codewalk_load_guidelines": codewalk_load_guidelines,
     "codewalk_get_architecture_health": codewalk_get_architecture_health,
@@ -1219,6 +1645,12 @@ _TOOL_MAP = {
     "codewalk_index_docs": codewalk_index_docs,
     "codewalk_search_docs": codewalk_search_docs,
     "codewalk_ask_docs": codewalk_ask_docs,
+    "codewalk_approve_action": codewalk_approve_action,
+    "codewalk_apply_fix": codewalk_apply_fix,
+    "codewalk_voice_ask": codewalk_voice_ask,
+    "codewalk_speak": codewalk_speak,
+    "codewalk_pull_index": codewalk_pull_index,
+    "codewalk_index_status": codewalk_index_status,
 }
 
 if __name__ == "__main__":

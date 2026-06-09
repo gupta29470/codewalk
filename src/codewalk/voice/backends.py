@@ -11,7 +11,9 @@ _TOOL_FUNCTIONS = _TOOL_MAP
 # ── FastAPI HTTP backend (frontend path) ──
 _TOOL_TO_ROUTE = {
     "codewalk_analyze_codebase": ("POST", "/analyze"),
-    "codewalk_search_codebase": ("POST", "/chat"),
+    # codewalk_search_codebase has no equivalent raw-search API endpoint
+    # (use /chat for Q&A, or call MCP tool directly)
+    "codewalk_search_codebase": None,
     "codewalk_get_overview": ("GET", "/overview"),
     "codewalk_get_module_info": ("GET", "/modules/{module_name}"),
     "codewalk_get_blast_radius_map": ("GET", "/blast-radius"),
@@ -23,7 +25,10 @@ _TOOL_TO_ROUTE = {
     "codewalk_review_file": ("POST", "/review/file"),
     "codewalk_load_guidelines": ("POST", "/review/guidelines"),
     "codewalk_get_architecture_health": ("GET", "/architecture"),
-    "codewalk_call_chain": ("GET", "/cycles"),
+    "codewalk_index_docs": ("POST", "/docs/index"),
+    "codewalk_search_docs": ("POST", "/docs/search"),
+    "codewalk_ask_docs": ("POST", "/docs/ask"),
+    # codewalk_call_chain has no API endpoint — uses execute_direct only
 }
 
 def execute_direct(tool_name: str, arguments: dict) -> str:

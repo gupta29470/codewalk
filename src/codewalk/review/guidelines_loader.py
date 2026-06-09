@@ -31,29 +31,47 @@ def load_guidelines(guidelines_path: str) -> list[dict]:
             })
     return docs
 
-def get_guidelines_store() -> VectorStore | None:
+def get_guidelines_store(
+    guidelines_path: str = "",
+    persist_dir: str = "",
+    force: bool = False,
+) -> VectorStore | None:
     """Get or create the guidelines vector store.
 
-    Returns None if REVIEW_GUIDELINES_PATH is not set.
-    Embeds guidelines on first call, reuses on subsequent calls.
+    Args:
+        guidelines_path: Folder containing guideline .md/.txt/.rst files.
+                         Falls back to REVIEW_GUIDELINES_PATH env var.
+        persist_dir:     ChromaDB directory (e.g. {repo}/.codewalk/chroma/).
+                         Falls back to {guidelines_path}/.codewalk_index/.
+        force:           If True, clear existing and re-embed from scratch.
 
-    Guidelines are stored as "leftover" chunks (no parent-child split)
-    in a separate ChromaDB instance alongside the guidelines folder.
+    Returns None if no guidelines path is available.
+    Embeds guidelines on first call, reuses on subsequent calls.
     """
-    guidelines_path = os.getenv("REVIEW_GUIDELINES_PATH", "")
-    if not guidelines_path:
+    path = guidelines_path or os.getenv("REVIEW_GUIDELINES_PATH", "")
+    if not path:
         return None
-    
-    persist_dir = os.path.join(guidelines_path, ".codewalk_index")
-    store = VectorStore(persist_dir=persist_dir)
+
+    # Default persist_dir: repo's .codewalk/chroma/ (same ChromaDB as code)
+    if not persist_dir:
+        from src.codewalk.config import settings
+        repo = getattr(settings, "repo_path", "") or "."
+        persist_dir = os.path.join(repo.rstrip("/"), ".codewalk", "chroma")
+
+    chroma_dir = persist_dir
+    store = VectorStore(persist_dir=chroma_dir)
     store.create_collection("guidelines")
 
     existing = store.chunk_count()
-    if existing > 0:
+    if existing > 0 and not force:
         return store
+
+    # Force reindex — wipe existing chunks
+    if force and existing > 0:
+        store.clear_collection()
     
     # First time — load, chunk, embed, store
-    docs = load_guidelines(guidelines_path)
+    docs = load_guidelines(path)
     if not docs:
         return None
     

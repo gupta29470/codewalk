@@ -1,7 +1,10 @@
 import logging
+import os
 import sys
 import json
 import base64
+import asyncio
+from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -15,18 +18,17 @@ from src.codewalk.api.models import (
     ChatRequest, ChatResponse,
     ModuleResponse, OverviewResponse,
     BlastRadiusResponse,
-    ReviewRequest, ReviewFileRequest, GuidelinesRequest, 
-    DocsIndexRequest, DocsAskRequest, DocsSearchRequest
+    ReviewRequest, ReviewFileRequest, ReviewResponse, ReviewFileResponse,
+    GuidelinesRequest, 
+    DocsIndexRequest, DocsAskRequest, DocsSearchRequest, ApproveRequest,
+    ResearchRequest, ApplyFixesRequest, ApplyFixesResponse, AppliedFix
 )
 from src.codewalk.api import state
 from src.codewalk.ingestion.scanner import scan_directory
 from src.codewalk.ingestion.tech_detect import detect_tech_stack
-from src.codewalk.analysis.dependency_graph import build_dependency_graph
-from src.codewalk.analysis.module_detector import detect_modules
 from src.codewalk.generation.diagram_generator import generate_module_diagram
 from src.codewalk.generation.overview_generator import generate_overview
 from src.codewalk.embeddings.vector_store import VectorStore
-from src.codewalk.agent.graph import create_agent
 from src.codewalk.analysis.reading_order import generate_reading_order
 from src.codewalk.generation.flow_generator import generate_execution_flow
 from src.codewalk.config import settings
@@ -36,13 +38,25 @@ from src.codewalk.query import (
 )
 from src.codewalk.voice.stt import transcribe_bytes
 from src.codewalk.voice.tts import synthesize
-from src.codewalk.voice.router import route
-from src.codewalk.voice.backends import execute_direct
 from src.codewalk.log import log as _log
 from src.codewalk.errors import classify_error
 
 
 logger = logging.getLogger("codewalk")
+
+
+# ─── Lifespan handler (replaces deprecated @app.on_event) ─────────────
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Startup and shutdown lifecycle for the FastAPI app.
+
+    Startup:  Start cloud background worker if cloud env vars are set.
+    Shutdown: (nothing to clean up yet — worker is a daemon thread)
+    """
+    from src.codewalk.api.cloud import start_cloud_worker
+    start_cloud_worker()
+    yield
 
 
 # ─── Create the FastAPI app ─────────────────────────────────────────
@@ -51,15 +65,43 @@ app = FastAPI(
     title="Codewalk API",
     description="AI-powered codebase onboarding tool",
     version="1.0.0",
+    lifespan=lifespan,
 )
+
+# Parse CORS origins from env (comma-separated) or fall back to "*"
+_cors_origins = [o.strip() for o in settings.cors_origins.split(",") if o.strip()] or ["*"]
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=_cors_origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# ─── Simple in-memory rate limiting ──────────────────────────────────
+import time
+from collections import defaultdict
+
+_RATE_LIMIT_REQUESTS = int(os.getenv("RATE_LIMIT_REQUESTS", "60"))
+_RATE_LIMIT_WINDOW = int(os.getenv("RATE_LIMIT_WINDOW", "60"))
+_rate_limit_store: dict[str, list[float]] = defaultdict(list)
+
+@app.middleware("http")
+async def rate_limit_middleware(request, call_next):
+    """Simple sliding-window rate limiter per client IP."""
+    client_ip = request.client.host if request.client else "unknown"
+    now = time.time()
+    window = _rate_limit_store[client_ip]
+    # Remove entries outside the window
+    window[:] = [t for t in window if now - t < _RATE_LIMIT_WINDOW]
+    if len(window) >= _RATE_LIMIT_REQUESTS:
+        return JSONResponse(
+            status_code=429,
+            content={"detail": "Rate limit exceeded. Please try again later."},
+        )
+    window.append(now)
+    return await call_next(request)
 
 @app.exception_handler(Exception)
 async def global_exception_handler(request, exc):
@@ -73,7 +115,7 @@ async def global_exception_handler(request, exc):
 
 # ─── POST /analyze ───────────────────────────────────────────────────
 @app.post("/analyze", response_model=AnalyzeResponse)
-async def analyze(request: AnalyzeRequest):
+def analyze(request: AnalyzeRequest):
     """Index a codebase: scan → chunk → embed → store → build agent.
 
     Modes:
@@ -91,8 +133,10 @@ async def analyze(request: AnalyzeRequest):
         existing_count = store.chunk_count()
 
         # ── Decide whether to index ──────────────────────────────
+        files = None
         if request.index_mode == "full" or existing_count == 0:
             index_result = full_index_parallel(request.repo_path, request.collection_name, persist_dir=persist_dir)
+            files = index_result.get("files")  # already scanned inside full_index_parallel
         elif request.index_mode == "reindex":
             index_result = reindex(request.repo_path, request.collection_name, persist_dir=persist_dir)
         else:
@@ -106,40 +150,34 @@ async def analyze(request: AnalyzeRequest):
             _log(f"[api] Skipping indexing — collection already has {existing_count} chunks")
 
         # ── Always run analysis (fast — no embedding) ────────────
-        files = scan_directory(request.repo_path)
-        deps = build_dependency_graph(files)
-        modules_result = detect_modules(files, deps)
+        if files is None:
+            files = scan_directory(request.repo_path)
 
-        # ── Create agent ─────────────────────────────────────────
-        agent = create_agent(store, modules_result, files=files, deps=deps)
-
-        # ── Save state (including files/deps cache) ─────────────
-        state.initialize(store, agent, modules_result, index_result,
-                         files=files, deps=deps, repo_path=request.repo_path,
-                         embedded_chunks=index_result.get("embedded_chunks"))
-
-        # ── Embed guidelines if REVIEW_GUIDELINES_PATH is set ──
-        from src.codewalk.review.guidelines_loader import get_guidelines_store
-        gl_store = get_guidelines_store()
-        if gl_store:
-            _log(f"[api] Guidelines embedded: {gl_store.chunk_count()} chunks")
+        # ── Save state: scans → deps → modules → DuckDB → docs → guidelines → agent ──
+        guidelines_path = os.getenv("REVIEW_GUIDELINES_PATH", "")
+        docs_path = os.getenv("CODE_DOCS_PATH", "")
+        state.initialize(store, None, None, index_result,
+                         files=files, deps=None, repo_path=request.repo_path,
+                         embedded_chunks=index_result.get("embedded_chunks"),
+                         guidelines_path=guidelines_path, docs_path=docs_path)
 
         return AnalyzeResponse(
             status="complete",
             repo_path=request.repo_path,
             files_scanned=index_result["files_scanned"],
             chunks_created=index_result["chunks_created"],
-            modules=list(modules_result["modules"].keys()),
+            modules=list(state._modules_result["modules"].keys()),
         )
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
     
 @app.post("/analyze/stream")
-async def analyze_stream(request: AnalyzeRequest):
+def analyze_stream(request: AnalyzeRequest):
     """Stream analysis progress via Server-Sent Events."""
 
-    def event_stream():
-        """Generator that yields SSE events at each pipeline step."""
+    async def event_stream():
+        """Async generator that yields SSE events at each pipeline step.
+        Blocking operations run in thread pool so events stream in real time."""
         try:
             request.repo_path = request.repo_path or settings.repo_path
             if not request.collection_name:
@@ -151,25 +189,26 @@ async def analyze_stream(request: AnalyzeRequest):
             store = VectorStore(persist_dir=persist_dir)
             store.create_collection(request.collection_name)
             existing_count = store.chunk_count()
+            files = None  # set during full-index; avoids redundant scan at Step 3
 
             # Step 2: Indexing
             if request.index_mode == "full" or existing_count == 0:
                 # ── Full index with progress ──
                 yield f"data: {json.dumps({'step': 'scan', 'message': 'Scanning directory...'})}\n\n"
-                files = scan_directory(request.repo_path)
+                files = await asyncio.to_thread(scan_directory, request.repo_path)
                 scanned_count = len(files)
                 yield f"data: {json.dumps({'step': 'scan', 'message': f'Scanned {scanned_count} files (filtered by file_filter)'})}\n\n"
 
                 yield f"data: {json.dumps({'step': 'chunk', 'message': 'Chunking + embedding in parallel...'})}\n\n"
 
-                embedded, chunks_created = chunk_and_embed_parallel(files)
+                embedded, chunks_created = await asyncio.to_thread(chunk_and_embed_parallel, files)
 
                 yield f"data: {json.dumps({'step': 'chunk', 'message': f'Created {chunks_created} chunks'})}\n\n"
                 yield f"data: {json.dumps({'step': 'embed', 'message': f'Embedded {len(embedded)} chunks'})}\n\n"
 
                 yield f"data: {json.dumps({'step': 'store', 'message': 'Storing in vector database...'})}\n\n"
-                store.clear_collection()
-                store.add_parent_child_chunks(embedded)
+                await asyncio.to_thread(store.clear_collection)
+                await asyncio.to_thread(store.add_parent_child_chunks, embedded)
                 yield f"data: {json.dumps({'step': 'store', 'message': f'Stored {len(embedded)} chunks in ChromaDB'})}\n\n"
 
                 index_result = {
@@ -177,11 +216,14 @@ async def analyze_stream(request: AnalyzeRequest):
                     "files_scanned": len(files),
                     "chunks_created": chunks_created,
                     "embedded_chunks": embedded,
+                    "files": files,
                 }
 
             elif request.index_mode == "reindex":
                 yield f"data: {json.dumps({'step': 'scan', 'message': 'Scanning for changes...'})}\n\n"
-                index_result = reindex(request.repo_path, request.collection_name, persist_dir=persist_dir)
+                index_result = await asyncio.to_thread(
+                    reindex, request.repo_path, request.collection_name, persist_dir=persist_dir
+                )
                 new = index_result['new_files']
                 changed = index_result['changed_files']
                 deleted = index_result['deleted_files']
@@ -197,32 +239,27 @@ async def analyze_stream(request: AnalyzeRequest):
                     "skipped": True,
                 }
 
-            # Step 3: Analysis
+            # Step 3: Analysis + DuckDB (via build_full_analysis inside initialize)
             yield f"data: {json.dumps({'step': 'analyze', 'message': 'Building dependency graph...'})}\n\n"
-            files = scan_directory(request.repo_path)
-            deps = build_dependency_graph(files)
-            modules_result = detect_modules(files, deps)
-            num_modules = len(modules_result['modules'])
+            if files is None:
+                files = await asyncio.to_thread(scan_directory, request.repo_path)
+
+            # Step 4: Save state — initialize does deps → modules → DuckDB → docs → guidelines → agent
+            yield f"data: {json.dumps({'step': 'agent', 'message': 'Creating AI agent...'})}\n\n"
+            guidelines_path = os.getenv("REVIEW_GUIDELINES_PATH", "")
+            docs_path = os.getenv("CODE_DOCS_PATH", "")
+            await asyncio.to_thread(
+                state.initialize, store, None, None, index_result,
+                files=files, deps=None, repo_path=request.repo_path,
+                embedded_chunks=index_result.get("embedded_chunks"),
+                guidelines_path=guidelines_path, docs_path=docs_path
+            )
+
+            num_modules = len(state._modules_result['modules'])
             yield f"data: {json.dumps({'step': 'analyze', 'message': f'Detected {num_modules} modules'})}\n\n"
 
-            # Step 4: Create agent
-            yield f"data: {json.dumps({'step': 'agent', 'message': 'Creating AI agent...'})}\n\n"
-            agent = create_agent(store, modules_result, files=files, deps=deps)
-
-            # Step 5: Save state (including files/deps cache)
-            state.initialize(store, agent, modules_result, index_result,
-                             files=files, deps=deps, repo_path=request.repo_path,
-                             embedded_chunks=index_result.get("embedded_chunks"))
-
-            # Step 6: Embed guidelines if REVIEW_GUIDELINES_PATH is set
-            from src.codewalk.review.guidelines_loader import get_guidelines_store
-            gl_store = get_guidelines_store()
-            if gl_store:
-                gl_count = gl_store.chunk_count()
-                yield f"data: {json.dumps({'step': 'guidelines', 'message': f'Embedded {gl_count} guideline chunks'})}\n\n"
-
             # Final event — includes full result
-            yield f"data: {json.dumps({'step': 'done', 'message': 'Analysis complete!', 'result': {'status': 'complete', 'repo_path': request.repo_path, 'files_scanned': index_result.get('files_scanned', 0), 'chunks_created': index_result.get('chunks_created', 0), 'modules': list(modules_result['modules'].keys())}})}\n\n"
+            yield f"data: {json.dumps({'step': 'done', 'message': 'Analysis complete!', 'result': {'status': 'complete', 'repo_path': request.repo_path, 'files_scanned': index_result.get('files_scanned', 0), 'chunks_created': index_result.get('chunks_created', 0), 'modules': list(state._modules_result['modules'].keys())}})}\n\n"
 
         except Exception as e:
             yield f"data: {json.dumps({'step': 'error', 'message': str(e)})}\n\n"
@@ -235,8 +272,7 @@ async def analyze_stream(request: AnalyzeRequest):
     
 # ─── POST /chat ──────────────────────────────────────────────────────
 @app.post("/chat", response_model=ChatResponse)
-async def chat(request: ChatRequest):
-    """Ask the agent a question about the codebase."""
+def chat(request: ChatRequest):
     try:
         state.ensure_initialized()
         agent = state.get_agent()
@@ -249,16 +285,97 @@ async def chat(request: ChatRequest):
             {"messages": [("human", request.message)]},
             config=config
         )
+
+        # Check if graph was interrupted (HITL — waiting for tool approval)
+        graph_state = agent.get_state(config)
+        if graph_state.next:
+            last_msg = result["messages"][-1]
+            proposed = ""
+            if hasattr(last_msg, "tool_calls") and last_msg.tool_calls:
+                proposed = "\n".join([
+                    f"• {tc.get('name', '?')}: {tc.get('args', {})}"
+                    for tc in last_msg.tool_calls
+                ])
+            return ChatResponse(
+                answer="The agent wants to take an action. Approve or reject it via POST /chat/approve.",
+                thread_id=request.thread_id,
+                interrupted=True,
+                proposed_action=proposed,
+            )
+
         answer = result["messages"][-1].content
         return ChatResponse(answer=answer, thread_id=request.thread_id)
     except RuntimeError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+# ─── POST /chat/stream ───────────────────────────────────────────────
+@app.post("/chat/stream")
+def chat_stream(request: ChatRequest):
+    """Stream the agent's response token-by-token using Server-Sent Events.
+
+    Each SSE message is a JSON object with a `type` field:
+      {"type": "token",      "content": "..."}  one LLM token
+      {"type": "tool_start", "name": "..."}     tool call began
+      {"type": "tool_end",   "name": "..."}     tool call finished
+      {"type": "done"}                           stream complete
+      {"type": "error",      "message": "..."}  something went wrong
+    """
+    async def event_generator():
+        try:
+            state.ensure_initialized()
+            agent = state.get_agent()
+
+            config = {
+                "configurable": {
+                    "thread_id": request.thread_id
+                }
+            }
+
+            async for event in agent.astream_events({
+                    "messages": [("human", request.message)],
+                }, config=config, version="v2"):
+                event_type = event["event"]
+
+                if event_type == "on_chat_model_stream":
+                    token = event["data"]["chunk"].content
+                    if token:
+                        yield f"data: {json.dumps({'type': 'token', 'content': token})}\n\n"
+                elif event_type == "on_tool_start":
+                    yield f"data: {json.dumps({'type': 'tool_start', 'name': event['name']})}\n\n"
+                elif event_type == "on_tool_end":
+                    yield f"data: {json.dumps({'type': 'tool_end', 'name': event['name']})}\n\n"
+
+            # Check if graph was interrupted (HITL — waiting for tool approval)
+            graph_state = agent.get_state(config)
+            if graph_state.next:
+                last_msg = graph_state.values["messages"][-1]
+                proposed = ""
+                if hasattr(last_msg, "tool_calls") and last_msg.tool_calls:
+                    proposed = "; ".join([
+                        f"{tc.get('name', '?')}({tc.get('args', {})})"
+                        for tc in last_msg.tool_calls
+                    ])
+                yield f"data: {json.dumps({'type': 'interrupted', 'proposed_action': proposed})}\n\n"
+            else:
+                yield f"data: {json.dumps({'type': 'done'})}\n\n"
+
+        except RuntimeError as e:
+            yield f"data: {json.dumps({'type': 'error', 'message': str(e)})}\n\n"
+        except Exception as e:
+            yield f"data: {json.dumps({'type': 'error', 'message': str(e)})}\n\n"
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
     
 # ─── GET /overview ───────────────────────────────────────────────────
 @app.get("/overview", response_model=OverviewResponse)
-async def overview():
+def overview():
     """Get the project overview (tech stack, modules, diagram, LLM summary)."""
     try:
         state.ensure_initialized()
@@ -298,7 +415,7 @@ async def overview():
     
 # ─── GET /modules/{name} ────────────────────────────────────────────
 @app.get("/modules/{module_name}", response_model=ModuleResponse)
-async def get_module(module_name: str):
+def get_module(module_name: str):
     """Get details about a specific module."""
     try:
         state.ensure_initialized()
@@ -348,7 +465,7 @@ async def get_module(module_name: str):
 # ─── GET /blast-radius ───────────────────────────────────────────────
 @app.get("/blast-radius/{module_name}", response_model=BlastRadiusResponse)
 @app.get("/blast-radius", response_model=BlastRadiusResponse)
-async def get_blast_radius_for_module(module_name: str = ""):
+def get_blast_radius_for_module(module_name: str = ""):
     """Get blast radius for files. Optionally scope to a module."""
     try:
         state.ensure_initialized()
@@ -452,7 +569,7 @@ def get_execution_flow():
     
 # ─── POST /refresh ─────────────────────────────────────────────────
 @app.post("/refresh")
-async def refresh_analysis():
+def refresh_analysis():
     """Re-scan files and rebuild dependency graph + modules.
 
     Does NOT re-embed or re-index. Use this after code changes
@@ -474,9 +591,10 @@ async def refresh_analysis():
 
 # ─── POST /incremental-reindex ───────────────────────────────────────
 @app.post("/incremental-reindex")
-async def incremental_reindex_endpoint():
+def incremental_reindex_endpoint():
     """Re-embed only files that changed since last indexing."""
     try:
+        state.ensure_initialized()
         store = state.get_store()
         repo_path = state.get_analyze_result().get("repo_path", settings.repo_path)
         collection_name = store.collection.name
@@ -487,8 +605,15 @@ async def incremental_reindex_endpoint():
 
         result = incremental_reindex(indexed_files, repo_path, collection_name, persist_dir=persist_dir)
 
-        # Refresh analysis cache (includes graph rebuild)
-        state.rebuild_analysis_cache(embedded_chunks=result.get("embedded_chunks"))
+        # Refresh analysis cache + re-index docs/guidelines
+        guidelines_path = os.getenv("REVIEW_GUIDELINES_PATH", "")
+        docs_path = os.getenv("CODE_DOCS_PATH", "")
+        state.rebuild_analysis_cache(
+            embedded_chunks=result.get("embedded_chunks"),
+            guidelines_path=guidelines_path,
+            docs_path=docs_path,
+            force_reindex_extras=True,
+        )
 
         return result
     except RuntimeError as e:
@@ -499,11 +624,13 @@ async def incremental_reindex_endpoint():
         raise HTTPException(status_code=500, detail=str(e))
 
 # ─── POST /review ────────────────────────────────────────────────────
-@app.post("/review")
+@app.post("/review", response_model=ReviewResponse)
 async def review_endpoint(request: ReviewRequest):
-    """Review current git diff for bugs, security issues, and style."""
+    """Review current git diff for bugs, security issues, and style.
+    Uses parallel context loading (guidelines + architecture + per-file) via asyncio.gather.
+    """
     try:
-        from src.codewalk.review.reviewer import review_diff
+        from src.codewalk.review.reviewer import review_diff_async
 
         state.ensure_initialized()
 
@@ -515,16 +642,21 @@ async def review_endpoint(request: ReviewRequest):
         except RuntimeError:
             pass  # works without indexing, just less context
 
-        result = review_diff(
+        result = await review_diff_async(
             staged=request.staged,
             target_branch=request.target_branch,
             commit=request.commit,
-            use_llm=True,
             store=store,
             deps=deps,
             graph_store=state.get_graph_store(),
             repo_path=state.get_repo_path(),
         )
+
+        if request.reflect and result.diff_text:
+            from src.codewalk.review.reflector import reflect_on_review
+            result = await asyncio.to_thread(
+                reflect_on_review, result, result.diff_text, request.iterations
+            )
 
         issues = [
             {
@@ -542,50 +674,102 @@ async def review_endpoint(request: ReviewRequest):
             for issue in result.issues
         ]
 
-        return {
-            "verdict": result.verdict.value,
-            "verdict_reason": result.verdict_reason,
-            "issues": issues,
-            "summary": result.summary,
-            "files_reviewed": result.files_reviewed,
-            "lines_added": result.lines_added,
-            "lines_removed": result.lines_removed,
-        }
+        return ReviewResponse(
+            verdict=result.verdict.value,
+            verdict_reason=result.verdict_reason,
+            issues=issues,
+            summary=result.summary,
+            files_reviewed=result.files_reviewed,
+            lines_added=result.lines_added,
+            lines_removed=result.lines_removed,
+        )
     except RuntimeError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
 # ─── POST /review/file ───────────────────────────────────────────────
-@app.post("/review/file")
+@app.post("/review/file", response_model=ReviewFileResponse)
 async def review_file_endpoint(request: ReviewFileRequest):
     """Review a single file against codebase conventions."""
     try:
-        from src.codewalk.rag.chain import format_context
+        from src.codewalk.rag.chain import format_context, retrieve_corrective
         from src.codewalk.config import get_llm
+        from src.codewalk.review.reviewer import _get_caller_context
+        from src.codewalk.review.models import DiffFile, DiffHunk, ChangedLine
+        from src.codewalk.review.guidelines_loader import get_guidelines_store, search_guidelines
+        import os
 
+        state.ensure_initialized()
         store = state.get_store()
+        repo_path = state.get_repo_path()
 
-        with open(request.file_path, "r") as f:
+        full_path = (
+            os.path.join(repo_path, request.file_path)
+            if not os.path.isabs(request.file_path)
+            else request.file_path
+        )
+
+        with open(full_path, "r", errors="replace") as f:
             content = f.read()
 
-        results = store.search(f"code in {request.file_path}", n_results=5)
-        from src.codewalk.rag.retrieval_quality import filter_by_distance
-        filtered, _ = filter_by_distance(results)
-        patterns = format_context(filtered) if filtered else "No indexed context."
+        lines = content.splitlines()
+
+        # Synthetic DiffFile so we can reuse context helpers
+        changed_lines = [
+            ChangedLine(line_number=i + 1, content=line, change_type="added")
+            for i, line in enumerate(lines)
+        ]
+        synthetic_diff = DiffFile(
+            file_path=request.file_path,
+            language="",
+            hunks=[DiffHunk(start_line=1, end_line=len(lines), lines=changed_lines)],
+            is_new_file=True,
+            added_lines=len(lines),
+            removed_lines=0,
+        )
+
+        # Corrective RAG for similar patterns (same pipeline as MCP)
+        result = retrieve_corrective(
+            f"code in {request.file_path}", store,
+            graph_store=state.get_graph_store(),
+        )
+        patterns = format_context(result["chunks"]) if result["chunks"] else "No indexed context."
+
+        # Caller context (who imports this file)
+        caller_ctx = _get_caller_context(synthetic_diff, state._deps, state._graph_store)
+
+        # Guidelines
+        guidelines_ctx = ""
+        guidelines_store = get_guidelines_store()
+        if guidelines_store:
+            guidelines_ctx = search_guidelines(guidelines_store, [synthetic_diff], n_results=3)
+
+        context_parts = []
+        if caller_ctx:
+            context_parts.append(caller_ctx)
+        if guidelines_ctx:
+            context_parts.append(guidelines_ctx)
+        context_parts.append(f"## Similar patterns elsewhere:\n{patterns}")
+        context_sections = "\n\n".join(context_parts)
 
         llm = get_llm(temperature=0)
-        response = llm.invoke([
-            {"role": "system", "content": (
-                "You review a file against its codebase conventions. "
-                "Compare to patterns elsewhere. Focus on: consistency, "
-                "error handling, naming, potential bugs. Be specific with lines."
-            )},
-            {"role": "user", "content": (
-                f"## File:\n```\n{content[:10000]}\n```\n\n"
-                f"## Patterns elsewhere:\n{patterns}"
-            )},
-        ])
+        response = await asyncio.to_thread(
+            llm.invoke,
+            [
+                {"role": "system", "content": (
+                    "You are a senior engineer reviewing a file against its codebase conventions. "
+                    "Compare to patterns elsewhere. Focus on: bugs, security (OWASP top 10), "
+                    "consistency, error handling, naming, race conditions, resource leaks. "
+                    "Be specific with line numbers. For each issue, provide the corrected code."
+                )},
+                {"role": "user", "content": (
+                    f"## File: {request.file_path} ({len(lines)} lines)\n"
+                    f"```\n{content[:15000]}\n```\n\n"
+                    f"{context_sections}"
+                )},
+            ]
+        )
 
         return {"review": response.content, "file_path": request.file_path}
     except FileNotFoundError:
@@ -597,7 +781,7 @@ async def review_file_endpoint(request: ReviewFileRequest):
 
 # ─── POST /review/guidelines ─────────────────────────────────────────
 @app.post("/review/guidelines")
-async def load_guidelines_endpoint(request: GuidelinesRequest):
+def load_guidelines_endpoint(request: GuidelinesRequest):
     """Load team coding guidelines for use in reviews."""
     try:
         from src.codewalk.review.guidelines_loader import get_guidelines_store
@@ -633,67 +817,63 @@ async def voice_ask_endpoint(
     """Voice-in, voice-out codebase Q&A.
 
     Accepts audio file (webm/mp3/wav from browser mic).
-    Routes to the right Codewalk tool, executes it, speaks the result.
+    Sends transcript directly to the chat agent (which has all tools),
+    then summarizes the answer for TTS.
 
     Returns JSON:
       question: transcribed text
-      tool: which tool was called
-      answer: tool result (full text)
+      answer: agent's full text answer
       speech: summarized text for TTS
       audio_base64: MP3 audio as base64
     """
     # 1. STT
+    MAX_VOICE_SIZE = 50 * 1024 * 1024  # 50MB
     audio_bytes = await audio.read()
+    if len(audio_bytes) > MAX_VOICE_SIZE:
+        raise HTTPException(413, "Audio file too large (max 50MB)")
     question = transcribe_bytes(audio_bytes, file_name=audio.filename or "audio.webm")
 
     if not question.strip():
         fallback = "I didn't catch that. Could you try again?"
         return JSONResponse({
             "question": "",
-            "tool": None,
             "answer": fallback,
             "speech": fallback,
             "audio_base64": base64.b64encode(synthesize(fallback)).decode(),
         })
-    
-    # 2. Route
-    route_result = route(question)
-    tool_name = route_result.get("tool")
-    arguments = route_result.get("arguments", {})
 
-    if not tool_name:
-        fallback = "Sorry, I couldn't match that to a Codewalk tool."
-        return JSONResponse({
-            "question": question,
-            "tool": None,
-            "answer": fallback,
-            "speech": fallback,
-            "audio_base64": base64.b64encode(synthesize(fallback)).decode(),
-        })
-    
-    # 3. Auto-load index if server restarted
+    # 2. Auto-load index if server restarted
     state.ensure_initialized()
 
-    # 4. Execute tool
-    result = execute_direct(tool_name, arguments)
+    # 3. Send transcript to the agent — it picks the right tool natively
+    try:
+        agent = state.get_agent()
+        config = {"configurable": {"thread_id": thread_id}}
+        result = await asyncio.to_thread(
+            agent.invoke,
+            {"messages": [("human", question)]},
+            config=config,
+        )
+        answer = result["messages"][-1].content
+    except Exception as e:
+        answer = f"Sorry, I couldn't process that: {e}"
 
-    # 5. Generate technical + speech versions via main LLM
+    # 4. Summarize for TTS
     from src.codewalk.voice.companion import format_voice_response
-    voice = format_voice_response(result)
+    voice = format_voice_response(answer)
 
-    # 5. TTS on the speech version
+    # 5. TTS
     audio_response = synthesize(voice["speech"])
 
     return JSONResponse({
         "question": question,
-        "tool": tool_name,
-        "answer": voice["technical"],
+        "answer": answer,
         "speech": voice["speech"],
         "audio_base64": base64.b64encode(audio_response).decode(),
     })
 
 @app.get("/cycles")
-async def get_cycles():
+def get_cycles():
     """Detect circular dependencies."""
     state.ensure_initialized()
     runtime = state.get_graph_runtime()
@@ -701,7 +881,7 @@ async def get_cycles():
 
 
 @app.get("/architecture")
-async def get_architecture():
+def get_architecture():
     """Architecture health report: stats, centrality, cycles."""
     state.ensure_initialized()
     runtime = state.get_graph_runtime()
@@ -743,7 +923,7 @@ def docs_search(req: DocsSearchRequest):
 
 # ─── POST /docs/ask ─────────────────────────────────────────────────
 @app.post("/docs/ask")
-def docs_ask(req: DocsAskRequest):
+async def docs_ask(req: DocsAskRequest):
     from src.codewalk.config import get_llm
     from src.codewalk.doc_knowledge.prompts import DOC_ASK_PROMPT
 
@@ -770,7 +950,7 @@ def docs_ask(req: DocsAskRequest):
 
     llm = get_llm(temperature=0)
 
-    response = llm.invoke(prompt)
+    response = await asyncio.to_thread(llm.invoke, prompt)
 
     sources = [
         {
@@ -786,8 +966,156 @@ def docs_ask(req: DocsAskRequest):
     }
 
 
+# ─── POST /chat/approve ─────────────────────────────────────────────────
+@app.post("/chat/approve")
+def chat_approve(request: ApproveRequest):
+    """Resume or reject a graph that is waiting for human approval.
+
+    Call this after /chat returns a response where the agent stopped at an
+    interrupt node (detected by the frontend when the agent response ends
+    mid-task with a proposed action payload).
+
+    Args:
+        thread_id: The thread_id from the original /chat call.
+        action:    "approve" → graph resumes from checkpoint.
+                   "reject"  → checkpoint is discarded, action is not taken.
+    """
+    try:
+        state.ensure_initialized()
+
+        if request.action not in ("approve", "reject"):
+            raise HTTPException(status_code=422, detail=f"action must be 'approve' or 'reject', got '{request.action}'")
+
+        graph = state.get_agent()
+
+        config = {
+            "configurable": {
+                "thread_id": request.thread_id
+            }
+        }
+
+        if request.action == "reject":
+            # Replace the LAST tool-calling message with a rejection so the graph can reach END.
+            # Scan backwards to find the most recent message with tool_calls,
+            # avoiding race conditions where newer messages may have been added.
+            from langchain_core.messages import AIMessage
+            current = graph.get_state(config)
+            messages = list(current.values["messages"])
+            tool_call_index = None
+            for i in range(len(messages) - 1, -1, -1):
+                if hasattr(messages[i], "tool_calls") and messages[i].tool_calls:
+                    tool_call_index = i
+                    break
+            if tool_call_index is not None:
+                messages[tool_call_index] = AIMessage(
+                    content="I understand. I won't take that action without your approval."
+                )
+                graph.update_state(config, {"messages": messages})
+            result = graph.invoke(None, config=config)
+            answer = result["messages"][-1].content
+            return {
+                "status": "rejected",
+                "message": "Action discarded. No changes made.",
+                "result": answer,
+            }
+        
+        result = graph.invoke(None, config=config)
+
+        graph_state = graph.get_state(config)
+        if graph_state.next:
+            return {
+                "status": "interrupted",
+                "next_node": graph_state.next[0],
+                "state": {key: str(value) for key, value in graph_state.values.items()},
+            }
+        
+        return {"status": "completed", "result": str(result)}
+    
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    
+
+@app.post("/research")
+async def research_endpoint(request: ResearchRequest):
+    """Run deep research on a complex codebase question."""
+    try:
+        from src.codewalk.research.deep_research import deep_research
+        state.ensure_initialized()
+        store = state.get_store()
+        report = await asyncio.to_thread(
+            deep_research,
+            request.question,
+            store,
+            state._graph_store,
+            request.depth,
+        )
+        return {"question": report.question, "report": report.markdown, "sources": report.sources}
+    except RuntimeError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 
+
+# ─── Cloud routes — noop if cloud env vars not set ───────────────────
+from src.codewalk.api.cloud import setup_cloud
+setup_cloud(app)
+
+# ─── POST /review/apply ──────────────────────────────────────────────
+@app.post("/review/apply", response_model=ApplyFixesResponse)
+def apply_fixes_endpoint(request: ApplyFixesRequest):
+    """Apply approved code fixes to files on disk.
+
+    Each fix is validated before application:
+      - File must exist inside the repo
+      - old_code must be found exactly once
+      - Write is atomic (temp file + rename)
+
+    This endpoint REQUIRES the user to have already reviewed the fixes.
+    It does NOT ask for approval — the caller (frontend/CLI) is responsible
+    for showing fixes and getting user consent before calling this endpoint.
+
+    Returns:
+      - 200 with list of applied fixes
+      - 400 if any fix fails (stops at first failure, returns what succeeded)
+    """
+    try:
+        from src.codewalk.review.fix_applier import apply_fixes_batch
+
+        repo_path = state.get_repo_path()
+        fixes = [fix.model_dump() for fix in request.fixes]
+
+        result = apply_fixes_batch(repo_path, fixes)
+
+        if result["failed"]:
+            # Partial success: some applied, one failed
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "message": f"Fix {result['failed']['index']} failed",
+                    "error": result["failed"]["error"],
+                    "applied_count": len(result["applied"]),
+                    "failed_index": result["failed"]["index"],
+                },
+            )
+        
+        return ApplyFixesResponse(
+            applied=[
+                AppliedFix(
+                    file_path=a["file_path"],
+                    old_code=a["old_code"],
+                    new_code=a["new_code"],
+                    message=a["message"],
+                )
+                for a in result["applied"]
+            ],
+            failed=None,
+            total=result["total"],
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 # ─── Health check ───────────────────────────────────────────────────

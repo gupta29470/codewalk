@@ -1,7 +1,8 @@
 import logging
+import os as _os
 from pathlib import Path
 
-from src.codewalk.ingestion.file_filter import should_skip
+from src.codewalk.ingestion.file_filter import should_skip, should_skip_dir
 from src.codewalk.log import log as _log
 
 logger = logging.getLogger("codewalk")
@@ -46,29 +47,37 @@ def detect_language(file_path: Path) -> str:
 
 
 def scan_directory(directory: str) -> list[dict]:
-    """Walk a directory → return info about every file."""
+    """Walk a directory → return info about every file.
+    Prunes excluded directories early via os.walk to skip entire subtrees.
+    """
     root = Path(directory)
 
     if not root.exists():
         raise FileNotFoundError(f"Directory {directory} does not exist.")
     
     files = []
+    root_str = str(root)
 
-    for file_path in root.rglob("*"):
-        if not file_path.is_file():
-            continue
+    for dirpath, dirs, filenames in _os.walk(root):
+        # Step 1: Prune excluded dirs IN-PLACE — os.walk won't descend into them
+        dirs[:] = [d for d in dirs if not should_skip_dir(d)]
 
-        relative = str(file_path.relative_to(root))
+        rel_dir = _os.path.relpath(dirpath, root_str)
 
-        if should_skip(relative):
-            continue
+        # Step 2: Filter files from remaining directories
+        for fname in filenames:
+            relative = _os.path.join(rel_dir, fname) if rel_dir != "." else fname
 
-        files.append({
-            "file_path": relative,
-            "absolute_path": str(file_path),
-            "language": detect_language(file_path),
-            "size_bytes": file_path.stat().st_size,
-        })
+            if should_skip(relative):
+                continue
+
+            full_path = _os.path.join(dirpath, fname)
+            files.append({
+                "file_path": relative,
+                "absolute_path": full_path,
+                "language": detect_language(Path(full_path)),
+                "size_bytes": _os.path.getsize(full_path),
+            })
     
     _log(f"[scanner] Scanned {directory} → {len(files)} files")
     return files

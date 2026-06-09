@@ -104,14 +104,19 @@ def transcribe_bytes(audio_bytes: bytes, file_name: str = "audio.webm") -> str:
     import os
 
     suffix = "." + file_name.rsplit(".", 1)[-1] if "." in file_name else ".webm"
-    with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp:
-        tmp.write(audio_bytes)
-        tmp_path = tmp.name
-
+    tmp_path = None
     try:
+        with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp:
+            tmp.write(audio_bytes)
+            tmp_path = tmp.name
+
         model = _get_whisper_model()
         segments, _ = model.transcribe(tmp_path)
         text = " ".join(seg.text.strip() for seg in segments)
         return text.strip()
     finally:
-        os.unlink(tmp_path)
+        if tmp_path:
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass

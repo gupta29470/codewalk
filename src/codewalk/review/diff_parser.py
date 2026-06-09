@@ -74,6 +74,8 @@ def get_parsed_diff(diff_text: str) -> list[DiffFile]:
                 start_line=hunk.target_start,
                 end_line=hunk.target_start + hunk.target_length,
                 lines=lines,
+                source_start=hunk.source_start,
+                source_length=hunk.source_length,
             ))
 
         diff_files.append(DiffFile(

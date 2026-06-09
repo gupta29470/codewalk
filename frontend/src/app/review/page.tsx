@@ -1,14 +1,15 @@
 "use client";
 
 import { useState } from "react";
-import { api, ReviewIssue } from "@/lib/api";
+import { api, ReviewIssue, FixItem } from "@/lib/api";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { Textarea } from "@/components/ui/textarea";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Separator } from "@/components/ui/separator";
-import { Loader2, ShieldCheck, FileSearch, BookOpen, AlertCircle } from "lucide-react";
+import { Loader2, ShieldCheck, FileSearch, BookOpen, AlertCircle, Wrench, Plus, Trash2 } from "lucide-react";
 import ReactMarkdown from "react-markdown";
 
 const SEVERITY_STYLES: Record<string, string> = {
@@ -23,7 +24,14 @@ const SEVERITY_ICONS: Record<string, string> = {
     suggestion: "🟢",
 };
 
-type Tab = "diff" | "file" | "guidelines";
+type Tab = "diff" | "file" | "guidelines" | "apply";
+
+interface FixRow {
+    id: number;
+    file_path: string;
+    old_code: string;
+    new_code: string;
+}
 
 export default function ReviewPage() {
     const [tab, setTab] = useState<Tab>("diff");
@@ -48,6 +56,13 @@ export default function ReviewPage() {
     const [guidelinesResult, setGuidelinesResult] = useState("");
     const [guidelinesLoading, setGuidelinesLoading] = useState(false);
     const [guidelinesError, setGuidelinesError] = useState("");
+
+    // Apply fixes state
+    const [fixes, setFixes] = useState<FixRow[]>([]);
+    const [fixNextId, setFixNextId] = useState(1);
+    const [applyLoading, setApplyLoading] = useState(false);
+    const [applyResult, setApplyResult] = useState("");
+    const [applyError, setApplyError] = useState("");
 
     async function handleReviewDiff() {
         setDiffLoading(true);
@@ -99,16 +114,57 @@ export default function ReviewPage() {
         }
     }
 
+    function addFix() {
+        setFixes((prev) => [...prev, { id: fixNextId, file_path: "", old_code: "", new_code: "" }]);
+        setFixNextId((id) => id + 1);
+    }
+
+    function removeFix(id: number) {
+        setFixes((prev) => prev.filter((f) => f.id !== id));
+    }
+
+    function updateFix(id: number, field: keyof FixRow, value: string) {
+        setFixes((prev) => prev.map((f) => (f.id === id ? { ...f, [field]: value } : f)));
+    }
+
+    async function handleApplyFixes() {
+        const validFixes = fixes.filter((f) => f.file_path.trim() && f.old_code.trim());
+        if (validFixes.length === 0) return;
+
+        setApplyLoading(true);
+        setApplyError("");
+        setApplyResult("");
+
+        const payload: FixItem[] = validFixes.map((f) => ({
+            file_path: f.file_path.trim(),
+            old_code: f.old_code,
+            new_code: f.new_code,
+        }));
+
+        try {
+            const res = await api.applyFixes(payload);
+            setApplyResult(`Applied ${res.applied.length}/${res.total} fixes successfully.`);
+            if (res.applied.length === res.total) {
+                setFixes([]);
+            }
+        } catch (err) {
+            setApplyError(err instanceof Error ? err.message : "Apply fixes failed");
+        } finally {
+            setApplyLoading(false);
+        }
+    }
+
     return (
         <div className="space-y-6">
             <h1 className="text-2xl font-bold">Code Review</h1>
 
             {/* Tab bar */}
-            <div className="flex gap-2">
+            <div className="flex gap-2 flex-wrap">
                 {[
                     { id: "diff" as Tab, label: "Review Diff", icon: ShieldCheck },
                     { id: "file" as Tab, label: "Review File", icon: FileSearch },
                     { id: "guidelines" as Tab, label: "Guidelines", icon: BookOpen },
+                    { id: "apply" as Tab, label: "Apply Fixes", icon: Wrench },
                 ].map((t) => (
                     <Button
                         key={t.id}
@@ -328,6 +384,94 @@ export default function ReviewPage() {
                         {guidelinesResult && (
                             <div className="p-3 bg-green-50 dark:bg-green-950 rounded-md text-green-700 dark:text-green-300 text-sm">
                                 ✅ {guidelinesResult}
+                            </div>
+                        )}
+                    </CardContent>
+                </Card>
+            )}
+
+            {/* ── Apply Fixes Tab ── */}
+            {tab === "apply" && (
+                <Card>
+                    <CardHeader>
+                        <CardTitle className="flex items-center gap-2">
+                            <Wrench className="h-5 w-5" />
+                            Apply Code Fixes
+                        </CardTitle>
+                    </CardHeader>
+                    <CardContent className="space-y-4">
+                        <p className="text-sm text-muted-foreground">
+                            Manually specify exact text replacements. Each fix searches for
+                            <code className="bg-muted px-1 rounded text-xs">old_code</code>
+                            exactly once in the file and replaces it with
+                            <code className="bg-muted px-1 rounded text-xs">new_code</code>.
+                            Include surrounding context (2–3 lines) in old_code to avoid ambiguous matches.
+                        </p>
+
+                        <div className="space-y-3">
+                            {fixes.map((fix) => (
+                                <Card key={fix.id} className="p-3 space-y-2">
+                                    <div className="flex items-center gap-2">
+                                        <Input
+                                            placeholder="File path (e.g. src/main.py)"
+                                            value={fix.file_path}
+                                            onChange={(e) => updateFix(fix.id, "file_path", e.target.value)}
+                                            className="flex-1"
+                                        />
+                                        <Button
+                                            variant="ghost"
+                                            size="sm"
+                                            onClick={() => removeFix(fix.id)}
+                                            className="text-destructive"
+                                        >
+                                            <Trash2 className="h-4 w-4" />
+                                        </Button>
+                                    </div>
+                                    <Textarea
+                                        placeholder="Old code (exact text to find — include surrounding lines for uniqueness)"
+                                        value={fix.old_code}
+                                        onChange={(e) => updateFix(fix.id, "old_code", e.target.value)}
+                                        rows={3}
+                                        className="font-mono text-xs"
+                                    />
+                                    <Textarea
+                                        placeholder="New code (replacement text)"
+                                        value={fix.new_code}
+                                        onChange={(e) => updateFix(fix.id, "new_code", e.target.value)}
+                                        rows={3}
+                                        className="font-mono text-xs"
+                                    />
+                                </Card>
+                            ))}
+                        </div>
+
+                        <div className="flex gap-2">
+                            <Button variant="outline" size="sm" onClick={addFix}>
+                                <Plus className="h-4 w-4 mr-1" />
+                                Add Fix
+                            </Button>
+                            <Button
+                                onClick={handleApplyFixes}
+                                disabled={applyLoading || fixes.filter((f) => f.file_path.trim() && f.old_code.trim()).length === 0}
+                            >
+                                {applyLoading ? (
+                                    <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                                ) : (
+                                    "Apply Fixes"
+                                )}
+                            </Button>
+                        </div>
+
+                        {applyError && (
+                            <div className="p-3 bg-destructive/10 text-destructive rounded-md text-sm flex items-center gap-2">
+                                <AlertCircle className="h-4 w-4" />
+                                {applyError}
+                            </div>
+                        )}
+
+                        {applyResult && (
+                            <div className="p-3 bg-green-50 dark:bg-green-950 rounded-md text-green-700 dark:text-green-300 text-sm">
+                                ✅ {applyResult}
                             </div>
                         )}
                     </CardContent>

@@ -15,6 +15,10 @@ import {
     ShieldCheck,
     RefreshCw,
     Mic,
+    Cloud,
+    Network,
+    Search,
+    FileText,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useAnalyze } from "@/lib/analyze-context";
@@ -22,15 +26,19 @@ import { useAnalyze } from "@/lib/analyze-context";
 const NAV_ITEMS = [
     { href: "/", label: "Home", icon: Home, locked: false },
     { href: "/overview", label: "Overview", icon: LayoutDashboard, locked: true },
+    { href: "/architecture", label: "Architecture", icon: Network, locked: true },
     { href: "/modules", label: "Modules", icon: Package, locked: true },
     { href: "/module", label: "Module Detail", icon: FileSearch, locked: true },
     { href: "/blast-radius", label: "Blast Radius", icon: Zap, locked: true },
     { href: "/reading-order", label: "Reading Order", icon: BookOpen, locked: true },
     { href: "/execution-flow", label: "Execution Flow", icon: GitBranch, locked: true },
+    { href: "/docs", label: "Docs", icon: FileText, locked: true },
+    { href: "/research", label: "Research", icon: Search, locked: true },
     { href: "/chat", label: "Chat", icon: MessageCircle, locked: true },
     { href: "/voice", label: "Voice", icon: Mic, locked: true },
     { href: "/review", label: "Code Review", icon: ShieldCheck, locked: true },
     { href: "/incremental-reindex", label: "Smart Reindex", icon: RefreshCw, locked: true },
+    { href: "/admin", label: "Cloud Admin", icon: Cloud, locked: false },
 ];
 
 export function Sidebar() {

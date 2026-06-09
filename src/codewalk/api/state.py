@@ -30,7 +30,53 @@ _graph_store: GraphStore | None = None
 _graph_runtime: GraphRuntime | None = None
 _banner_shown = False
 _init_lock = threading.Lock()
+_state_lock = threading.RLock()  # Guards all state mutations (initialize, refresh, rebuild)
 _doc_store: DocStore | None = None
+_db = None  # Postgres connection wrapper — cloud mode only
+pending_update: str | None = None  # Set by MCP ensure_local_index when remote is newer
+
+
+class _PgHelper:
+    """Thin wrapper around psycopg2 connection for cloud.py/worker convenience.
+    Provides fetchone/fetchall/execute with positional $1/$2 params."""
+
+    def __init__(self, conn):
+        self._conn = conn
+
+    def _run(self, sql: str, *args):
+        """Convert $1/$2 placeholders to %s for psycopg2, execute with args."""
+        import re
+        converted = re.sub(r'\$(\d+)', '%s', sql)
+        cur = self._conn.cursor()
+        cur.execute(converted, args if args else None)
+        return cur
+
+    def fetchone(self, sql: str, *args):
+        cur = self._run(sql, *args)
+        return cur.fetchone()
+
+    def fetchall(self, sql: str, *args):
+        cur = self._run(sql, *args)
+        return cur.fetchall()
+
+    def execute(self, sql: str, *args):
+        self._run(sql, *args)
+
+
+def get_db():
+    """Get or create the Postgres connection wrapper (cloud/server mode only).
+    Requires DATABASE_URL env var."""
+    global _db
+    if _db is None:
+        import psycopg2
+        import psycopg2.extras
+        db_url = os.environ.get("DATABASE_URL")
+        if not db_url:
+            raise RuntimeError("DATABASE_URL not set — required for cloud mode.")
+        conn = psycopg2.connect(db_url, cursor_factory=psycopg2.extras.RealDictCursor)
+        conn.autocommit = True
+        _db = _PgHelper(conn)
+    return _db
 
 def get_store() -> VectorStore:
     """Get the VectorStore. Raises if not initialized."""
@@ -87,7 +133,10 @@ def get_doc_store() -> DocStore:
     """Get or create the DocStore (lazy init — no analyze needed)."""
     global _doc_store
     if _doc_store is None:
-        col_name = f"{get_collection_name()}_docs"
+        try:
+            col_name = f"{get_collection_name()}_docs"
+        except Exception:
+            col_name = "codebase_docs"
         _doc_store = DocStore(persist_dir=chroma_path(), collection_name=col_name)
         _doc_store.create_collection()
 
@@ -97,46 +146,61 @@ def get_doc_store() -> DocStore:
 def initialize(store: VectorStore, agent, modules_result: dict, analyze_result: dict,
                files: list[dict] | None = None, deps: dict | None = None,
                repo_path: str | None = None,
-               embedded_chunks: list[dict] | None = None):
+               embedded_chunks: list[dict] | None = None,
+               guidelines_path: str = "", docs_path: str = ""):
     """Set all state after a successful /analyze."""
     global _store, _agent, _modules_result, _analyze_result, _files, _deps, _repo_path, _graph_store, _graph_runtime
-    _store = store
-    _agent = agent
-    _modules_result = modules_result
-    _analyze_result = analyze_result
-    _files = files
-    _deps = deps
-    if repo_path:
-        _repo_path = repo_path
+    from src.codewalk.pipeline import build_full_analysis
 
-    # GraphStore → DuckDB (persistent). GraphRuntime → igraph (in-memory, fast).
-    if files and deps and modules_result:
-        repo = _repo_path or settings.repo_path
-        db_path = f"{repo.rstrip('/')}/.codewalk/graph.duckdb"
-        if _graph_store is not None:
-            _graph_store.close()
-        _graph_store = GraphStore(db_path)
-        _graph_store.populate_from_analysis(files, deps, modules_result,
-                                            embedded_chunks=embedded_chunks)
-        _graph_runtime = GraphRuntime(_graph_store)
-        _agent = create_agent(_store, _modules_result, files=_files, deps=_deps, graph_runtime=_graph_runtime, graph_store=_graph_store)
+    with _state_lock:
+        _store = store
+        _analyze_result = analyze_result
+        if repo_path:
+            _repo_path = repo_path
+
+        # Build DuckDB + deps + modules + docs + guidelines via shared function
+        if files:
+            repo = _repo_path or settings.repo_path
+            db_path = f"{repo.rstrip('/')}/.codewalk/graph.duckdb"
+            if _graph_store is not None:
+                _graph_store.close()
+
+            result = build_full_analysis(
+                db_path=db_path,
+                files=files,
+                embedded_chunks=embedded_chunks,
+                guidelines_path=guidelines_path,
+                docs_path=docs_path,
+            )
+            _files = result["files"]
+            _deps = result["deps"]
+            _modules_result = result["modules_result"]
+
+            # Reopen for runtime queries + recreate agent
+            _graph_store = GraphStore(db_path)
+            _graph_runtime = GraphRuntime(_graph_store)
+            _agent = create_agent(_store, _modules_result, files=_files, deps=_deps, graph_runtime=_graph_runtime, graph_store=_graph_store)
 
 
 def refresh(files: list[dict], deps: dict, modules_result: dict):
     """Update cached analysis + rebuild graph. Does not re-embed."""
     global _files, _deps, _modules_result, _graph_store, _graph_runtime
-    _files = files
-    _deps = deps
-    _modules_result = modules_result
+    from src.codewalk.pipeline import build_full_analysis
 
-    # Rebuild graph so blast radius / reading order use fresh data
-    repo = _repo_path or settings.repo_path
-    db_path = f"{repo.rstrip('/')}/.codewalk/graph.duckdb"
-    if _graph_store is not None:
-        _graph_store.close()
-    _graph_store = GraphStore(db_path)
-    _graph_store.populate_from_analysis(files, deps, modules_result)
-    _graph_runtime = GraphRuntime(_graph_store)
+    with _state_lock:
+        repo = _repo_path or settings.repo_path
+        db_path = f"{repo.rstrip('/')}/.codewalk/graph.duckdb"
+        if _graph_store is not None:
+            _graph_store.close()
+
+        result = build_full_analysis(db_path=db_path, files=files)
+        _files = result["files"]
+        _deps = result["deps"]
+        _modules_result = result["modules_result"]
+
+        # Reopen for runtime queries
+        _graph_store = GraphStore(db_path)
+        _graph_runtime = GraphRuntime(_graph_store)
 
 
 # ─── Helper functions (shared by MCP + API) ─────────────────────────
@@ -174,23 +238,43 @@ def _rebuild_memory_caches():
          f"{len(_deps['graph'])} in graph, {len(_modules_result['modules'])} modules")
 
 
-def rebuild_analysis_cache(embedded_chunks: list[dict] | None = None):
+def rebuild_analysis_cache(embedded_chunks: list[dict] | None = None,
+                           guidelines_path: str = "", docs_path: str = "",
+                           force_reindex_extras: bool = False):
     """Re-scan files, rebuild in-memory caches, AND repopulate DuckDB.
 
     Use this when the codebase or index has changed (analyze, reindex, refresh).
     For cold start (no changes), use _load_from_disk() instead.
     """
-    global _graph_store, _graph_runtime
-    _rebuild_memory_caches()
+    global _files, _deps, _modules_result, _repo_path, _graph_store, _graph_runtime
+    from src.codewalk.pipeline import build_full_analysis
 
-    repo_path = _repo_path or settings.repo_path
-    db_path = f"{repo_path.rstrip('/')}/.codewalk/graph.duckdb"
-    if _graph_store is not None:
-        _graph_store.close()
-    _graph_store = GraphStore(db_path)
-    _graph_store.populate_from_analysis(_files, _deps, _modules_result,
-                                        embedded_chunks=embedded_chunks)
-    _graph_runtime = GraphRuntime(_graph_store)
+    with _state_lock:
+        repo_path = _repo_path or settings.repo_path
+        _repo_path = repo_path
+        db_path = f"{repo_path.rstrip('/')}/.codewalk/graph.duckdb"
+
+        if _graph_store is not None:
+            _graph_store.close()
+
+        # API/MCP path: scan with file_filter defaults (scan_directory)
+        files = scan_directory(repo_path)
+
+        result = build_full_analysis(
+            db_path=db_path,
+            files=files,
+            embedded_chunks=embedded_chunks,
+            guidelines_path=guidelines_path,
+            docs_path=docs_path,
+            force_reindex_extras=force_reindex_extras,
+        )
+        _files = result["files"]
+        _deps = result["deps"]
+        _modules_result = result["modules_result"]
+
+        # Reopen GraphStore + runtime for query tools (build_full_analysis closes it)
+        _graph_store = GraphStore(db_path)
+        _graph_runtime = GraphRuntime(_graph_store)
 
 
 def ensure_initialized():
@@ -218,6 +302,7 @@ def _ensure_initialized_locked():
 
     chroma = chroma_path()
     if not os.path.isdir(chroma):
+        _log("[ensure_initialized] No index found on disk — skipping auto-load. Call POST /analyze or codewalk_analyze_codebase first.")
         return  # No index on disk — nothing to load
 
     _log("[ensure_initialized] Auto-loading index + analysis from disk...")
@@ -260,7 +345,7 @@ def _check_upgrade_banner(repo_path: str):
     if _banner_shown:
         return
     
-    meta_path = f"{repo_path.rstrip('/')}/.codewalk/meta.json"
+    meta_path = f"{repo_path.rstrip('/')}/.codewalk/manifest.json"
     if not os.path.exists(meta_path):
         return
     
@@ -270,10 +355,11 @@ def _check_upgrade_banner(repo_path: str):
     except (json.JSONDecodeError, OSError):
         return
     
-    stored_version = meta.get("codewalk_version", "0.0.0")
+    from packaging.version import parse as parse_version
+    stored_version = parse_version(meta.get("codewalk_version", "0.0.0"))
 
     from src.codewalk import __version__
-    current_version = __version__
+    current_version = parse_version(__version__)
 
     if stored_version < current_version:
         _log(

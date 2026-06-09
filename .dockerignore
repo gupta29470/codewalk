@@ -1,0 +1,75 @@
+# ═══════════════════════════════════════════════════════════════════════
+#  Docker Build Context Exclusions
+#  Only Python backend code should reach the Docker daemon.
+# ═══════════════════════════════════════════════════════════════════════
+
+# ─── Secrets ──────────────────────────────────────────────────────────
+# NEVER include .env in the build context — it contains API keys and passwords
+.env
+.env.*
+*.pem
+*.key
+
+# ─── Git ──────────────────────────────────────────────────────────────
+.git
+.gitignore
+.gitattributes
+
+# ─── Python ───────────────────────────────────────────────────────────
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+.venv/
+.codewalk-env/
+.pytest_cache/
+.mypy_cache/
+
+# ─── Data & Local State ───────────────────────────────────────────────
+data/
+*.sqlite
+*.db
+.codewalk/
+
+# ─── Frontend (built separately, not in backend image) ────────────────
+frontend/
+
+# ─── Media & Assets (12MB+ of videos/screenshots) ─────────────────────
+assets/
+
+# ─── CI/CD & Deploy (not needed in image) ─────────────────────────────
+.github/
+
+# Deploy files — excluded EXCEPT pyproject.toml which Dockerfile copies
+deploy/*
+!deploy/pyproject.toml
+
+# ─── Documentation ────────────────────────────────────────────────────
+wiki/
+blogs/
+docs/
+*.md
+!README.md
+
+# ─── Tests ────────────────────────────────────────────────────────────
+tests/
+.pytest_cache/
+
+# ─── IDE & Editor ─────────────────────────────────────────────────────
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# ─── OS Files ─────────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+
+# ─── Root Files (not needed in backend image) ─────────────────────────
+codewalk_plan.md
+details.md
+SESSION_SUMMARY.md
+env.example.txt
+teach.py
+LICENSE

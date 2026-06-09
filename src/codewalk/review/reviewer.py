@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import asyncio
 from pathlib import Path
 from dataclasses import dataclass, field
 from concurrent.futures import ThreadPoolExecutor
@@ -13,10 +14,13 @@ from src.codewalk.review.diff_parser import get_diff, get_parsed_diff
 from src.codewalk.review.models import ReviewResult, Issue, Severity, Category, Verdict, Confidence, DiffFile
 from src.codewalk.review.test_coverage import TestCoverage
 from src.codewalk.review.guidelines_loader import get_guidelines_store, search_guidelines
+from src.codewalk.doc_knowledge.doc_store import DocStore
 from src.codewalk.review.review_prompts import REVIEW_SYSTEM_PROMPT, REVIEW_USER_PROMPT
 
 # Threshold: if total added lines exceed this, use per-file chunked review
 CHUNK_THRESHOLD = 200
+
+_executor = ThreadPoolExecutor(max_workers=8)
 
 # ── Module-level maps for LLM response parsing (avoid rebuilding per call) ──
 _CATEGORY_MAP: dict[str, Category] = {
@@ -63,6 +67,7 @@ class ReviewContext:
     pre_check_issues: list[Issue]
     blast_radius_warnings: list[str]
     guidelines_context: str
+    docs_context: str
     architecture_context: str
     total_added: int
     total_removed: int
@@ -614,6 +619,45 @@ def _extract_pattern_signal(
     return f"{label}: {', '.join(all_hits[:max_display])}"
 
 
+def _search_docs_for_review(diff_files: list) -> str:
+    """Search team docs for architecture/naming/quality context relevant to changed files.
+
+    Uses state.chroma_path() for the ChromaDB persist dir.
+    Returns formatted context string or empty string if no docs indexed.
+    """
+    from src.codewalk.api import state
+
+    chroma_dir = state.chroma_path()
+    repo = state.get_repo_path() or "."
+    repo_name = Path(repo).name or "codebase"
+    collection_name = f"{repo_name}_docs"
+
+    try:
+        doc_store = DocStore(persist_dir=chroma_dir, collection_name=collection_name)
+        doc_store.create_collection()
+        if doc_store.chunk_count() == 0:
+            return ""
+    except Exception:
+        return ""
+
+    # Build query from changed file paths + languages
+    languages = set(df.language for df in diff_files if hasattr(df, "language") and df.language != "unknown")
+    file_paths = [df.file_path for df in diff_files[:5]]
+    query = f"architecture conventions folder structure naming for {', '.join(languages)} files: {', '.join(file_paths)}"
+
+    results = doc_store.search(query, n_results=3)
+    if not results:
+        return ""
+
+    lines = ["## Team Documentation (Architecture & Conventions)"]
+    for doc in results:
+        source = doc.get("metadata", {}).get("doc_path", doc.get("metadata", {}).get("source", "unknown"))
+        lines.append(f"\n### From: {source}")
+        lines.append(doc["text"][:1500])  # Cap per-chunk size for prompt budget
+
+    return "\n".join(lines)
+
+
 def _build_file_diff_text(diff_file: DiffFile) -> str:
     """Reconstruct unified diff text for a single file from parsed hunks."""
     lines = []
@@ -621,7 +665,10 @@ def _build_file_diff_text(diff_file: DiffFile) -> str:
     lines.append(f"+++ b/{diff_file.file_path}")
 
     for hunk in diff_file.hunks:
-        lines.append(f"@@ -{hunk.start_line},{len(hunk.lines)} @@")
+        new_count = hunk.end_line - hunk.start_line
+        lines.append(
+            f"@@ -{hunk.source_start},{hunk.source_length} +{hunk.start_line},{new_count} @@"
+        )
         for line in hunk.lines:
             if line.change_type == "added":
                 lines.append(f"+{line.content}")
@@ -659,14 +706,15 @@ def prepare_review_context(
     total_removed = sum(df.removed_lines for df in diff_files)
 
     # Pre-checks
-    pre_check_issues = list(TestCoverage().analyze(diff_files))
+    pre_check_issues = list(TestCoverage().analyze(diff_files, repo_path))
 
     # Blast radius
     blast_warnings = []
     if deps:
         from src.codewalk.analysis.blast_radius import get_blast_radius
+        graph = deps["graph"]
         for df in diff_files:
-            radius = get_blast_radius(df.file_path, deps)
+            radius = get_blast_radius(df.file_path, graph)
             if radius["risk_level"] in ("high", "critical"):
                 blast_warnings.append(
                     f"{df.file_path} — {radius['risk_level'].upper()} risk, "
@@ -678,6 +726,9 @@ def prepare_review_context(
     guidelines_store = get_guidelines_store()
     if guidelines_store:
         guidelines_context = search_guidelines(guidelines_store, diff_files, n_results=3)
+
+    # Docs (architecture decisions, naming conventions, folder structure, etc.)
+    docs_context = _search_docs_for_review(diff_files)
 
     # Architecture detection
     architecture_context = _detect_architecture_context(store, diff_files)
@@ -701,6 +752,7 @@ def prepare_review_context(
         pre_check_issues=pre_check_issues,
         blast_radius_warnings=blast_warnings,
         guidelines_context=guidelines_context,
+        docs_context=docs_context,
         architecture_context=architecture_context,
         total_added=total_added,
         total_removed=total_removed,
@@ -711,6 +763,7 @@ def _review_single_file(
     file_ctx: FileReviewContext,
     guidelines_context: str,
     architecture_context: str = "",
+    docs_context: str = "",
 ) -> list[Issue]:
     """Review a single file — one focused LLM call.
 
@@ -745,6 +798,10 @@ def _review_single_file(
     # Guidelines
     if guidelines_context:
         context_parts.append(guidelines_context)
+
+    # Team docs (arch decisions, naming conventions, folder structure)
+    if docs_context:
+        context_parts.append(docs_context)
 
     context_sections = "\n\n".join(context_parts) if context_parts else ""
 
@@ -792,69 +849,57 @@ def _review_single_file(
                 fix_description=issue.get("fix_description"),
                 code_snippet=issue.get("code_snippet"),
             ))
-    except (json.JSONDecodeError, KeyError, IndexError):
-        pass  # skip unparseable responses for individual files
+    except (json.JSONDecodeError, KeyError, IndexError) as e:
+        _log(f"[review] JSON parse error for {diff_file.file_path}: {e} — raw response length {len(response.content)}")
+        # skip unparseable responses for individual files
 
     return issues
 
 
 def _review_all_at_once(
-    diff_text: str,
-    diff_files: list[DiffFile],
-    repo_path: str | None,
-    store,
-    deps: dict | None,
-    pre_check_issues: list[Issue],
-    architecture_context: str = "",
+    ctx: ReviewContext,
+    store=None,
+    deps: dict | None = None,
 ) -> tuple[list[Issue], str, Verdict, str]:
-    """Original single-pass review for small diffs (< CHUNK_THRESHOLD lines)."""
+    """Single-pass review for small diffs (< CHUNK_THRESHOLD lines).
+
+    Uses pre-built ReviewContext — no redundant I/O or vector store queries.
+    """
     llm = get_llm(temperature=0)
 
-    # Build context
+    # Build context from pre-computed ReviewContext
     context_parts = []
 
-    # Architecture context (detected patterns — goes first so LLM sees it early)
-    if architecture_context:
-        context_parts.append(architecture_context)
+    # Architecture context (already computed)
+    if ctx.architecture_context:
+        context_parts.append(ctx.architecture_context)
 
-    # Blast radius
-    if deps:
-        from src.codewalk.analysis.blast_radius import get_blast_radius
-        high_risk = []
-        for df in diff_files:
-            radius = get_blast_radius(df.file_path, deps)
-            if radius["risk_level"] in ("high", "critical"):
-                high_risk.append(
-                    f"⚠️ {df.file_path} — {radius['risk_level'].upper()} risk, "
-                    f"{radius['affected_files']} dependents"
-                )
-        if high_risk:
+    # Blast radius (already computed)
+    if ctx.blast_radius_warnings:
+        context_parts.append(
+            "## Blast Radius Warnings\n" + "\n".join(ctx.blast_radius_warnings)
+        )
+
+    # File content for modified files only (already computed in file_contexts)
+    for fc in ctx.file_contexts[:3]:
+        if fc.file_content:
             context_parts.append(
-                "## Blast Radius Warnings\n" + "\n".join(high_risk)
+                f"## Full file: {fc.diff_file.file_path}\n```\n{fc.file_content}\n```"
             )
 
-    # File content for modified files only
-    for df in diff_files[:3]:
-        file_content = _get_file_content(df, repo_path)
-        if file_content:
-            context_parts.append(
-                f"## Full file: {df.file_path}\n```\n{file_content}\n```"
-            )
+    # Security context (already computed in file_contexts)
+    for fc in ctx.file_contexts[:2]:
+        if fc.security_context:
+            context_parts.append(fc.security_context)
+            break
 
-    # Security context
-    if store:
-        for df in diff_files[:2]:
-            sec_ctx = _get_security_context_for_file(df, store)
-            if sec_ctx:
-                context_parts.append(sec_ctx)
-                break
+    # Guidelines (already computed)
+    if ctx.guidelines_context:
+        context_parts.append(ctx.guidelines_context)
 
-    # Guidelines
-    guidelines_store = get_guidelines_store()
-    if guidelines_store:
-        gl = search_guidelines(guidelines_store, diff_files, n_results=3)
-        if gl:
-            context_parts.append(gl)
+    # Team docs (already computed)
+    if ctx.docs_context:
+        context_parts.append(ctx.docs_context)
 
     context_sections = "\n\n".join(context_parts) if context_parts else ""
 
@@ -862,11 +907,11 @@ def _review_all_at_once(
 
     pre_check_str = "\n".join(
         f"- [{issue.severity.value}] {issue.file_path}:{issue.line_number} — {issue.title}"
-        for issue in pre_check_issues
+        for issue in ctx.pre_check_issues
     ) or "None found."
 
     user = REVIEW_USER_PROMPT.format(
-        diff_content=diff_text,
+        diff_content=ctx.diff_text,
         truncation_notice="",
         pre_checks=pre_check_str,
     )
@@ -913,10 +958,11 @@ def _review_all_at_once(
                 fix_description=issue.get("fix_description"),
                 code_snippet=issue.get("code_snippet"),
             ))
-    except (json.JSONDecodeError, KeyError, IndexError):
+    except (json.JSONDecodeError, KeyError, IndexError) as e:
+        _log(f"[review] JSON parse error in all-at-once review: {e} — raw response length {len(response.content)}")
         summary = response.content
-        verdict = Verdict.APPROVE
-        verdict_reason = ""
+        verdict = Verdict.REQUEST_CHANGES
+        verdict_reason = "LLM response was malformed — manual review required."
 
     return issues, summary, verdict, verdict_reason
 
@@ -965,6 +1011,7 @@ def review_diff(
                         _review_single_file,
                         fc, ctx.guidelines_context,
                         ctx.architecture_context,
+                        ctx.docs_context,
                     )
                     for fc in ctx.file_contexts
                 ]
@@ -990,20 +1037,30 @@ def review_diff(
         else:
             # ─── SINGLE PASS: Small diff, one call ───
             llm_issues, llm_summary, verdict, verdict_reason = _review_all_at_once(
-                ctx.diff_text, ctx.diff_files, repo_path, store, deps,
-                ctx.pre_check_issues, ctx.architecture_context,
+                ctx, store, deps,
             )
 
-    # ── Merge and return ──
+    return _build_review_result(ctx, llm_issues, llm_summary, verdict, verdict_reason)
+
+
+def _build_review_result(
+    ctx: ReviewContext,
+    llm_issues: list,
+    llm_summary: str,
+    verdict: "Verdict",
+    verdict_reason: str,
+) -> ReviewResult:
+    """Merge pre-check issues + LLM issues into final ReviewResult.
+    Shared by review_diff() and review_diff_async() — no duplication.
+    """
     all_issues = ctx.pre_check_issues + llm_issues
 
-    # Determine verdict (if chunked path, derive from issues)
-    if ctx.total_added > CHUNK_THRESHOLD or not use_llm:
-        has_high_confidence_critical = any(
+    if ctx.total_added > CHUNK_THRESHOLD or not llm_issues:
+        has_critical = any(
             i.severity == Severity.CRITICAL and i.confidence == Confidence.HIGH
             for i in all_issues
         )
-        if has_high_confidence_critical:
+        if has_critical:
             verdict = Verdict.REQUEST_CHANGES
             verdict_reason = "Critical issues found that must be fixed before merge."
         elif all_issues:
@@ -1022,6 +1079,204 @@ def review_diff(
         files_reviewed=len(ctx.diff_files),
         lines_added=ctx.total_added,
         lines_removed=ctx.total_removed,
+        diff_text=ctx.diff_text,
     )
+
+
+def _do_llm_review(ctx, repo_path, store, deps):
+    """Sync LLM review phase — called via _run_sync so it never blocks the event loop.
+
+    Runs sequentially within the background thread to avoid nested thread pools
+    (which waste resources and can deadlock if the outer executor is saturated).
+    """
+    llm_issues = []
+    llm_summary = ""
+    verdict = Verdict.APPROVE
+    verdict_reason = ""
+
+    if ctx.total_added > CHUNK_THRESHOLD:
+        errors = []
+        for fc in ctx.file_contexts:
+            try:
+                file_issues = _review_single_file(
+                    fc, ctx.guidelines_context, ctx.architecture_context, ctx.docs_context
+                )
+                llm_issues.extend(file_issues)
+            except Exception as e:
+                errors.append(f"{fc.diff_file.file_path}: {type(e).__name__}: {e}")
+
+        llm_summary = (
+            f"Reviewed {len(ctx.diff_files)} files individually. "
+            f"Found {len(llm_issues)} issues."
+            + (f"\n⚠️ {len(errors)} file(s) failed:\n" + "\n".join(errors) if errors else "")
+        )
+    else:
+        llm_issues, llm_summary, verdict, verdict_reason = _review_all_at_once(
+            ctx, store, deps,
+        )
+
+    return llm_issues, llm_summary, verdict, verdict_reason
+
+
+async def review_diff_async(
+    staged: bool = False,
+    target_branch: str | None = None,
+    commit: str | None = None,
+    store=None,
+    deps: dict | None = None,
+    repo_path: str | None = None,
+    graph_store=None,
+) -> ReviewResult:
+    """Async version of review_diff — parallel context loading + LLM review.
+
+    Uses prepare_review_context_async() for Phase 1 (parallel I/O),
+    then the same LLM review logic via _build_review_result().
+
+    Called by: API /review endpoint (async def).
+    MCP tools keep calling sync review_diff() — no change there.
+    """
+    ctx = await prepare_review_context_async(
+        staged=staged,
+        target_branch=target_branch,
+        commit=commit,
+        store=store,
+        deps=deps,
+        repo_path=repo_path,
+        graph_store=graph_store,
+    )
+
+    if ctx is None:
+        return ReviewResult(summary="No changes to review.")
+
+    # LLM review — offloaded to thread pool so we never block the event loop
+    llm_issues, llm_summary, verdict, verdict_reason = await _run_sync(
+        _do_llm_review, ctx, repo_path, store, deps
+    )
+
+    return _build_review_result(ctx, llm_issues, llm_summary, verdict, verdict_reason)
+
+
+async def _run_sync(fn, *args):
+    """Run a blocking sync function in the thread pool without blocking the event loop."""
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(_executor, fn, *args)
+
+async def _guidelines_async(diff_files: list) -> str:
+    """Async wrapper: search guidelines ChromaDB collection."""
+    guidelines_store = get_guidelines_store()
+    if not guidelines_store:
+        return ""
+    return await _run_sync(search_guidelines, guidelines_store, diff_files, 3)
+
+async def _docs_async(diff_files: list) -> str:
+    """Async wrapper: search team docs for review context."""
+    return await _run_sync(_search_docs_for_review, diff_files)
+
+async def _architecture_async(store, diff_files: list) -> str:
+    """Async wrapper: detect architecture patterns from vector store."""
+    if store is None:
+        return ""
+    return await _run_sync(_detect_architecture_context, store, diff_files)
+
+async def _file_context_async(
+    diff_file, repo_path: str | None, deps: dict | None, 
+    store, graph_store) -> FileReviewContext:
+    """Build context for ONE file in parallel (caller + security run concurrently)."""
+    file_diff_text = _build_file_diff_text(diff_file)
+    file_content = _get_file_content(diff_file, repo_path)
+
+    caller_ctx, security_ctx = await asyncio.gather(
+        _run_sync(_get_caller_context, diff_file, deps, graph_store),
+        _run_sync(_get_security_context_for_file, diff_file, store) if store else asyncio.sleep(0),
+    )
+
+    return FileReviewContext(
+        diff_file=diff_file,
+        file_diff_text=file_diff_text,
+        file_content=file_content,
+        caller_context=caller_ctx,
+        security_context=security_ctx if store else "",
+    )
+
+async def _all_files_contexts_async(
+    diff_files: list,
+    repo_path: str | None,
+    deps: dict | None,
+    store,
+    graph_store,) -> list:
+    """Build contexts for ALL files in parallel."""
+    tasks = [
+        _file_context_async(diff_file, repo_path, deps, store, graph_store)
+        for diff_file in diff_files
+    ]
+    return await asyncio.gather(*tasks)
+
+async def prepare_review_context_async(
+    staged: bool = False,
+    target_branch: str | None = None,
+    commit: str | None = None,
+    store=None,
+    deps: dict | None = None,
+    repo_path: str | None = None,
+    graph_store=None,) -> ReviewContext | None:
+    """Async version of prepare_review_context — runs I/O steps in parallel.
+
+    Phase 1 (sync, fast, in-memory):
+      get_diff → parse_diff → TestCoverage → blast_radius
+
+    Phase 2 (async, parallel I/O):
+      guidelines + architecture + all file contexts run simultaneously
+
+    Called by:  API /review endpoint (async def)
+    NOT called by: MCP tools (they call sync prepare_review_context())
+
+    Same return type as prepare_review_context() — drop-in for API use.
+    """
+    # ── Phase 1: fast sync steps — no parallelism needed ─────────────
+    diff_text = get_diff(staged=staged, target_branch=target_branch,
+                         commit=commit, repo_path=repo_path)
+    
+    if not diff_text.strip():
+        return None
+    
+    diff_files = get_parsed_diff(diff_text)
+    total_added   = sum(df.added_lines   for df in diff_files)
+    total_removed = sum(df.removed_lines for df in diff_files)
+    pre_check_issues = list(TestCoverage().analyze(diff_files, repo_path))
+
+    blast_warnings = []
+    if deps:
+        from src.codewalk.analysis.blast_radius import get_blast_radius
+        graph = deps["graph"]
+        for df in diff_files:
+            radius = get_blast_radius(df.file_path, graph)
+            if radius["risk_level"] in ("high", "critical"):
+                blast_warnings.append(
+                    f"{df.file_path} — {radius['risk_level'].upper()} risk, "
+                    f"{radius['affected_files']} dependents"
+                )
+
+    # ── Phase 2: parallel I/O — all four run at the same time ───────
+    guidelines_ctx, architecture_ctx, file_contexts, docs_ctx = await asyncio.gather(
+        _guidelines_async(diff_files),
+        _architecture_async(store, diff_files),
+        _all_files_contexts_async(diff_files, repo_path, deps, store, graph_store),
+        _docs_async(diff_files),
+    )
+
+    return ReviewContext(
+        diff_text=diff_text,
+        diff_files=diff_files,
+        file_contexts=file_contexts,
+        pre_check_issues=pre_check_issues,
+        blast_radius_warnings=blast_warnings,
+        guidelines_context=guidelines_ctx,
+        architecture_context=architecture_ctx,
+        docs_context=docs_ctx,
+        total_added=total_added,
+        total_removed=total_removed,
+    )
+
+
 
 

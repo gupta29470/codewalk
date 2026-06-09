@@ -12,6 +12,7 @@ from src.codewalk.rag.chain import ask_corrective
 from src.codewalk.review.reviewer import review_diff as _review_diff
 from src.codewalk.review.guidelines_loader import get_guidelines_store, search_guidelines
 from src.codewalk.config import settings
+from src.codewalk.review.fix_applier import apply_fix_to_file
 
 def create_tools(store: VectorStore, modules_result: dict,
                  files: list[dict] = None, deps: dict = None,
@@ -167,6 +168,7 @@ def create_tools(store: VectorStore, modules_result: dict,
             store=store,
             deps=deps,
             graph_store=graph_store,
+            repo_path=settings.repo_path,
         )
 
         if not result.issues:
@@ -239,7 +241,7 @@ def create_tools(store: VectorStore, modules_result: dict,
 
         output_parts = [f"## File Review: {file_path} ({len(file_lines)} lines)\n"]
 
-        caller_ctx = _get_caller_context(synthetic_diff, deps)
+        caller_ctx = _get_caller_context(synthetic_diff, deps, graph_store)
         if caller_ctx:
             output_parts.append(caller_ctx)
 
@@ -247,12 +249,14 @@ def create_tools(store: VectorStore, modules_result: dict,
             sec_ctx = _get_security_context_for_file(synthetic_diff, store)
             if sec_ctx:
                 output_parts.append(sec_ctx)
-            results = store.search(f"code in {file_path}", n_results=5)
-            from src.codewalk.rag.retrieval_quality import filter_by_distance
-            filtered, _ = filter_by_distance(results)
-            if filtered:
+            from src.codewalk.rag.chain import retrieve_corrective as _retrieve_corrective
+            result = _retrieve_corrective(
+                f"code in {file_path}", store,
+                graph_store=graph_store,
+            )
+            if result["chunks"]:
                 output_parts.append("## Similar patterns elsewhere")
-                output_parts.append(_format_context(filtered))
+                output_parts.append(_format_context(result["chunks"]))
 
         guidelines_store = get_guidelines_store()
         if guidelines_store:
@@ -346,10 +350,28 @@ def create_tools(store: VectorStore, modules_result: dict,
     
         return "\n".join(parts)
 
+    # ─── TOOL 12: apply_fix ──────────────────────────────────────
+    @tool
+    def apply_fix(file_path: str, old_code: str, new_code: str) -> str:
+        """Apply a code fix by replacing old_code with new_code in the file.
+
+        This tool ACTUALLY EDITS FILES ON DISK. It will be interrupted by HITL
+        before execution, so the user must approve each fix via /chat/approve.
+
+        Args:
+            file_path: Relative path to the file (e.g. "src/auth/login.py")
+            old_code:  The EXACT code to search for (must match precisely)
+            new_code:  The replacement code
+        """
+        result = apply_fix_to_file(settings.repo_path, file_path, old_code, new_code)
+        if result["ok"]:
+            return result["message"]
+        return f"Error: {result['error']}"
+
     return [search_codebase, get_module_info, explain_function,
             get_overview, get_blast_radius_map, get_reading_order,
             get_execution_flow, review_diff, review_file, load_guidelines,
-            get_architecture_health]
+            get_architecture_health, apply_fix]
 
 
 

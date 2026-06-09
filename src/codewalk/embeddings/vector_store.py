@@ -52,13 +52,26 @@ class VectorStore:
         return None
     
     def get_all_indexed_files(self) -> set[str]:
-        """Get all unique file paths currently in the index."""
-        results = self.parents_collection.get(include=["metadatas"])
-        return {
-            meta["file_path"]
-            for meta in results["metadatas"]
-            if "file_path" in meta
-        }
+        """Get all unique file paths currently in the index.
+
+        Batched in 5,000-chunk increments to avoid OOM on large codebases.
+        """
+        BATCH_SIZE = 5000
+        offset = 0
+        file_paths = set()
+        while True:
+            batch = self.parents_collection.get(
+                include=["metadatas"],
+                limit=BATCH_SIZE,
+                offset=offset,
+            )
+            if not batch["ids"]:
+                break
+            for meta in batch["metadatas"]:
+                if "file_path" in meta:
+                    file_paths.add(meta["file_path"])
+            offset += BATCH_SIZE
+        return file_paths
     
     def delete_by_file(self, file_path: str):
         """Delete ALL chunks for a specific file from all collections."""

@@ -296,6 +296,16 @@ SKIP_SUFFIXES = (
     ".chunk.css",
 )
 
+
+def should_skip_dir(dir_name: str) -> bool:
+    """Return True if this directory should be pruned during os.walk."""
+    if dir_name.startswith(".") and dir_name not in KEEP_DOT_DIRS:
+        return True
+    if dir_name in SKIP_DIRS:
+        return True
+    return False
+
+
 def should_skip(file_path: str) -> bool:
     """Return True if this file should be skipped."""
 

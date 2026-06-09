@@ -72,14 +72,18 @@ Four ways to use it:
 | 🔎 **Semantic Search** | ChromaDB vector search on embedded code chunks (RAG) |
 | 🔬 **Code Review** | Multi-stage review pipeline: test coverage, blast radius, guidelines RAG, context-enriched deep analysis |
 | 🔄 **Incremental Reindex** | Content hash comparison — only re-embeds changed files, skips unchanged |
-| 🧩 **MCP Server** | 20 tools for VS Code Copilot / Claude Code / Cursor / Codex |
-| 🎙️ **Voice Interface** | Talk to your codebase — mic recording, local STT (faster-whisper), Copilot-driven routing (MCP) / Ollama routing (API), TTS response |
+| 🧩 **MCP Server** | 22 tools for VS Code Copilot / Claude Code / Cursor / Codex |
+| 🎙️ **Voice Interface** | Talk to your codebase — mic recording, local STT (faster-whisper), agent-driven routing (MCP + API), TTS response |
 | 🔬 **Graph Intelligence** | DuckDB persistent graph + igraph C-speed traversal: cycle detection, centrality, import chain tracing |
 | 🧬 **Corrective RAG** | Distance-based chunk filtering (free) + LLM answer grading + query rewriting for reliable answers |
 | 📦 **Parent-Child Chunking** | Full functions stored as parents, sub-chunks searched — retrieve complete context on match |
 | ⚡ **Parallel Embedding** | Producer-consumer pipeline — CPU chunking overlaps with GPU embedding |
-| 🏗️ **Multi-Provider LLM** | Ollama (local), OpenAI, Anthropic, Groq, Gemini, OpenRouter |
+| 🏗️ **Multi-Provider LLM** | Ollama (local), OpenAI, Anthropic, Groq, Gemini, OpenRouter, DeepSeek |
 | 📚 **Doc Indexing** | Index team docs (.md, .pdf, .txt) — search and ask questions with source citations |
+| 🔄 **Reflection** | Actor→Critic→Improve loop for code reviews — catches missed issues, removes false positives |
+| 🧑‍💻 **Human-in-the-Loop** | Approval gate before any code/file modification — LangGraph checkpoint + interrupt |
+| 🔬 **Deep Research** | Fan-out parallel search → merge → synthesize → reflect for complex cross-cutting questions |
+| 🏗️ **Architecture Health** | Graph stats, bottleneck files (betweenness centrality), PageRank, cycle detection with fix suggestions |
 | 🌐 **15+ Languages** | Python, JS, TS, Java, Go, Rust, Ruby, PHP, C#, C++, C, Dart, Kotlin, Swift, YAML |
 
 ### Supported Languages
@@ -366,7 +370,7 @@ Codewalk runs as an MCP (Model Context Protocol) server, so any AI agent that sp
    ![Start Server](assets/mcp-start-server.png)
 
 6. The server starts in the background (stdio transport)
-7. Open Copilot Chat → type **`@codewalk`** → all 20 tools are available
+7. Open Copilot Chat → type **`@codewalk`** → all 22 tools are available
 
    ![MCP tools list](assets/mcp-tools-list.png)
 
@@ -531,10 +535,11 @@ You just tell the AI to analyze — **the AI handles the rest automatically**.
 │  codewalk_get_reading_order     → optimal file reading sequence     │
 │  codewalk_get_execution_flow    → module/file dependency flow       │
 │  codewalk_get_architecture_health → bottlenecks, cycles, key files  │
-│  call_chain(source, target)     → trace import path between files   │
+│  codewalk_call_chain(source, target) → trace import path between    │
 │  codewalk_index_docs(path)      → index .md/.pdf/.txt docs          │
 │  codewalk_search_docs(query)    → search indexed documents           │
 │  codewalk_ask_docs(question)    → RAG answer grounded in docs        │
+│  codewalk_approve_action(text)  → HITL gate before code changes      │
 └─────────────────────────────────────────────────────────────────────┘
 
 ┌─────────────────────────────────────────────────────────────────────┐
@@ -543,6 +548,7 @@ You just tell the AI to analyze — **the AI handles the rest automatically**.
 │  codewalk_incremental_reindex   → re-embed only changed files       │
 │  codewalk_refresh_analysis      → re-scan without re-embedding      │
 │  codewalk_review_diff           → review git diff (context + checks) │
+│  codewalk_reflect_review        → self-critique review (reflection)  │
 │  codewalk_review_file           → review file vs codebase patterns  │
 │  codewalk_load_guidelines       → load team coding standards        │
 └─────────────────────────────────────────────────────────────────────┘
@@ -553,8 +559,8 @@ You just tell the AI to analyze — **the AI handles the rest automatically**.
 │  MCP:  codewalk_voice_ask  → mic → transcribe                       │
 │        Copilot picks tool  → calls it → codewalk_speak(summary)     │
 │                                                                     │
-│  API:  POST /voice/ask     → mic → transcribe → Ollama route        │
-│        execute_direct()    → format_voice_response() → MP3          │
+│  API:  POST /voice/ask     → mic → transcribe → agent invokes tool  │
+│        agent answer        → format_voice_response() → MP3          │
 └─────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -817,7 +823,7 @@ You want to ask a question by speaking instead of typing.
 
 **When to use:** Hands-free coding. You're reading code and want to ask "what does this function do?" without switching to the keyboard.
 
-> **Note:** Routing is done by Copilot (full LLM), not a separate model — no Ollama required for MCP voice. The REST API (`POST /voice/ask`) uses Ollama routing for the web UI where Copilot isn't available.
+> **Note:** Routing is done by Copilot (full LLM), not a separate model — no Ollama required for MCP voice. The REST API (`POST /voice/ask`) sends the transcript directly to the chat agent, which picks the right tool natively.
 
 ---
 
@@ -841,14 +847,14 @@ or
 
 #### "How does file A reach file B?"
 
-**Tool:** `call_chain(source, target)` — two file names
+**Tool:** `codewalk_call_chain(source, target)` — two file names
 
 You want to trace the import chain between two files — "how does a change in config.py eventually affect server.py?"
 
 ```
 @codewalk trace the import chain from config.py to server.py
 or
-@call_chain config.py server.py
+@codewalk_call_chain config.py server.py
 ```
 
 **Returns:** Shortest import path with hop count and full file paths.
@@ -873,10 +879,15 @@ or
 | After code changes | `@codewalk refresh the analysis` or `@codewalk_refresh_analysis` |
 | Update embeddings | `@codewalk reindex changed files` or `@codewalk_incremental_reindex` |
 | Review git diff | `@codewalk review my changes` or `@codewalk_review_diff` |
+| Self-critique review | `@codewalk reflect on this review` or `@codewalk_reflect_review` |
 | Review a file | `@codewalk review src/auth.py` or `@codewalk_review_file src/auth.py` |
 | Load guidelines | `@codewalk load guidelines from docs/` or `@codewalk_load_guidelines docs/` |
 | Architecture health | `@codewalk check architecture health` or `@codewalk_get_architecture_health` |
-| Trace import chain | `@codewalk trace chain from config.py to server.py` or `@call_chain config.py server.py` |
+| Trace import chain | `@codewalk trace chain from config.py to server.py` or `@codewalk_call_chain config.py server.py` |
+| Search team docs | `@codewalk search docs for deployment` or `@codewalk_search_docs deployment` |
+| Ask docs a question | `@codewalk how do we deploy?` or `@codewalk_ask_docs how do we deploy` |
+| Deep research | `@codewalk research how error handling works across the codebase` |
+| Approve action | `@codewalk_approve_action apply fix to auth.py` |
 | Ask by speaking (hands-free) | `@codewalk_voice_ask` → Copilot calls tool → `@codewalk_speak` |
 
 ---
@@ -1220,7 +1231,7 @@ curl -X POST http://localhost:8000/review/guidelines \
 
 #### `POST /voice/ask` — Voice-in, voice-out Q&A
 
-Upload an audio file (webm/mp3/wav from browser mic). Codewalk transcribes it, routes to the right tool, executes it, and returns both the text answer and a spoken MP3 response.
+Upload an audio file (webm/mp3/wav from browser mic). Codewalk transcribes it, sends it to the chat agent (which picks the right tool natively), and returns both the text answer and a spoken MP3 response.
 
 ```bash
 curl -X POST http://localhost:8000/voice/ask \
@@ -1232,7 +1243,6 @@ curl -X POST http://localhost:8000/voice/ask \
 ```json
 {
   "question": "what does the auth module do?",
-  "tool": "codewalk_get_module_info",
   "answer": "The auth module contains 5 files handling JWT validation...",
   "speech": "The auth module handles JWT validation and permissions.",
   "audio_base64": "SUQzBAAAAAAAI1RTU0UAAAA..."
@@ -1243,7 +1253,7 @@ curl -X POST http://localhost:8000/voice/ask \
 - `thread_id` *(optional)*: Conversation thread ID. Default: `"voice"`
 - `audio_base64`: Base64-encoded MP3 of the spoken answer — decode and play in the browser
 
-**Pipeline:** audio upload → faster-whisper STT → LLM router → tool execution → summarize → edge-tts → MP3 response
+**Pipeline:** audio upload → faster-whisper STT → chat agent (picks tool natively) → summarize → edge-tts → MP3 response
 
 ---
 
@@ -1259,6 +1269,80 @@ curl http://localhost:8000/health
   "status": "ok"
 }
 ```
+
+---
+
+## 🚀 Deployment
+
+### Docker (Recommended for Production)
+
+Codewalk ships with a multi-stage Dockerfile and docker-compose for production deployment.
+
+**Requirements:** Docker + Docker Compose
+
+```bash
+# Clone and enter the repo
+git clone https://github.com/gupta29470/codewalk.git
+cd codewalk
+
+# Create .env with your secrets
+cp env.example.txt .env
+# Edit .env — fill in LLM_PROVIDER, LLM_MODEL, and at least one API key
+
+# Build and start (includes Postgres, API, and Caddy reverse proxy)
+docker compose -f deploy/docker-compose.yml up -d
+```
+
+**Services:**
+| Service | Port | Description |
+|---------|------|-------------|
+| Postgres | 5432 (internal) | Persistent database for cloud mode |
+| Codewalk API | 8000 | FastAPI backend |
+| Caddy | 80 / 443 | Reverse proxy + auto-HTTPS (with domain) |
+
+**Health check:** `curl http://localhost/health`
+
+### Hetzner VPS (One-Click Setup)
+
+For a dedicated server deployment on Hetzner Cloud:
+
+```bash
+# 1. Create a CPX21 server (Ubuntu 24.04) on Hetzner Cloud
+# 2. Add your SSH key
+# 3. SSH in and run the setup script
+
+ssh root@<your-server-ip>
+
+# Download and run the setup script
+curl -fsSL https://raw.githubusercontent.com/gupta29470/codewalk/main/deploy/hetzner-setup.sh | bash
+
+# Fill in secrets
+nano /opt/codewalk/.env
+
+# Start services
+cd /opt/codewalk && docker compose up -d
+```
+
+See [`deploy/DEPLOY.md`](deploy/DEPLOY.md) for the full deployment guide including:
+- Pre-deployment checklist
+- GitHub Actions CI/CD setup
+- Domain + HTTPS configuration
+- Post-deployment verification
+- Troubleshooting
+
+### CI/CD (GitHub Actions)
+
+Push to `main` automatically builds and deploys:
+
+1. GitHub Actions builds Docker image → pushes to GHCR
+2. SSH into Hetzner server → pulls latest image → restarts services
+
+**Required GitHub Secrets:**
+| Secret | Description |
+|--------|-------------|
+| `HETZNER_HOST` | Your server IP |
+| `HETZNER_USER` | SSH user (usually `root`) |
+| `HETZNER_SSH_KEY` | Private SSH key for deployment |
 
 ---
 
@@ -1330,7 +1414,7 @@ curl http://localhost:8000/health
 │                     VOICE LAYER                          │
 │                                                          │
 │   ┌── mic ──► stt.py ──► router.py ──► tool exec ──┐    │
-│   │  sounddevice   faster-whisper   qwen2.5:1.5b     │    │
+│   │  sounddevice   faster-whisper   get_llm()          │    │
 │   │  (record)      (transcribe)     (route to tool) │    │
 │   │                                                 │    │
 │   │            ┌─ content tool? ─┐                   │    │
@@ -1346,10 +1430,19 @@ curl http://localhost:8000/health
 │   Voice Flow:                                            │
 │   🔔 beep → 🎙️ record (30s max, 5s silence stop)        │
 │   → 📝 transcribe (faster-whisper, local)                │
-│   → 🧠 route (qwen2.5:1.5b picks the right tool + args) │
+│   → 🧠 route (configured LLM picks the right tool + args) │
 │   → ⚙️ execute tool                                      │
 │   → 🔇 admin tool? → text result only (silent)           │
 │   → 🔊 content tool? → main LLM → speech → edge-tts     │
+├──────────────────────────────────────────────────────────┤
+│                     CORE LAYER (v2.4–v2.7)               │
+│                                                          │
+│   core/reflect.py   → Actor→Critic→Improve loop         │
+│   core/hitl.py      → LangGraph interrupts + checkpoint │
+│   core/fanout.py    → Parallel fan-out/fan-in graphs    │
+│                                                          │
+│   Used by: review (reflect), agent (hitl), research     │
+│   (fanout) — generic, composable, zero duplication       │
 ├──────────────────────────────────────────────────────────┤
 │                     LLM LAYER                            │
 │                                                          │
@@ -1399,17 +1492,29 @@ codewalk/
 │   │   ├── review_prompts.py      #   System + user prompts (OWASP checklist)
 │   │   └── reviewer.py            #   8-step review pipeline orchestrator
 │   ├── api/                       # FastAPI REST
-│   │   ├── main.py                #   18 endpoints
+│   │   ├── main.py                #   30+ endpoints
 │   │   ├── models.py              #   Pydantic schemas
-│   │   └── state.py               #   Singleton app state
+│   │   ├── state.py               #   Singleton app state + restart resilience
+│   │   └── cloud.py               #   Cloud mode (GitHub App + webhooks)
 │   ├── voice/                     # Voice interface
 │   │   ├── stt.py                 #   Mic recording + faster-whisper transcription
 │   │   ├── tts.py                 #   edge-tts speech synthesis (thread-safe)
-│   │   ├── router.py              #   LLM-based tool routing (qwen2.5:1.5b)
+│   │   ├── router.py              #   LLM-based tool routing (via get_llm)
 │   │   ├── backends.py            #   Tool execution bridge
 │   │   └── companion.py           #   Standalone voice loop
+│   ├── core/                      # Reusable LangGraph patterns (v2.4–v2.7)
+│   │   ├── reflect.py             #   Actor→Critic→Improve loop
+│   │   ├── hitl.py                #   Human-in-the-loop interrupts
+│   │   └── fanout.py              #   Parallel fan-out/fan-in graphs
+│   ├── research/                  # Deep research mode (v2.7)
+│   │   ├── planner.py             #   Decompose question into sub-questions
+│   │   └── synthesizer.py         #   Merge parallel findings into report
+│   ├── worker/                    # Background job worker
+│   │   ├── indexer.py             #   Async repo indexing
+│   │   └── github_app.py          #   GitHub App webhook handler
+│   ├── cli.py                     #   Command-line interface
 │   └── mcp/                       # Model Context Protocol
-│       └── server.py              #   20 MCP tools (stdio)
+│       └── server.py              #   22 MCP tools (stdio)
 │
 ├── frontend/                      # Next.js 14 web UI
 │   └── src/app/
@@ -1423,6 +1528,10 @@ codewalk/
 │       ├── execution-flow/page.tsx#   Flow diagram viewer
 │       ├── review/page.tsx        #   Code review (diff/file/guidelines)
 │       ├── voice/page.tsx         #   Voice assistant (mic → transcribe → speak)
+│       ├── admin/page.tsx         #   Admin dashboard
+│       ├── architecture/page.tsx  #   Architecture health viewer
+│       ├── docs/page.tsx          #   Team docs search & ask
+│       ├── research/page.tsx      #   Deep research interface
 │       └── incremental-reindex/   #   Smart reindex page
 │           └── page.tsx
 │
@@ -1431,7 +1540,18 @@ codewalk/
 │   ├── graph.duckdb               # DuckDB graph database (relationships)
 │   └── meta.json                  # Version tracking + index metadata
 │
+├── deploy/                        # Production deployment
+│   ├── Dockerfile                 #   Multi-stage Python 3.11 build
+│   ├── docker-compose.yml         #   Postgres + API + Caddy orchestration
+│   ├── Caddyfile                  #   Reverse proxy config (IP or domain mode)
+│   ├── hetzner-setup.sh           #   One-click Hetzner VPS provisioning
+│   └── DEPLOY.md                  #   Full deployment guide
+│
+├── .github/workflows/             # CI/CD
+│   └── deploy.yml                 #   Build Docker image → GHCR → deploy
+│
 ├── requirements.txt               # Python dependencies
+├── env.example.txt                # Environment variable template
 ├── .env                           # Configuration (gitignored)
 └── .vscode/mcp.json               # MCP server config
 ```
@@ -1453,6 +1573,12 @@ codewalk/
 | `GOOGLE_API_KEY` | — | Google Gemini API key |
 | `OPENROUTER_API_KEY` | — | OpenRouter API key |
 | `REVIEW_GUIDELINES_PATH` | — | Path to directory with team coding guidelines (.md, .txt, .rst) |
+| `CODE_DOCS_PATH` | — | Path to team documents for semantic search |
+| `POSTGRES_PASSWORD` | — | Postgres password (for Docker/server deployment) |
+| `CORS_ORIGINS` | `*` | Comma-separated allowed origins (e.g. `https://yourdomain.com`) |
+| `RATE_LIMIT_REQUESTS` | `60` | Max requests per IP per window |
+| `RATE_LIMIT_WINDOW` | `60` | Rate limit window in seconds |
+| `INDEX_STORAGE_PATH` | `/var/codewalk` | Path for ChromaDB/DuckDB data (Docker default) |
 
 ---
 
@@ -1466,6 +1592,7 @@ codewalk/
 | **Google Gemini** | `gemini` | `GOOGLE_API_KEY` | Gemini models |
 | **Groq** | `groq` | `GROQ_API_KEY` | Groq models |
 | **OpenRouter** | `openrouter` | `OPENROUTER_API_KEY` | Access to 100+ models |
+| **DeepSeek** | `deepseek` | `DEEPSEEK_API_KEY` | DeepSeek V3, R1 models |
 
 ---
 
@@ -1512,7 +1639,7 @@ Add this to each target repo's `.gitignore`:
 | **Graph Runtime** | igraph (C-speed traversal, in-memory from DuckDB) |
 | **Voice STT** | faster-whisper (local, small model, int8) |
 | **Voice TTS** | edge-tts (free, en-US-AriaNeural) |
-| **Voice Router** | Ollama qwen2.5:1.5b  (local, ~300MB) |
+| **Voice Router** | User's configured LLM (via get_llm()) |
 | **Embeddings** | Jina Code Embeddings 1.5B (1536-dim, MPS/CUDA) |
 | **Code Parsing** | Tree-sitter (15+ language grammars) |
 | **Frontend** | Next.js 14, React 18, TypeScript 5 |

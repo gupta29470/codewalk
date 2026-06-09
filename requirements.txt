@@ -12,6 +12,7 @@ langchain-anthropic
 langchain-google-genai
 langchain-ollama
 sentence-transformers
+langgraph-checkpoint-sqlite
 
 
 # Vector store (local)
@@ -48,6 +49,7 @@ pydantic
 pydantic-settings
 python-dotenv
 unidiff
+packaging
 
 # MCP
 mcp
@@ -61,3 +63,20 @@ numpy
 # Graph
 duckdb
 igraph
+
+# Datasets
+datasets
+
+# Ragas
+ragas
+
+# Server
+uvicorn[standard]
+
+# Misc
+typer
+PyJWT
+PyGithub
+psycopg2-binary
+python-multipart
+pyyaml     

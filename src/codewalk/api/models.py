@@ -27,6 +27,8 @@ class ChatResponse(BaseModel):
     """POST /chat — response body."""
     answer: str
     thread_id: str
+    interrupted: bool = False
+    proposed_action: str = ""
 
 class ModuleResponse(BaseModel):
     """GET /modules/{name} — response body."""
@@ -61,9 +63,26 @@ class ReviewRequest(BaseModel):
     staged: bool = False
     target_branch: str | None = None
     commit: str | None = None
+    reflect: bool = False  # if True, run reflection pass after initial review
+    iterations: int = 1    # reflection iterations (only used when reflect=True)
 
 class ReviewFileRequest(BaseModel):
     """POST /review/file — request body."""
+    file_path: str
+
+class ReviewResponse(BaseModel):
+    """POST /review — response body."""
+    verdict: str
+    verdict_reason: str
+    issues: list[dict]
+    summary: str
+    files_reviewed: int
+    lines_added: int
+    lines_removed: int
+
+class ReviewFileResponse(BaseModel):
+    """POST /review/file — response body."""
+    review: str
     file_path: str
 
 class GuidelinesRequest(BaseModel):
@@ -85,3 +104,34 @@ class DocsSearchRequest(BaseModel):
 class DocsAskRequest(BaseModel):
     question: str
     n_results: int = 5
+
+class ApproveRequest(BaseModel):
+    thread_id: str         
+    action: str = "approve"
+
+class ResearchRequest(BaseModel):
+    question: str
+    depth: str = "standard"   # quick | standard | deep
+
+class FixItem(BaseModel):
+    """A single code fix to apply."""
+    file_path: str
+    old_code: str
+    new_code: str
+class ApplyFixesRequest(BaseModel):
+    """POST /review/apply — request body."""
+    fixes: list[FixItem]
+
+class AppliedFix(BaseModel):
+    """One successfully applied fix."""
+    file_path: str
+    old_code: str
+    new_code: str
+    message: str
+
+
+class ApplyFixesResponse(BaseModel):
+    """POST /review/apply — response body."""
+    applied: list[AppliedFix]
+    failed: dict | None = None
+    total: int

@@ -6,7 +6,7 @@ import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
 import { Card } from "@/components/ui/card";
 import { ScrollArea } from "@/components/ui/scroll-area";
-import { Loader2, Send, Bot, User, Wifi, WifiOff } from "lucide-react";
+import { Loader2, Send, Bot, User, Wifi, WifiOff, CheckCircle2, XCircle, AlertTriangle } from "lucide-react";
 import ReactMarkdown from "react-markdown";
 
 interface Message {
@@ -31,15 +31,19 @@ export default function ChatPage() {
     ]);
     const [input, setInput] = useState("");
     const [loading, setLoading] = useState(false);
+    const [activeToolName, setActiveToolName] = useState<string | null>(null);
     const [threadId] = useState(() => `thread-${Date.now()}`);
     const [connected, setConnected] = useState(true);
+    const [hitlPending, setHitlPending] = useState(false);
+    const [hitlAction, setHitlAction] = useState("");
+    const [hitlLoading, setHitlLoading] = useState(false);
     const scrollRef = useRef<HTMLDivElement>(null);
 
     useEffect(() => {
         if (scrollRef.current) {
             scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
         }
-    }, [messages]);
+    }, [messages, hitlPending]);
 
     // Connection check on mount + periodic polling
     useEffect(() => {
@@ -64,23 +68,95 @@ export default function ChatPage() {
         setMessages((prev) => [...prev, userMsg]);
         setInput("");
         setLoading(true);
+        setActiveToolName(null);
+        setHitlPending(false);
+        setHitlAction("");
+
+        // Add a streaming assistant message (starts empty, tokens appended live)
+        setMessages((prev) => [...prev, { role: "assistant", content: "" }]);
 
         try {
-            const res = await api.chat(trimmed, threadId);
-            setMessages((prev) => [
-                ...prev,
-                { role: "assistant", content: res.answer },
-            ]);
+            await api.streamChat(trimmed, threadId, (event) => {
+                if (event.type === "token" && event.content) {
+                    // Append each token to the last assistant message
+                    setMessages((prev) => {
+                        const updated = [...prev];
+                        updated[updated.length - 1] = {
+                            role: "assistant",
+                            content: updated[updated.length - 1].content + event.content,
+                        };
+                        return updated;
+                    });
+                } else if (event.type === "tool_start" && event.name) {
+                    setActiveToolName(event.name);
+                } else if (event.type === "tool_end") {
+                    setActiveToolName(null);
+                } else if (event.type === "done") {
+                    setLoading(false);
+                    setActiveToolName(null);
+                } else if (event.type === "interrupted") {
+                    setLoading(false);
+                    setActiveToolName(null);
+                    setHitlPending(true);
+                    setHitlAction(event.proposed_action || "unknown action");
+                } else if (event.type === "error") {
+                    setMessages((prev) => {
+                        const updated = [...prev];
+                        updated[updated.length - 1] = {
+                            role: "assistant",
+                            content: `Error: ${event.message ?? "Something went wrong"}`,
+                        };
+                        return updated;
+                    });
+                    setLoading(false);
+                    setActiveToolName(null);
+                }
+            });
+        } catch (err) {
+            setMessages((prev) => {
+                const updated = [...prev];
+                updated[updated.length - 1] = {
+                    role: "assistant",
+                    content: `Error: ${err instanceof Error ? err.message : "Something went wrong"}`,
+                };
+                return updated;
+            });
+        } finally {
+            setLoading(false);
+            setActiveToolName(null);
+        }
+    }
+
+    async function handleHitl(action: "approve" | "reject") {
+        setHitlLoading(true);
+        try {
+            const res = await api.chatApprove(threadId, action);
+
+            if (res.status === "rejected") {
+                setMessages((prev) => [
+                    ...prev,
+                    { role: "assistant", content: res.result || res.message || "Action rejected." },
+                ]);
+            } else if (res.status === "completed") {
+                setMessages((prev) => [
+                    ...prev,
+                    { role: "assistant", content: typeof res.result === "string" ? res.result : "Action completed." },
+                ]);
+            } else if (res.status === "interrupted") {
+                setMessages((prev) => [
+                    ...prev,
+                    { role: "assistant", content: "Agent requires another approval." },
+                ]);
+            }
         } catch (err) {
             setMessages((prev) => [
                 ...prev,
-                {
-                    role: "assistant",
-                    content: `Error: ${err instanceof Error ? err.message : "Something went wrong"}`,
-                },
+                { role: "assistant", content: `Approval failed: ${err instanceof Error ? err.message : "Unknown error"}` },
             ]);
         } finally {
-            setLoading(false);
+            setHitlLoading(false);
+            setHitlPending(false);
+            setHitlAction("");
         }
     }
 
@@ -91,7 +167,7 @@ export default function ChatPage() {
         }
     }
 
-    const showSuggestions = messages.length <= 1 && !loading;
+    const showSuggestions = messages.length <= 1 && !loading && !hitlPending;
 
     return (
         <div className="flex flex-col h-[calc(100vh-3rem)]">
@@ -145,13 +221,62 @@ export default function ChatPage() {
                             </div>
                         ))}
 
+                        {/* HITL Approval Card */}
+                        {hitlPending && (
+                            <div className="flex gap-3">
+                                <div className="h-8 w-8 rounded-full bg-primary flex items-center justify-center flex-shrink-0">
+                                    <Bot className="h-4 w-4 text-primary-foreground" />
+                                </div>
+                                <Card className="bg-amber-50 dark:bg-amber-950 border-amber-200 dark:border-amber-800 p-4 max-w-[80%]">
+                                    <div className="flex items-start gap-2 mb-3">
+                                        <AlertTriangle className="h-5 w-5 text-amber-600 dark:text-amber-400 flex-shrink-0 mt-0.5" />
+                                        <div>
+                                            <p className="text-sm font-medium text-amber-800 dark:text-amber-200">
+                                                The agent wants to take an action
+                                            </p>
+                                            <p className="text-xs text-amber-700 dark:text-amber-300 mt-1 font-mono">
+                                                {hitlAction}
+                                            </p>
+                                        </div>
+                                    </div>
+                                    <div className="flex gap-2">
+                                        <Button
+                                            size="sm"
+                                            variant="default"
+                                            onClick={() => handleHitl("approve")}
+                                            disabled={hitlLoading}
+                                            className="bg-green-600 hover:bg-green-700"
+                                        >
+                                            <CheckCircle2 className="h-4 w-4 mr-1" />
+                                            Approve
+                                        </Button>
+                                        <Button
+                                            size="sm"
+                                            variant="outline"
+                                            onClick={() => handleHitl("reject")}
+                                            disabled={hitlLoading}
+                                            className="border-red-300 text-red-600 hover:bg-red-50 hover:text-red-700"
+                                        >
+                                            <XCircle className="h-4 w-4 mr-1" />
+                                            Reject
+                                        </Button>
+                                    </div>
+                                </Card>
+                            </div>
+                        )}
+
                         {loading && (
                             <div className="flex gap-3">
                                 <div className="h-8 w-8 rounded-full bg-primary flex items-center justify-center flex-shrink-0">
                                     <Bot className="h-4 w-4 text-primary-foreground" />
                                 </div>
-                                <div className="bg-muted rounded-lg px-4 py-2">
-                                    <Loader2 className="h-4 w-4 animate-spin" />
+                                <div className="bg-muted rounded-lg px-4 py-2 text-sm flex items-center gap-2">
+                                    <Loader2 className="h-4 w-4 animate-spin flex-shrink-0" />
+                                    {activeToolName && (
+                                        <span className="text-muted-foreground">
+                                            {activeToolName.replace(/_/g, " ")}…
+                                        </span>
+                                    )}
                                 </div>
                             </div>
                         )}
@@ -183,8 +308,9 @@ export default function ChatPage() {
                     onKeyDown={handleKeyDown}
                     rows={1}
                     className="resize-none"
+                    disabled={hitlPending}
                 />
-                <Button onClick={() => handleSend()} disabled={loading || !input.trim()}>
+                <Button onClick={() => handleSend()} disabled={loading || !input.trim() || hitlPending}>
                     <Send className="h-4 w-4" />
                 </Button>
             </div>

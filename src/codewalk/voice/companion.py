@@ -5,7 +5,7 @@ import httpx
 
 from src.codewalk.voice.stt import record_audio, transcribe
 from src.codewalk.voice.tts import speak
-from src.codewalk.voice.router import route, route_with_ollama
+from src.codewalk.voice.router import route
 from src.codewalk.voice.backends import execute_direct, execute_mcp_sync
 import re
 
@@ -147,7 +147,7 @@ def main():
 
             # 3. Route
             print("🧠 Routing...")
-            route_result = route_with_ollama(transcript)
+            route_result = route(transcript)
             tool_name = route_result.get("tool")
             arguments = route_result.get("arguments", {})
 

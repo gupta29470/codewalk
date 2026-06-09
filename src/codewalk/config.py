@@ -34,6 +34,10 @@ class Settings(BaseSettings):
     # Can also be passed directly to codewalk_index_docs(path)
     code_docs_path: str = os.getenv("CODE_DOCS_PATH", "")
 
+    checkpoint_db_path: str = ".codewalk/checkpoints.sqlite"
+
+    # CORS
+    cors_origins: str = os.getenv("CORS_ORIGINS", "*")
 
     class Config:
         env_file = ".env"

@@ -1,5 +1,4 @@
 import json
-import httpx
 from src.codewalk.config import settings
 
 # ── Tool registry: all 16 Codewalk tools with schemas ──
@@ -71,7 +70,22 @@ TOOL_REGISTRY = {
             "target": {"type": "string", "description": "Target file name or path"},
         },
     },
+    "codewalk_index_docs": {
+        "description": "Index a folder of documents (.md, .pdf, .txt) for semantic search.",
+        "parameters": {"docs_path": {"type": "string", "description": "Path to documents folder"}},
+    },
+    "codewalk_search_docs": {
+        "description": "Search indexed documents for content matching a query.",
+        "parameters": {"query": {"type": "string", "description": "What to search for"}},
+    },
+    "codewalk_ask_docs": {
+        "description": "Ask a question and get an answer grounded in indexed documents.",
+        "parameters": {"question": {"type": "string", "description": "The question to answer from docs"}},
+    },
     # "codewalk_voice_ask" — not in routing map (voice_ask IS the router entry point)
+    # "codewalk_speak" — not routable (TTS output, not a query)
+    # "codewalk_approve_action" — not routable via voice (requires explicit text)
+    # "codewalk_reflect_review" — not routable via voice (requires initial_review text)
 }
 
 
@@ -159,6 +173,15 @@ User: "how does pipeline connect to config"
 User: "import chain from scanner to vector store"
 {{"tool": "codewalk_call_chain", "arguments": {{"source": "scanner.py", "target": "vector_store.py"}}}}
 
+User: "index our team docs"
+{{"tool": "codewalk_index_docs", "arguments": {{"docs_path": "/path/to/docs"}}}}
+
+User: "search docs for deployment process"
+{{"tool": "codewalk_search_docs", "arguments": {{"query": "deployment process"}}}}
+
+User: "how do we deploy to production"
+{{"tool": "codewalk_ask_docs", "arguments": {{"question": "how do we deploy to production"}}}}
+
 Return ONLY valid JSON, nothing else:
 {{"tool": "tool_name", "arguments": {{...}}}}
 
@@ -175,52 +198,10 @@ def _build_tools_description() -> str:
         lines.append(f"- {name}({params}): {info['description']}")
     return "\n".join(lines)
 
-def route_with_ollama(transcript: str, model: str = "qwen2.5:1.5b") -> dict:
-    """Route using local Ollama (free, for Ollama users and MCP CLI).
+def route(transcript: str) -> dict:
+    """Route a voice transcript to the best Codewalk tool.
 
-    Args:
-        transcript: User's spoken text.
-        model: Ollama model name. Default qwen2.5:1.5b (398MB).
-
-    Returns:
-        {"tool": "tool_name", "arguments": {...}} or {"tool": None}
-    """
-    system_prompt = ROUTER_SYSTEM_PROMPT.format(
-        tools_description=_build_tools_description()
-    )
-
-    response = httpx.post(
-        "http://localhost:11434/api/chat",
-        json={
-            "model": model,
-            "messages": [
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": transcript},
-            ],
-            "stream": False,
-            "format": "json",  # force JSON output
-        },
-        timeout=30,
-    )
-
-    response.raise_for_status()
-    content = response.json()["message"]["content"]
-
-    try:
-        result = json.loads(content)
-        # Validate tool exists
-        if result.get("tool") and result["tool"] not in TOOL_REGISTRY:
-            return {"tool": None, "arguments": {}}
-        return result
-    except json.JSONDecodeError:
-        return {"tool": None, "arguments": {}}
-    
-
-def route_with_llm(transcript: str) -> dict:
-    """Route using the user's configured LLM (for API key users).
-
-    Uses get_llm() from config — whatever provider they have
-    (OpenAI, Anthropic, Groq, etc.).
+    Uses the user's configured LLM (via get_llm()) for routing.
 
     Returns:
         {"tool": "tool_name", "arguments": {...}} or {"tool": None}
@@ -248,14 +229,3 @@ def route_with_llm(transcript: str) -> dict:
         return result
     except (json.JSONDecodeError, KeyError):
         return {"tool": None, "arguments": {}}
-    
-def route(transcript: str) -> dict:
-    """Auto-pick routing strategy based on config.
-
-    - If provider is "ollama" → use qwen2.5:1.5b for routing
-    - If provider has an API key → use get_llm() for routing
-    """
-    if settings.llm_provider == "ollama":
-        return route_with_ollama(transcript)
-    else:
-        return route_with_llm(transcript)
