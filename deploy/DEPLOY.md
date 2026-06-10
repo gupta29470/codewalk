@@ -52,6 +52,7 @@ Before touching any server, verify these items locally.
 - [ ] Repository has `master` branch as default
 - [ ] GitHub Secrets configured (see [GitHub Secrets](#github-secrets))
 - [ ] GitHub Container Registry (GHCR) enabled for the repo
+- [ ] GitHub App created (see [GitHub App Setup](#github-app-setup)) — required for cloud mode
 
 ---
 
@@ -238,6 +239,108 @@ Watch the workflow run: **Repo → Actions → Build & Deploy**
    - Runs: `docker compose pull codewalk-api`
    - Runs: `docker compose up -d --remove-orphans`
    - Runs: `docker system prune -f` (cleans old images)
+
+---
+
+## GitHub App Setup
+
+Required for **cloud mode** — automatic repo indexing via webhooks.
+
+### 1. Create the GitHub App
+
+1. Go to **GitHub → Settings → Developer settings → GitHub Apps → New GitHub App**
+2. Fill in:
+
+| Field | Value |
+|-------|-------|
+| **GitHub App name** | `codewalk-yourname` (must be globally unique) |
+| **Homepage URL** | `http://62.238.42.150` (your Hetzner IP) |
+| **Webhook URL** | `http://62.238.42.150/webhooks/github` |
+| **Webhook secret** | Generate with `openssl rand -hex 32` |
+
+3. **Permissions:**
+
+| Permission | Access | Why |
+|------------|--------|-----|
+| **Repository contents** | Read-only | Clone/pull repos |
+| **Metadata** | Read-only | List repos in installation |
+| **Pull requests** | Read & write | Review PRs, post comments |
+| **Issues** | Read & write | Create issues for findings |
+
+4. **Subscribe to events:**
+   - ✅ Push
+   - ✅ Pull request
+   - ✅ Installation
+   - ✅ Installation repositories
+
+5. **Where can this GitHub App be installed?**
+   - ✅ Any account (for public repos)
+   - Or "Only on this account" (for private testing)
+
+6. Click **Create GitHub App**
+
+### 2. Get Credentials
+
+After creation, note these values:
+
+| Credential | Where | Env Var |
+|------------|-------|---------|
+| **App ID** | Top of app settings page | `GITHUB_APP_ID` |
+| **Client ID** | Same page | (not needed for webhooks) |
+| **Private Key** | "Private keys" → Generate → download `.pem` | `GITHUB_APP_PRIVATE_KEY` |
+| **Webhook Secret** | The secret you set above | `GITHUB_WEBHOOK_SECRET` |
+
+**Private key format:** Paste the entire `.pem` file content (including `-----BEGIN RSA PRIVATE KEY-----` and `-----END RSA PRIVATE KEY-----`) into the env var. It should be a single line with `\n` preserved, or the actual multiline PEM.
+
+### 3. Install the App
+
+1. In your GitHub App settings → **Install App** (left sidebar)
+2. Select your account or organization
+3. Choose repositories:
+   - **All repositories** — Codewalk indexes every repo you push to
+   - **Only select repositories** — choose specific repos
+4. Click **Install**
+
+### 4. Update Server `.env`
+
+SSH into your server and add the cloud mode variables:
+
+```bash
+ssh -i ~/.ssh/hetzner_codewalk root@62.238.42.150
+cat >> /opt/codewalk/.env << 'EOF'
+GITHUB_APP_ID=123456
+GITHUB_APP_PRIVATE_KEY=-----BEGIN RSA PRIVATE KEY-----
+...
+-----END RSA PRIVATE KEY-----
+GITHUB_WEBHOOK_SECRET=your-webhook-secret
+ADMIN_API_KEY=$(openssl rand -hex 32)
+EOF
+cd /opt/codewalk && docker compose restart codewalk-api
+```
+
+### 5. Verify Webhook Delivery
+
+1. In your GitHub App settings → **Advanced** → **Recent Deliveries**
+2. You should see `ping` events with green ✅
+3. If red ❌, check:
+   - Hetzner firewall allows port 80
+   - Caddy is running: `docker ps`
+   - API is healthy: `curl http://localhost/health`
+
+### 6. Test End-to-End
+
+Push code to a repo with the app installed:
+
+```bash
+git commit --allow-empty -m "test: trigger codewalk indexing"
+git push origin master
+```
+
+Check indexing status:
+```bash
+curl -H "X-Admin-Key: $ADMIN_API_KEY" \
+  http://62.238.42.150/admin/repos
+```
 
 ---
 

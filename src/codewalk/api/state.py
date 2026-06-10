@@ -63,6 +63,65 @@ class _PgHelper:
         self._run(sql, *args)
 
 
+def _init_cloud_tables(conn):
+    """Create cloud-mode tables if they don't exist. Idempotent."""
+    with conn.cursor() as cur:
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS repos (
+                id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                full_name       TEXT UNIQUE NOT NULL,
+                name            TEXT NOT NULL,
+                owner           TEXT NOT NULL,
+                clone_url       TEXT NOT NULL,
+                branch          TEXT NOT NULL DEFAULT 'master',
+                installation_id TEXT NOT NULL DEFAULT '',
+                repo_token      TEXT NOT NULL DEFAULT '',
+                last_indexed_sha VARCHAR(40) DEFAULT NULL,
+                index_status    VARCHAR(20) DEFAULT 'pending',
+                storage_path    TEXT,
+                created_at      TIMESTAMP DEFAULT NOW(),
+                updated_at      TIMESTAMP DEFAULT NOW()
+            )
+        """)
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_repos_full_name ON repos(full_name)")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_repos_status ON repos(index_status)")
+
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS jobs (
+                id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                repo_name       TEXT NOT NULL REFERENCES repos(full_name),
+                commit_sha      TEXT NOT NULL,
+                commit_message  TEXT NOT NULL DEFAULT '',
+                status          TEXT NOT NULL DEFAULT 'queued',
+                error           TEXT,
+                queued_at       TIMESTAMP DEFAULT NOW(),
+                started_at      TIMESTAMP,
+                finished_at     TIMESTAMP
+            )
+        """)
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_jobs_status ON jobs(status)")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_jobs_repo ON jobs(repo_name)")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_jobs_queued ON jobs(queued_at) WHERE status='queued'")
+
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS webhook_deliveries (
+                id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                event_type      TEXT NOT NULL,
+                delivery_id     TEXT,
+                repo_full_name  TEXT,
+                commit_sha      TEXT,
+                payload_size    INTEGER,
+                status          TEXT DEFAULT 'received',
+                error           TEXT,
+                created_at      TIMESTAMP DEFAULT NOW()
+            )
+        """)
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_webhooks_repo ON webhook_deliveries(repo_full_name)")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_webhooks_delivery ON webhook_deliveries(delivery_id)")
+
+        conn.commit()
+
+
 def get_db():
     """Get or create the Postgres connection wrapper (cloud/server mode only).
     Requires DATABASE_URL env var."""
@@ -75,6 +134,7 @@ def get_db():
             raise RuntimeError("DATABASE_URL not set — required for cloud mode.")
         conn = psycopg2.connect(db_url, cursor_factory=psycopg2.extras.RealDictCursor)
         conn.autocommit = True
+        _init_cloud_tables(conn)
         _db = _PgHelper(conn)
     return _db
 
