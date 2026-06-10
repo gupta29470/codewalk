@@ -231,7 +231,7 @@ def index_from_paths_parallel(paths: list[str], repo_path: str = "",
 
 
 def reindex(repo_path: str = "", collection_name: str = "codebase",
-            persist_dir: str = "./data/chroma") -> dict:
+            persist_dir: str = "./data/chroma", team_config=None) -> dict:
     """Smart re-index: only re-embed files that changed, add new, remove deleted.
 
     Thin wrapper around incremental_reindex() that processes ALL indexed files.
@@ -244,10 +244,14 @@ def reindex(repo_path: str = "", collection_name: str = "codebase",
 
     # If nothing indexed yet, scan disk for all files
     if not indexed_files:
-        all_files = scan_directory(repo_path)
+        if team_config:
+            from src.codewalk.team_config import team_scan_directory
+            all_files = team_scan_directory(repo_path, team_config)
+        else:
+            all_files = scan_directory(repo_path)
         indexed_files = [f["file_path"] for f in all_files]
 
-    result = incremental_reindex(indexed_files, repo_path, collection_name, persist_dir=persist_dir)
+    result = incremental_reindex(indexed_files, repo_path, collection_name, persist_dir=persist_dir, team_config=team_config)
 
     # Map to return format for /analyze callers
     return {
@@ -386,17 +390,22 @@ def write_manifest(
     commit_sha: str = "",
     commit_message: str = "",
     branch: str = "",
+    index_version: int = 1,
+    embedding_model: str = "",
+    graph_version: str = "1.0",
+    minimum_mcp_version: str = "1.0.0",
 ):
     """Write manifest.json into index_dir (.codewalk/ or incoming/).
 
     Single source of truth for index metadata — used by:
       - Local indexing (file_count + chunk_count, commit fields empty)
       - Cloud worker (all fields populated after git clone)
-      - MCP ensure_local_index (reads commit_sha to check staleness)
+      - MCP ensure_local_index (reads index_version to check staleness)
       - state._check_upgrade_banner (reads codewalk_version)
     """
     manifest = {
         "codewalk_version": CODEWALK_VERSION,
+        "index_version": index_version,
         "indexed_at": datetime.now(timezone.utc).isoformat(),
         "file_count": file_count,
         "chunk_count": chunk_count,
@@ -404,6 +413,9 @@ def write_manifest(
         "commit_sha": commit_sha,
         "commit_message": commit_message,
         "branch": branch,
+        "embedding_model": embedding_model,
+        "graph_version": graph_version,
+        "minimum_mcp_version": minimum_mcp_version,
     }
     out = _Path(index_dir) / "manifest.json"
     out.parent.mkdir(parents=True, exist_ok=True)

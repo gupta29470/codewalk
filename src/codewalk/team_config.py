@@ -7,7 +7,7 @@ import yaml
 @dataclass
 class TeamConfig:
     exclude: list[str] = field(default_factory=list)
-    branch: str = "main"
+    branch: str = "master"
     guidelines_path: str = ""   # relative to repo root
     docs_path: str = ""         # relative to repo root
 

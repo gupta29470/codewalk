@@ -1,4 +1,4 @@
-"""Codewalk MCP server — 22 tools for codebase onboarding, search, review, and voice.
+"""Codewalk MCP server — 25 tools for codebase onboarding, search, review, voice, and cloud index management.
 
 Tool categories:
   SETUP  (1):           Analyze repo — scans, filters, chunks, embeds in one call.
@@ -8,6 +8,7 @@ Tool categories:
   VOICE  (14-15):       Mic record+transcribe (Copilot routes), TTS speak.
   DOCS   (18-20):       Index, search, and ask questions against team docs.
   HITL   (21):          Human-in-the-loop approval gate before any code/file action.
+  CLOUD  (22-25):       Pull index, check index status, connect repo one-click, check Codewalk version.
 """
 
 import inspect
@@ -180,6 +181,18 @@ mcp = FastMCP(
         "  → sq3: codewalk_search_codebase('max retries exceeded dead letter queue')\n"
         "  → Synthesize all 3 into one report with citations\n"
         "\n"
+        "## CLOUD INDEX MANAGEMENT\n"
+        "Use these tools when CODEWALK_SERVER_URL + CODEWALK_REPO_NAME + CODEWALK_REPO_TOKEN are set:\n"
+        "- codewalk_connect_repo(repo_name, repo_token) — ONE-STEP setup: detects git root,\n"
+        "  validates origin remote, downloads index from cloud, extracts to .codewalk/,\n"
+        "  updates mcp.json. Run this once after cloning a new repo.\n"
+        "- codewalk_pull_index() — Download the latest cloud index (replaces local .codewalk/).\n"
+        "  Returns 'Already up to date (vN)' if local version matches cloud — safe to call anytime.\n"
+        "- codewalk_index_status() — Show local vs cloud version numbers, commit SHA,\n"
+        "  file count, and how many versions behind local is.\n"
+        "- codewalk_check_version() — Check if a newer Codewalk release is deployed on the\n"
+        "  cloud server. Also runs silently on codewalk_analyze_codebase startup.\n"
+        "\n"
         "## ERROR HANDLING\n"
         "If any tool returns a message starting with 'Error:':\n"
         "- 'No codebase indexed' → tell user to run codewalk_analyze_codebase first\n"
@@ -197,13 +210,13 @@ def ensure_local_index():
 
     if not all([server_url, repo_name, repo_token]):
         return None
-    
+
     local_meta = Path(".codewalk/manifest.json")
-     
+
     if not local_meta.exists():
         _download_index(server_url, repo_name, repo_token)
         return
-    
+
     try:
         remote = requests.get(
             f"{server_url}/indexes/{repo_name}/manifest",
@@ -212,16 +225,17 @@ def ensure_local_index():
         ).json()
     except Exception:
         return
-    
-    local_sha = json.loads(local_meta.read_text()).get("commit_sha", "")
-    remote_sha = remote.get("commit_sha", "")
 
-    if local_sha != remote_sha:
+    local = json.loads(local_meta.read_text())
+    local_version = local.get("index_version", 0)
+    remote_version = remote.get("index_version", 0)
+
+    if remote_version > local_version:
         from src.codewalk.api import state
         state.pending_update = (
-            f"⚡ NEWER INDEX AVAILABLE\n"
-            f"  Remote: {remote.get('commit_message','?')} ({remote_sha[:7]})\n"
-            f"  Local:  {local_sha[:7]}\n"
+            f"⚡ NEW INDEX AVAILABLE: v{remote_version} (you have v{local_version})\n"
+            f"  Commit: {remote.get('commit_sha','?')[:7]}\n"
+            f"  Indexed: {remote.get('indexed_at','?')}\n"
             f"  Run codewalk_pull_index to update.\n"
         )
 
@@ -268,7 +282,11 @@ def codewalk_analyze_codebase() -> str:
 
     # Cloud mode: auto-download index if missing; flag if remote is newer
     ensure_local_index()
+    # Silently check for Codewalk tool updates; only surfaces if update available
+    _version_banner = codewalk_check_version() if os.getenv("CODEWALK_SERVER_URL") else ""
     pending_msg = state.pending_update or ""
+    if _version_banner and "up to date" not in _version_banner and "Cloud not configured" not in _version_banner:
+        pending_msg = (_version_banner + "\n\n" + pending_msg).strip()
 
     try:
         guidelines_path = os.getenv("REVIEW_GUIDELINES_PATH", "")
@@ -1586,13 +1604,37 @@ def codewalk_pull_index() -> str:
     repo_token = os.getenv("CODEWALK_REPO_TOKEN")
     if not all([server_url, repo_name, repo_token]):
         return "Not configured for cloud. Set CODEWALK_SERVER_URL, CODEWALK_REPO_NAME, CODEWALK_REPO_TOKEN."
+
+    # Check if already up to date before downloading
+    local_meta = Path(".codewalk/manifest.json")
+    if local_meta.exists():
+        try:
+            remote = requests.get(
+                f"{server_url}/indexes/{repo_name}/manifest",
+                headers={"X-Repo-Token": repo_token},
+                timeout=5,
+            ).json()
+            local_version = json.loads(local_meta.read_text()).get("index_version", 0)
+            remote_version = remote.get("index_version", 0)
+            if remote_version <= local_version:
+                return f"Already up to date (v{local_version})."
+        except Exception:
+            pass  # If manifest check fails, proceed with download
+
     _download_index(server_url, repo_name, repo_token)
-    return "Index updated. Using latest version now."
+    local_meta_after = Path(".codewalk/manifest.json")
+    new_version = ""
+    if local_meta_after.exists():
+        try:
+            new_version = f" (v{json.loads(local_meta_after.read_text()).get('index_version', '?')})"
+        except Exception:
+            pass
+    return f"Index updated{new_version}. Using latest version now."
 
 # ─── TOOL 23 [CLOUD · AI]: codewalk_index_status ─────
 @mcp.tool()
 def codewalk_index_status() -> str:
-    """Show local vs remote index freshness (commit SHA, indexed_at, file count)."""
+    """Show local vs remote index freshness (version, commit SHA, indexed_at, file count)."""
     server_url = os.getenv("CODEWALK_SERVER_URL")
     repo_name  = os.getenv("CODEWALK_REPO_NAME")
     repo_token = os.getenv("CODEWALK_REPO_TOKEN")
@@ -1608,12 +1650,23 @@ def codewalk_index_status() -> str:
     except Exception as e:
         remote = {"error": str(e)}
 
+    local_v  = local.get("index_version", "?")
+    remote_v = remote.get("index_version", "?")
+
     lines = [
-        f"LOCAL:  {local.get('commit_sha','none')[:7]}  {local.get('indexed_at','?')}  {local.get('file_count','?')} files",
-        f"REMOTE: {remote.get('commit_sha','none')[:7]}  {remote.get('indexed_at','?')}  {remote.get('file_count','?')} files",
+        f"Local:  v{local_v}  {local.get('commit_sha','none')[:7]}  {local.get('indexed_at','?')}  {local.get('file_count','?')} files",
+        f"Cloud:  v{remote_v}  {remote.get('commit_sha','none')[:7]}  {remote.get('indexed_at','?')}  {remote.get('file_count','?')} files",
     ]
 
-    if local.get("commit_sha") == remote.get("commit_sha"):
+    if isinstance(local_v, int) and isinstance(remote_v, int):
+        diff = remote_v - local_v
+        if diff == 0:
+            lines.append("✅ Up to date")
+        elif diff > 0:
+            lines.append(f"⚡ {diff} version(s) behind — run codewalk_pull_index to update")
+        else:
+            lines.append("⚠️  Local is ahead of cloud (unusual)")
+    elif local.get("commit_sha") == remote.get("commit_sha"):
         lines.append("✅ Up to date")
     else:
         lines.append("⚡ Remote is newer — run codewalk_pull_index to update")
@@ -1621,6 +1674,213 @@ def codewalk_index_status() -> str:
     return "\n".join(lines)
 
 
+# ─── Commit mismatch helper (session-cached warning) ─────────────────
+_commit_mismatch_warned: bool = False
+
+def _check_commit_mismatch(local_repo_path: str, manifest: dict) -> str:
+    """Compare local git HEAD with the commit SHA recorded in the downloaded index.
+
+    Returns a warning string on mismatch, empty string if they match or
+    cannot be determined. Warning is shown only once per session.
+    """
+    global _commit_mismatch_warned
+    if _commit_mismatch_warned:
+        return ""
+
+    index_sha = manifest.get("commit_sha", "")
+    if not index_sha:
+        return ""
+
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=local_repo_path,
+            capture_output=True, text=True, check=True,
+        )
+        local_sha = result.stdout.strip()
+    except Exception:
+        return ""  # Can't determine local commit — silent
+
+    if local_sha == index_sha:
+        return ""
+
+    _commit_mismatch_warned = True
+    return (
+        f"⚠️  Commit mismatch detected:\n"
+        f"  Local repository: {local_sha[:7]}\n"
+        f"  Downloaded index: {index_sha[:7]}\n"
+        f"  Results may be inaccurate.\n"
+        f"  Run 'git pull' to sync, then codewalk_pull_index to refresh."
+    )
+
+
+# ─── TOOL 24 [CLOUD · user]: codewalk_connect_repo ─────
+@mcp.tool()
+def codewalk_connect_repo(repo_name: str, repo_token: str) -> str:
+    """Connect a local repository to its cloud index.
+
+    Automatically:
+    1. Detects git root of current working directory
+    2. Validates repo_name matches origin remote
+    3. Downloads latest index from cloud
+    4. Extracts to .codewalk/ in git root
+    5. Warns if local commit differs from index commit
+
+    Args:
+        repo_name:  Repository in 'owner/repo' format.
+        repo_token: Per-repo download token (cw_repo_xxxxxxxx).
+    """
+    server_url = os.getenv("CODEWALK_SERVER_URL", "")
+    if not server_url:
+        return "❌ CODEWALK_SERVER_URL not set. Add it to your mcp.json environment."
+
+    # Step 1: Detect git root
+    try:
+        git_root = subprocess.run(
+            ["git", "rev-parse", "--show-toplevel"],
+            capture_output=True, text=True, check=True,
+        ).stdout.strip()
+    except Exception:
+        return "❌ Not a git repository. Run this tool from inside your cloned repo."
+
+    # Step 2: Validate repo_name matches origin remote
+    try:
+        remote_url = subprocess.run(
+            ["git", "remote", "get-url", "origin"],
+            cwd=git_root, capture_output=True, text=True, check=True,
+        ).stdout.strip()
+        # Extract owner/repo from HTTPS or SSH remote URL
+        repo_slug = (
+            remote_url.replace("https://github.com/", "")
+                      .replace("git@github.com:", "")
+                      .removesuffix(".git")
+                      .strip("/")
+        )
+        if repo_slug != repo_name:
+            return (
+                f"❌ Repo name mismatch.\n"
+                f"  Provided:  {repo_name}\n"
+                f"  Origin:    {repo_slug}\n"
+                f"  Use the exact owner/repo from your GitHub URL."
+            )
+    except Exception:
+        return "❌ Could not read git remote 'origin'. Ensure the repo has an origin remote."
+
+    # Step 3: Verify cloud manifest exists (proves the repo is indexed)
+    try:
+        manifest_resp = requests.get(
+            f"{server_url}/indexes/{repo_name}/manifest",
+            headers={"X-Repo-Token": repo_token},
+            timeout=10,
+        )
+        if manifest_resp.status_code == 404:
+            return (
+                f"❌ No index found for {repo_name}.\n"
+                f"  Has it been pushed to GitHub? Wait for the webhook to finish indexing."
+            )
+        if manifest_resp.status_code == 403:
+            return "❌ Invalid token. Check CODEWALK_REPO_TOKEN."
+        manifest_resp.raise_for_status()
+        manifest = manifest_resp.json()
+    except requests.RequestException as exc:
+        return f"❌ Could not reach cloud server: {exc}"
+
+    # Step 4: Create .codewalk/ directory
+    codewalk_dir = Path(git_root) / ".codewalk"
+    codewalk_dir.mkdir(parents=True, exist_ok=True)
+
+    # Step 5: Download and extract index tarball
+    try:
+        dl_resp = requests.get(
+            f"{server_url}/indexes/{repo_name}",
+            headers={"X-Repo-Token": repo_token},
+            stream=True, timeout=300,
+        )
+        dl_resp.raise_for_status()
+        tarball = Path("/tmp/codewalk-connect-index.tar.gz")
+        with open(tarball, "wb") as fh:
+            for chunk in dl_resp.iter_content(chunk_size=8192):
+                fh.write(chunk)
+    except Exception as exc:
+        return f"❌ Download failed: {exc}"
+
+    try:
+        subprocess.run(
+            ["tar", "-xzf", str(tarball), "-C", git_root],
+            check=True,
+        )
+        tarball.unlink(missing_ok=True)
+    except Exception as exc:
+        return f"❌ Extraction failed: {exc}"
+
+    # Write CODEWALK_REPO_NAME and CODEWALK_REPO_TOKEN into local mcp.json if found
+    mcp_json_path = Path(git_root) / "mcp.json"
+    mcp_hint = ""
+    if mcp_json_path.exists():
+        try:
+            mcp_cfg = json.loads(mcp_json_path.read_text())
+            env = mcp_cfg.setdefault("env", {})
+            env["CODEWALK_REPO_NAME"] = repo_name
+            env["CODEWALK_REPO_TOKEN"] = repo_token
+            mcp_json_path.write_text(json.dumps(mcp_cfg, indent=2))
+            mcp_hint = "\n  mcp.json updated with repo credentials."
+        except Exception:
+            mcp_hint = "\n  ⚠️  Could not update mcp.json — update CODEWALK_REPO_NAME and CODEWALK_REPO_TOKEN manually."
+    else:
+        mcp_hint = (
+            "\n  Add to mcp.json env:\n"
+            f'    "CODEWALK_REPO_NAME": "{repo_name}",\n'
+            f'    "CODEWALK_REPO_TOKEN": "{repo_token}"'
+        )
+
+    index_version = manifest.get("index_version", "?")
+    index_sha = manifest.get("commit_sha", "?")[:7]
+
+    # Step 8: Commit mismatch check
+    mismatch_warning = _check_commit_mismatch(git_root, manifest)
+
+    lines = [
+        f"✅ Connected! Index v{index_version} downloaded.",
+        f"  Index commit: {index_sha}",
+        mcp_hint,
+    ]
+    if mismatch_warning:
+        lines.append(mismatch_warning)
+    lines.append("  Run codewalk_index_status anytime to check for updates.")
+
+    return "\n".join(lines)
+
+
+# ─── TOOL 25 [CLOUD · AI]: codewalk_check_version ─────
+@mcp.tool()
+def codewalk_check_version() -> str:
+    """Check if a newer version of Codewalk is available on the cloud server."""
+    from src.codewalk import __version__
+
+    server_url = os.getenv("CODEWALK_SERVER_URL", "")
+    if not server_url:
+        return "Cloud not configured. Set CODEWALK_SERVER_URL to enable version checks."
+
+    try:
+        remote = requests.get(f"{server_url}/version", timeout=5).json()
+    except Exception as exc:
+        return f"Could not check version: {exc}"
+
+    local_version = __version__
+    remote_version = remote.get("codewalk_version", "unknown")
+    remote_sha = remote.get("commit_sha", "")[:7]
+
+    if local_version == remote_version:
+        return f"Codewalk is up to date (v{local_version})."
+
+    return (
+        f"🆕 Codewalk update available!\n"
+        f"  Local:    v{local_version}\n"
+        f"  Cloud:    v{remote_version} ({remote_sha})\n"
+        f"  Released: {remote.get('released_at', '?')}\n"
+        f"  Notes:    {remote.get('release_notes_url', '')}\n"
+        f"  Update:   {remote.get('update_command', 'git pull origin master')}"
+    )
 
 
 # ─── Shared tool lookup map (used by voice_ask, backends.py) ──
@@ -1651,6 +1911,8 @@ _TOOL_MAP = {
     "codewalk_speak": codewalk_speak,
     "codewalk_pull_index": codewalk_pull_index,
     "codewalk_index_status": codewalk_index_status,
+    "codewalk_connect_repo": codewalk_connect_repo,
+    "codewalk_check_version": codewalk_check_version,
 }
 
 if __name__ == "__main__":

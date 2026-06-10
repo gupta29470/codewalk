@@ -36,8 +36,6 @@ from src.codewalk.analysis.blast_radius import calculate_full_blast_map
 from src.codewalk.query import (
     compute_file_risks, resolve_module_with_fallback, short_name,
 )
-from src.codewalk.voice.stt import transcribe_bytes
-from src.codewalk.voice.tts import synthesize
 from src.codewalk.log import log as _log
 from src.codewalk.errors import classify_error
 
@@ -101,6 +99,33 @@ async def rate_limit_middleware(request, call_next):
             content={"detail": "Rate limit exceeded. Please try again later."},
         )
     window.append(now)
+    return await call_next(request)
+
+# ─── Cloud mode middleware ────────────────────────────────────────────
+_CLOUD_DISABLED_PREFIXES = (
+    "/analyze", "/chat", "/overview", "/modules",
+    "/blast-radius", "/reading-order", "/execution-flow",
+    "/refresh", "/incremental-reindex", "/review",
+    "/voice", "/cycles", "/architecture", "/docs",
+)
+
+@app.middleware("http")
+async def cloud_mode_middleware(request, call_next):
+    """Block query/analysis endpoints when running in cloud-only indexing mode."""
+    from src.codewalk.api.cloud import is_cloud_enabled
+    if is_cloud_enabled():
+        path = request.url.path
+        if any(path.startswith(p) for p in _CLOUD_DISABLED_PREFIXES):
+            return JSONResponse(
+                status_code=400,
+                content={
+                    "detail": (
+                        "Cloud mode serves indexes only. "
+                        "Download the index via GET /indexes/{owner}/{repo} "
+                        "and query locally with MCP."
+                    )
+                },
+            )
     return await call_next(request)
 
 @app.exception_handler(Exception)
@@ -826,6 +851,10 @@ async def voice_ask_endpoint(
       speech: summarized text for TTS
       audio_base64: MP3 audio as base64
     """
+    # Lazy imports — voice deps are optional in production images
+    from src.codewalk.voice.stt import transcribe_bytes
+    from src.codewalk.voice.tts import synthesize
+
     # 1. STT
     MAX_VOICE_SIZE = 50 * 1024 * 1024  # 50MB
     audio_bytes = await audio.read()

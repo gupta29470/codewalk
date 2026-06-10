@@ -12,6 +12,7 @@ CREATE TABLE IF NOT EXISTS repos (
     repo_token      TEXT NOT NULL DEFAULT '',
     last_indexed_sha VARCHAR(40) DEFAULT NULL,
     index_status    VARCHAR(20) DEFAULT 'pending',   -- pending | indexing | ready | failed
+    index_version   INTEGER DEFAULT 1,               -- incremented on each successful index
     storage_path    TEXT,
     created_at      TIMESTAMP DEFAULT NOW(),
     updated_at      TIMESTAMP DEFAULT NOW()
@@ -53,3 +54,6 @@ CREATE TABLE IF NOT EXISTS webhook_deliveries (
 
 CREATE INDEX IF NOT EXISTS idx_webhooks_repo ON webhook_deliveries(repo_full_name);
 CREATE INDEX IF NOT EXISTS idx_webhooks_delivery ON webhook_deliveries(delivery_id);
+
+-- Migration: add index_version to existing deployments (idempotent)
+ALTER TABLE repos ADD COLUMN IF NOT EXISTS index_version INTEGER DEFAULT 1;

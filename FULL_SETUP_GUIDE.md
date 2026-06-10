@@ -668,14 +668,41 @@ Codewalk Server:
   3. If SHA changed from last_indexed_sha:
      - git pull (or git clone if first time)
      - incremental_reindex() — only changed files
+     - build_full_analysis() — rebuild deps, modules, DuckDB
      - Update last_indexed_sha
   4. Return 200 OK to GitHub
         │
         ▼
 Code is now searchable in Codewalk!
+
+### 11.2 Automatic Catch-Up Indexing on Deployment
+
+In addition to webhooks, the server automatically indexes any repo that needs it **15 seconds after startup**. This means:
+
+- After a fresh deployment, registered repos are indexed automatically
+- If a previous indexing job failed, it retries on next deploy
+- No manual `/admin/index` call needed
+
+Trigger conditions (`repos` table):
+- `last_indexed_sha IS NULL` → never indexed
+- `index_status IN ('pending', 'failed')` → needs retry
+
+The catch-up indexer runs the **full `/analyze` pipeline**:
+
+```
+scan_directory()
+    │
+    ▼
+full_index_parallel()    → ChromaDB embeddings
+    │
+    ▼
+build_full_analysis()    → deps → modules → DuckDB
 ```
 
-### 11.2 Webhook Delivery Log
+### 11.3 Webhook Delivery Log
+```
+
+### 11.3 Webhook Delivery Log
 
 Every webhook is saved to the `webhook_deliveries` table:
 
@@ -892,24 +919,53 @@ docker compose logs codewalk-api | grep "Rate limit"
 
 ### 15.1 Automatic Rollback
 
-The deploy script already has auto-rollback: if health check fails after deploy, it reverts to the previous working version.
+The deploy script has auto-rollback built in: if the health check fails after deploy, it automatically reverts to the **previous successful SHA** and restarts containers.
 
-### 15.2 Manual Rollback
+### 15.2 Bounded Image Retention
+
+The deploy script keeps disk usage bounded:
+
+| Kept | Deleted |
+|------|---------|
+| `latest` | All dangling images |
+| Current deployed SHA | Any SHA older than current + previous |
+| Previous successful SHA | |
+
+State is tracked in `/opt/codewalk/.deploy-state` (2-line format: previous, current).
+
+After a successful deploy and health check, the script prints a summary:
+
+```
+┌────────────────────────────────────────┐
+│     ✅ DEPLOYMENT SUCCESSFUL           │
+├────────────────────────────────────────┤
+│  Current SHA:  b3ec81a                 │
+│  Previous SHA: 8c59cc1                 │
+│  Images kept:  latest, sha-b3ec81a, sha-8c59cc1
+│  Images removed: 2                     │
+└────────────────────────────────────────┘
+```
+
+### 15.3 Manual Rollback
 
 ```bash
 ssh root@YOUR_SERVER_IP
 
-# Rollback to previous SHA
+# Rollback to previous SHA (swaps current ↔ previous in state)
 /opt/codewalk/rollback.sh
 
-# Or rollback to specific SHA
-/opt/codewalk/rollback.sh abc1234
-
-# Verify
+# After rollback, you can roll forward again by running:
 /opt/codewalk/deploy-server.sh
 ```
 
-### 15.3 Emergency: Pin to Previous Image
+Rollback workflow:
+1. Reads `.deploy-state` (line 1 = previous, line 2 = current)
+2. Pulls/builds the previous SHA image
+3. Restarts containers
+4. Health check
+5. Swaps state so you can roll forward again
+
+### 15.4 Emergency: Pin to Specific Image
 
 ```bash
 cd /opt/codewalk

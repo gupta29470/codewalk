@@ -78,6 +78,7 @@ def _init_cloud_tables(conn):
                 repo_token      TEXT NOT NULL DEFAULT '',
                 last_indexed_sha VARCHAR(40) DEFAULT NULL,
                 index_status    VARCHAR(20) DEFAULT 'pending',
+                index_version   INTEGER DEFAULT 1,
                 storage_path    TEXT,
                 created_at      TIMESTAMP DEFAULT NOW(),
                 updated_at      TIMESTAMP DEFAULT NOW()

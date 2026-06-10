@@ -1,8 +1,8 @@
 #!/bin/bash
 # ══════════════════════════════════════════════════════════════════════
 #  Codewalk Server Deploy Script
-#  Works both from GitHub Actions (with SHA env var) and manually.
-#  Tries GHCR first, falls back to local build if unavailable.
+#  Bounded image retention: keeps only latest + current + previous SHA.
+#  Works from GitHub Actions (SHA via env) and manual runs.
 # ══════════════════════════════════════════════════════════════════════
 set -euo pipefail
 
@@ -14,7 +14,6 @@ SRC_DIR="/opt/codewalk-src"
 COMPOSE_DIR="/opt/codewalk"
 
 # ── Get SHA ─────────────────────────────────────────────────────────
-# Priority: 1. Argument, 2. DEPLOY_SHA env var, 3. Git in src dir, 4. Last known
 DEPLOY_SHA="${1:-${DEPLOY_SHA:-}}"
 
 if [ -z "$DEPLOY_SHA" ] && [ -d "$SRC_DIR/.git" ]; then
@@ -22,68 +21,64 @@ if [ -z "$DEPLOY_SHA" ] && [ -d "$SRC_DIR/.git" ]; then
 fi
 
 if [ -z "$DEPLOY_SHA" ] && [ -f "$STATE_FILE" ]; then
-    DEPLOY_SHA=$(tail -1 "$STATE_FILE" 2>/dev/null || true)
+    DEPLOY_SHA=$(sed -n '2p' "$STATE_FILE" 2>/dev/null || true)
 fi
 
 if [ -z "$DEPLOY_SHA" ]; then
-    echo "❌ Cannot determine deploy SHA."
-    echo "   Provide as argument: $0 <sha>"
-    echo "   Or set DEPLOY_SHA env var."
-    echo "   Or ensure $SRC_DIR is a git repo."
+    echo "❌ Cannot determine deploy SHA." >&2
+    echo "   Provide as argument: $0 <sha>" >&2
+    echo "   Or set DEPLOY_SHA env var." >&2
+    echo "   Or ensure $SRC_DIR is a git repo." >&2
     exit 1
 fi
 
-# Sanitize SHA (only hex chars, max 12)
 DEPLOY_SHA=$(echo "$DEPLOY_SHA" | tr -cd 'a-f0-9' | head -c 12)
 
 # ── Logging ─────────────────────────────────────────────────────────
 exec >> "$LOG_FILE" 2>&1
+
 echo ""
 echo "=========================================="
 echo "$(date -u +"%Y-%m-%d %H:%M:%S UTC") — Codewalk Deploy"
 echo "SHA: $DEPLOY_SHA"
 echo "=========================================="
 
-# ── Load previous SHA ───────────────────────────────────────────────
+# ── Read state (2-line format: prev, curr) ──────────────────────────
 if [ -f "$STATE_FILE" ]; then
-    PREV_SHA=$(tail -1 "$STATE_FILE" 2>/dev/null || echo "")
-    # Get second-to-last for rollback
-    ROLLBACK_SHA=$(tail -2 "$STATE_FILE" 2>/dev/null | head -1 || echo "")
+    PREVIOUS_SHA=$(sed -n '1p' "$STATE_FILE" 2>/dev/null || echo "")
+    CURRENT_SHA=$(sed -n '2p' "$STATE_FILE" 2>/dev/null || echo "")
 else
-    PREV_SHA=""
-    ROLLBACK_SHA=""
+    PREVIOUS_SHA=""
+    CURRENT_SHA=""
 fi
 
-echo "Previous SHA: ${PREV_SHA:-<none>}"
-echo "Rollback SHA: ${ROLLBACK_SHA:-<none>}"
+echo "Previous SHA: ${PREVIOUS_SHA:-<none>}"
+echo "Current SHA:  ${CURRENT_SHA:-<none>}"
 
-# ── Prevent re-deploy of same SHA ──────────────────────────────────
-if [ "$DEPLOY_SHA" = "$PREV_SHA" ]; then
-    echo "⚠️ SHA $DEPLOY_SHA already deployed. Skipping."
+# ── Prevent re-deploy ───────────────────────────────────────────────
+if [ "$DEPLOY_SHA" = "$CURRENT_SHA" ]; then
+    echo "⚠️  SHA $DEPLOY_SHA already deployed. Skipping."
     echo "   To force redeploy: rm $STATE_FILE && $0 $DEPLOY_SHA"
     exit 0
 fi
 
-# ── Try GHCR pull first ─────────────────────────────────────────────
+# ── Try GHCR pull ───────────────────────────────────────────────────
 GHCR_AVAILABLE=false
 echo ""
 echo "Attempting GHCR pull: $IMAGE:sha-$DEPLOY_SHA"
 
 if docker pull "$IMAGE:sha-$DEPLOY_SHA" 2>/dev/null; then
-    echo "✅ GHCR image pulled successfully"
+    echo "✅ GHCR image pulled"
     docker tag "$IMAGE:sha-$DEPLOY_SHA" "$IMAGE:latest"
     GHCR_AVAILABLE=true
 else
-    echo "⚠️ GHCR pull failed (image not found or not accessible)"
-    echo "   Will build locally from source instead."
+    echo "⚠️  GHCR pull failed — will build locally"
 fi
 
-# ── Fall back to local build ────────────────────────────────────────
+# ── Local build fallback ────────────────────────────────────────────
 if [ "$GHCR_AVAILABLE" != "true" ]; then
     if [ ! -d "$SRC_DIR/.git" ]; then
-        echo "❌ No source code at $SRC_DIR and GHCR unavailable."
-        echo "   Cannot deploy. Clone repo first:"
-        echo "   git clone https://github.com/gupta29470/codewalk.git $SRC_DIR"
+        echo "❌ No source at $SRC_DIR and GHCR unavailable. Cannot deploy." >&2
         exit 1
     fi
 
@@ -91,7 +86,6 @@ if [ "$GHCR_AVAILABLE" != "true" ]; then
     echo "Building locally from $SRC_DIR ..."
     cd "$SRC_DIR"
 
-    # Pull latest code if we're not on the target SHA
     CURRENT_SRC_SHA=$(git rev-parse --short HEAD 2>/dev/null || echo "")
     if [ "$CURRENT_SRC_SHA" != "$DEPLOY_SHA" ]; then
         echo "Pulling latest code..."
@@ -127,67 +121,103 @@ for i in $(seq 1 20); do
     echo "  Attempt $i/20: HTTP $STATUS, retrying..."
 done
 
-# ── Rollback if health failed ───────────────────────────────────────
+# ── Rollback on failure ─────────────────────────────────────────────
 if [ "$HEALTHY" != "true" ]; then
     echo ""
-    echo "❌ Health check failed after 20 attempts (100s)"
+    echo "❌ Health check failed after 20 attempts"
 
-    if [ -n "$ROLLBACK_SHA" ] && [ "$ROLLBACK_SHA" != "$DEPLOY_SHA" ]; then
-        echo "🔄 Rolling back to previous SHA: $ROLLBACK_SHA"
+    if [ -n "$CURRENT_SHA" ]; then
+        echo "🔄 Rolling back to: $CURRENT_SHA"
 
-        # Try GHCR rollback first
-        if docker pull "$IMAGE:sha-$ROLLBACK_SHA" 2>/dev/null; then
-            docker tag "$IMAGE:sha-$ROLLBACK_SHA" "$IMAGE:latest"
+        if docker pull "$IMAGE:sha-$CURRENT_SHA" 2>/dev/null; then
+            docker tag "$IMAGE:sha-$CURRENT_SHA" "$IMAGE:latest"
         elif [ -d "$SRC_DIR/.git" ]; then
-            # Fall back to local build of rollback SHA
             echo "   Building rollback SHA locally..."
             cd "$SRC_DIR"
-            git checkout "$ROLLBACK_SHA" 2>/dev/null || true
+            git checkout "$CURRENT_SHA" 2>/dev/null || true
             docker build -f deploy/Dockerfile -t "$IMAGE:latest" .
         fi
 
         cd "$COMPOSE_DIR"
         docker compose up -d --force-recreate
 
-        # Re-check health after rollback
-        ROLLBACK_HEALTHY=false
         for i in $(seq 1 12); do
             sleep 5
             STATUS=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:8000/health 2>/dev/null || echo "000")
             if [ "$STATUS" = "200" ]; then
                 BODY=$(curl -s http://localhost:8000/health 2>/dev/null || echo "")
                 if echo "$BODY" | grep -q '"status":"ok"'; then
-                    ROLLBACK_HEALTHY=true
-                    echo "✅ Rollback health check passed"
-                    break
+                    echo "✅ Rollback successful"
+                    echo "=========================================="
+                    exit 1
                 fi
             fi
             echo "  Rollback check $i/12: HTTP $STATUS, retrying..."
         done
 
-        if [ "$ROLLBACK_HEALTHY" = "true" ]; then
-            echo "⚠️ Deployment rolled back to $ROLLBACK_SHA. Marking as failed."
-            exit 1
-        else
-            echo "❌❌ Rollback also failed. Manual intervention required."
-            echo "   Last known working SHA: $ROLLBACK_SHA"
-            echo "   Failed SHA: $DEPLOY_SHA"
-            exit 1
-        fi
+        echo "❌❌ Rollback also failed. Manual intervention required." >&2
+        exit 1
     else
-        echo "❌ No previous SHA available for rollback."
-        echo "   Current state is BROKEN. Manual fix required."
+        echo "❌ No previous SHA for rollback." >&2
         exit 1
     fi
 fi
 
-# ── Save successful deploy ──────────────────────────────────────────
-echo "$DEPLOY_SHA" >> "$STATE_FILE"
-tail -10 "$STATE_FILE" > "$STATE_FILE.tmp" && mv "$STATE_FILE.tmp" "$STATE_FILE"
+# ══════════════════════════════════════════════════════════════════════
+#  SUCCESS PATH: Update state, clean up old images, print summary
+# ══════════════════════════════════════════════════════════════════════
 
-# ── Cleanup ─────────────────────────────────────────────────────────
-docker system prune -f 2>/dev/null || true
+# ── Update state (2-line bounded format) ────────────────────────────
+# Old current becomes previous; new SHA becomes current
+printf '%s\n%s\n' "$CURRENT_SHA" "$DEPLOY_SHA" > "$STATE_FILE"
 
+# ── Clean up old SHA-tagged images ──────────────────────────────────
 echo ""
-echo "✅ Deploy successful. SHA: $DEPLOY_SHA"
+echo "Cleaning up old images..."
+REMOVED_COUNT=0
+KEPT_TAGS=""
+
+while IFS= read -r tag; do
+    [ -z "$tag" ] && continue
+    # Extract SHA from tag: ghcr.io/...:sha-XXXXXXX
+    TAG_SHA=$(echo "$tag" | sed 's/.*:sha-//')
+
+    # Keep current and previous SHAs
+    if [ "$TAG_SHA" = "$DEPLOY_SHA" ] || [ "$TAG_SHA" = "$CURRENT_SHA" ]; then
+        KEPT_TAGS="$KEPT_TAGS  $tag\n"
+        continue
+    fi
+
+    # Remove everything else
+    if docker rmi "$tag" >/dev/null 2>&1; then
+        echo "  🗑️  Removed: $tag"
+        REMOVED_COUNT=$((REMOVED_COUNT + 1))
+    else
+        echo "  ⚠️  Skipped (in use): $tag"
+    fi
+done < <(docker images --format "{{.Repository}}:{{.Tag}}" | grep "^$IMAGE:sha-" || true)
+
+# ── Prune dangling images ───────────────────────────────────────────
+DANGLING=$(docker images -f "dangling=true" -q 2>/dev/null | wc -l | tr -d ' ')
+if [ "$DANGLING" -gt 0 ]; then
+    docker image prune -f >/dev/null 2>&1 || true
+    echo "  🗑️  Pruned $DANGLING dangling image(s)"
+fi
+
+# ── Build kept-tags list for summary ────────────────────────────────
+KEPT_LIST="latest"
+[ -n "$DEPLOY_SHA" ] && KEPT_LIST="$KEPT_LIST, sha-$DEPLOY_SHA"
+[ -n "$CURRENT_SHA" ] && KEPT_LIST="$KEPT_LIST, sha-$CURRENT_SHA"
+
+# ── Deployment Summary ──────────────────────────────────────────────
+echo ""
+echo "┌────────────────────────────────────────┐"
+echo "│     ✅ DEPLOYMENT SUCCESSFUL           │"
+echo "├────────────────────────────────────────┤"
+printf "│  Current SHA:  %-24s│\n" "$DEPLOY_SHA"
+printf "│  Previous SHA: %-24s│\n" "${CURRENT_SHA:-<none>}"
+printf "│  Images kept:  %-24s│\n" "$KEPT_LIST"
+printf "│  Images removed: %-22s│\n" "$REMOVED_COUNT"
+echo "└────────────────────────────────────────┘"
+echo ""
 echo "=========================================="
