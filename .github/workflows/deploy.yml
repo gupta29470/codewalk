@@ -48,10 +48,6 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-      - name: Export SHA for deploy
-        id: sha
-        run: echo "short_sha=$(git rev-parse --short HEAD)" >> $GITHUB_OUTPUT
-
   deploy:
     needs: build
     runs-on: ubuntu-latest
@@ -61,102 +57,27 @@ jobs:
         id: sha
         run: echo "short_sha=$(git rev-parse --short HEAD)" >> $GITHUB_OUTPUT
 
-      - name: Deploy to Hetzner with health check & rollback
+      - name: Deploy to Hetzner via SSH
         uses: appleboy/ssh-action@v1.0.3
         with:
           host: ${{ secrets.HETZNER_HOST }}
           username: ${{ secrets.HETZNER_USER }}
           key: ${{ secrets.HETZNER_SSH_KEY }}
+          script_stop: true
           script: |
-            set -e
-            DEPLOY_SHA="${{ steps.sha.outputs.short_sha }}"
-            IMAGE="ghcr.io/${{ github.repository }}"
-            STATE_FILE="/opt/codewalk/.deploy-state"
-
-            echo "=== Codewalk Deploy ==="
-            echo "Deploy SHA: $DEPLOY_SHA"
-
-            # ── 1. Load previous successful SHA ─────────────────────────
-            if [ -f "$STATE_FILE" ]; then
-              PREV_SHA=$(cat "$STATE_FILE" | tail -1)
+            # Update source code first (in case we need local build fallback)
+            if [ -d /opt/codewalk-src/.git ]; then
+              cd /opt/codewalk-src && git pull origin master
             else
-              PREV_SHA=""
+              git clone https://github.com/gupta29470/codewalk.git /opt/codewalk-src
             fi
-            echo "Previous SHA: ${PREV_SHA:-<none>}"
-
-            # ── 2. Pull new image ───────────────────────────────────────
-            cd /opt/codewalk
-            echo "Pulling image: $IMAGE:sha-$DEPLOY_SHA"
-            docker pull "$IMAGE:sha-$DEPLOY_SHA"
-            docker tag "$IMAGE:sha-$DEPLOY_SHA" "$IMAGE:latest"
-
-            # ── 3. Restart containers ───────────────────────────────────
-            docker compose up -d --force-recreate --remove-orphans
-
-            # ── 4. Health check ─────────────────────────────────────────
-            echo "Waiting for health check..."
-            HEALTHY=false
-            for i in {1..20}; do
-              sleep 5
-              STATUS=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:8000/health || echo "000")
-              if [ "$STATUS" = "200" ]; then
-                BODY=$(curl -s http://localhost:8000/health)
-                if echo "$BODY" | grep -q '"status":"ok"'; then
-                  HEALTHY=true
-                  echo "✅ Health check passed ($i/20)"
-                  break
-                fi
-              fi
-              echo "  Attempt $i/20: HTTP $STATUS, retrying..."
-            done
-
-            # ── 5. Rollback if health failed ────────────────────────────
-            if [ "$HEALTHY" != "true" ]; then
-              echo "❌ Health check failed after 20 attempts"
-              
-              if [ -n "$PREV_SHA" ] && [ "$PREV_SHA" != "$DEPLOY_SHA" ]; then
-                echo "🔄 Rolling back to previous SHA: $PREV_SHA"
-                docker pull "$IMAGE:sha-$PREV_SHA" 2>/dev/null || true
-                docker tag "$IMAGE:sha-$PREV_SHA" "$IMAGE:latest" 2>/dev/null || true
-                docker compose up -d --force-recreate
-                
-                # Re-check health after rollback
-                ROLLBACK_HEALTHY=false
-                for i in {1..12}; do
-                  sleep 5
-                  STATUS=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:8000/health || echo "000")
-                  if [ "$STATUS" = "200" ]; then
-                    BODY=$(curl -s http://localhost:8000/health)
-                    if echo "$BODY" | grep -q '"status":"ok"'; then
-                      ROLLBACK_HEALTHY=true
-                      echo "✅ Rollback health check passed"
-                      break
-                    fi
-                  fi
-                done
-                
-                if [ "$ROLLBACK_HEALTHY" != "true" ]; then
-                  echo "❌❌ Rollback also failed. Manual intervention required."
-                  exit 1
-                fi
-                
-                echo "⚠️ Deployment rolled back successfully. Workflow will fail."
-                exit 1
-              else
-                echo "❌ No previous SHA to rollback to. Manual intervention required."
-                exit 1
-              fi
-            fi
-
-            # ── 6. Save successful deploy SHA ───────────────────────────
-            echo "$DEPLOY_SHA" >> "$STATE_FILE"
-            # Keep last 10 SHAs
-            tail -10 "$STATE_FILE" > "$STATE_FILE.tmp" && mv "$STATE_FILE.tmp" "$STATE_FILE"
             
-            echo "✅ Deploy successful. SHA $DEPLOY_SHA recorded."
-
-            # ── 7. Cleanup ──────────────────────────────────────────────
-            docker system prune -f
+            # Ensure deploy script is latest
+            cp /opt/codewalk-src/deploy/deploy-server.sh /opt/codewalk/deploy-server.sh
+            chmod +x /opt/codewalk/deploy-server.sh
+            
+            # Run deploy with SHA from GitHub Actions
+            DEPLOY_SHA="${{ steps.sha.outputs.short_sha }}" /opt/codewalk/deploy-server.sh
 
       - name: Deployment summary
         if: always()
