@@ -35,6 +35,8 @@ services:
       - ADMIN_API_KEY=${ADMIN_API_KEY}
       - INDEX_STORAGE_PATH=/var/codewalk
       - CORS_ORIGINS=${CORS_ORIGINS:-*}
+      - RATE_LIMIT_REQUESTS=${RATE_LIMIT_REQUESTS:-60}
+      - RATE_LIMIT_WINDOW=${RATE_LIMIT_WINDOW:-60}
     depends_on:
       - postgres
     restart: unless-stopped
