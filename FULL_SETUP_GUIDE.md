@@ -253,25 +253,39 @@ jobs:
   deploy:
     needs: build
     runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/master'
     steps:
-      - uses: actions/checkout@v4
-      
-      - name: Setup SSH
-        run: |
-          mkdir -p ~/.ssh
-          echo "${{ secrets.HETZNER_SSH_KEY }}" > ~/.ssh/hetzner
-          chmod 600 ~/.ssh/hetzner
-          ssh-keyscan -H ${{ secrets.HETZNER_HOST }} >> ~/.ssh/known_hosts
-      
-      - name: Deploy to server
+      - name: Deploy to Hetzner via SSH
+        uses: appleboy/ssh-action@v1.0.3
         env:
-          SHORT_SHA: ${{ github.sha }}
+          DEPLOY_SHA: ${{ github.sha }}
+        with:
+          host: ${{ secrets.HETZNER_HOST }}
+          username: ${{ secrets.HETZNER_USER }}
+          key: ${{ secrets.HETZNER_SSH_KEY }}
+          script_stop: true
+          script: |
+            # Update source code first (in case we need local build fallback)
+            if [ -d /opt/codewalk-src/.git ]; then
+              cd /opt/codewalk-src && git pull origin master
+            else
+              git clone https://github.com/gupta29470/codewalk.git /opt/codewalk-src
+            fi
+
+            # Ensure deploy script is latest
+            cp /opt/codewalk-src/deploy/deploy-server.sh /opt/codewalk/deploy-server.sh
+            chmod +x /opt/codewalk/deploy-server.sh
+
+            # Run deploy with SHA from GitHub Actions (first 7 chars)
+            SHORT_SHA="${DEPLOY_SHA:0:7}"
+            echo "Deploying SHA: $SHORT_SHA"
+            DEPLOY_SHA="$SHORT_SHA" /opt/codewalk/deploy-server.sh
+
+      - name: Deployment summary
+        if: always()
         run: |
-          ssh -i ~/.ssh/hetzner ${{ secrets.HETZNER_USER }}@${{ secrets.HETZNER_HOST }} \
-            "cd /opt/codewalk-src && git pull origin master && \
-             cp deploy/deploy-server.sh /opt/codewalk/deploy-server.sh && \
-             chmod +x /opt/codewalk/deploy-server.sh && \
-             DEPLOY_SHA='${SHORT_SHA:0:7}' /opt/codewalk/deploy-server.sh"
+          echo "Deploy SHA: ${{ github.sha }}"
+          echo "Status: ${{ job.status }}"
 ```
 
 ### 5.4 Test the Pipeline
