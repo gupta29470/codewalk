@@ -53,12 +53,10 @@ jobs:
     runs-on: ubuntu-latest
     if: github.ref == 'refs/heads/master'
     steps:
-      - name: Get short SHA
-        id: sha
-        run: echo "short_sha=$(git rev-parse --short HEAD)" >> $GITHUB_OUTPUT
-
       - name: Deploy to Hetzner via SSH
         uses: appleboy/ssh-action@v1.0.3
+        env:
+          DEPLOY_SHA: ${{ github.sha }}
         with:
           host: ${{ secrets.HETZNER_HOST }}
           username: ${{ secrets.HETZNER_USER }}
@@ -76,11 +74,13 @@ jobs:
             cp /opt/codewalk-src/deploy/deploy-server.sh /opt/codewalk/deploy-server.sh
             chmod +x /opt/codewalk/deploy-server.sh
             
-            # Run deploy with SHA from GitHub Actions
-            DEPLOY_SHA="${{ steps.sha.outputs.short_sha }}" /opt/codewalk/deploy-server.sh
+            # Run deploy with SHA from GitHub Actions (first 7 chars)
+            SHORT_SHA="${DEPLOY_SHA:0:7}"
+            echo "Deploying SHA: $SHORT_SHA"
+            DEPLOY_SHA="$SHORT_SHA" /opt/codewalk/deploy-server.sh
 
       - name: Deployment summary
         if: always()
         run: |
-          echo "Deploy SHA: ${{ steps.sha.outputs.short_sha }}"
+          echo "Deploy SHA: ${{ github.sha }}"
           echo "Status: ${{ job.status }}"
