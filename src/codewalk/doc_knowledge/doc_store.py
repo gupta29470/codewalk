@@ -82,7 +82,7 @@ class DocStore:
 
             self.collection.upsert(
                 ids=[
-                    f"{chunk["metadata"]["doc_path"]}::{chunk['metadata']['chunk_index']}"
+                    f"{chunk['metadata']['doc_path']}::{chunk['metadata']['chunk_index']}"
                     for chunk in batch_chunks
                 ],
                 embeddings=batch_embeddings,
