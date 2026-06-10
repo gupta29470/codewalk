@@ -4,7 +4,7 @@ CREATE TABLE IF NOT EXISTS repos (
     id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     name            TEXT UNIQUE NOT NULL,
     github_url      TEXT NOT NULL,
-    branch          TEXT NOT NULL DEFAULT 'main',
+    branch          TEXT NOT NULL DEFAULT 'master',
     installation_id TEXT NOT NULL DEFAULT '',
     repo_token      TEXT NOT NULL,
     created_at      TIMESTAMP DEFAULT NOW()

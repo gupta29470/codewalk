@@ -342,7 +342,7 @@ curl -X POST http://localhost:8000/incremental-reindex
 # Review current git diff for bugs, security, style
 curl -X POST http://localhost:8000/review \
   -H "Content-Type: application/json" \
-  -d '{"staged": false, "target_branch": "main"}'
+  -d '{"staged": false, "target_branch": "master"}'
 ```
 
 See [API Reference](#-api-reference) for full request/response details on every endpoint.
@@ -756,7 +756,7 @@ or
 
 #### "Review my changes for bugs"
 
-**Tool:** `codewalk_review_diff` — optional: `staged=true`, `target_branch="main"`
+**Tool:** `codewalk_review_diff` — optional: `staged=true`, `target_branch="master"`
 
 You're about to push a PR and want an automated code review.
 
@@ -764,7 +764,7 @@ You're about to push a PR and want an automated code review.
 @codewalk review my changes
 or
 @codewalk_review_diff
-@codewalk_review_diff staged=true target_branch="main"
+@codewalk_review_diff staged=true target_branch="master"
 ```
 
 **When to use:** Before pushing a PR. Catches security vulnerabilities (OWASP), bugs, missing test coverage, and style issues. In MCP mode, Copilot performs the review directly using enriched context (full file contents, dependency graph, vector store patterns) — no local LLM overhead, instant results.
@@ -1164,7 +1164,7 @@ curl -X POST http://localhost:8000/incremental-reindex
 ```bash
 curl -X POST http://localhost:8000/review \
   -H "Content-Type: application/json" \
-  -d '{"staged": false, "target_branch": "main"}'
+  -d '{"staged": false, "target_branch": "master"}'
 ```
 
 **Response:**
@@ -1190,7 +1190,7 @@ curl -X POST http://localhost:8000/review \
 ```
 
 - `staged`: If `true`, review only staged changes (`--staged`). Default: `false`.
-- `target_branch`: Diff against a branch (e.g. `"main"` for full PR review). Default: `null` (unstaged changes).
+- `target_branch`: Diff against a branch (e.g. `"master"` for full PR review). Default: `null` (unstaged changes).
 
 #### `POST /review/file` — Review a single file
 
@@ -1314,7 +1314,7 @@ For a dedicated server deployment on Hetzner Cloud:
 ssh root@<your-server-ip>
 
 # Download and run the setup script
-curl -fsSL https://raw.githubusercontent.com/gupta29470/codewalk/main/deploy/hetzner-setup.sh | bash
+curl -fsSL https://raw.githubusercontent.com/gupta29470/codewalk/master/deploy/hetzner-setup.sh | bash
 
 # Fill in secrets
 nano /opt/codewalk/.env
@@ -1332,7 +1332,7 @@ See [`deploy/DEPLOY.md`](deploy/DEPLOY.md) for the full deployment guide includi
 
 ### CI/CD (GitHub Actions)
 
-Push to `main` automatically builds and deploys:
+Push to `master` automatically builds and deploys:
 
 1. GitHub Actions builds Docker image → pushes to GHCR
 2. SSH into Hetzner server → pulls latest image → restarts services

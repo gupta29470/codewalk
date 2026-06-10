@@ -49,7 +49,7 @@ Before touching any server, verify these items locally.
 
 ### GitHub
 
-- [ ] Repository has `main` branch as default
+- [ ] Repository has `master` branch as default
 - [ ] GitHub Secrets configured (see [GitHub Secrets](#github-secrets))
 - [ ] GitHub Container Registry (GHCR) enabled for the repo
 
@@ -114,7 +114,7 @@ scp deploy/hetzner-setup.sh root@<HETZNER_IP>:/tmp/
 ssh root@<HETZNER_IP> "bash /tmp/hetzner-setup.sh codewalk.yourdomain.com admin@yourdomain.com"
 
 # Option B: Paste directly (if repo is public)
-curl -fsSL https://raw.githubusercontent.com/YOUR_ORG/codewalk/main/deploy/hetzner-setup.sh | \
+curl -fsSL https://raw.githubusercontent.com/YOUR_ORG/codewalk/master/deploy/hetzner-setup.sh | \
   bash -s "codewalk.yourdomain.com" "admin@yourdomain.com"
 ```
 
@@ -214,12 +214,12 @@ Go to **Repo → Settings → Secrets and variables → Actions → New reposito
 
 ### First Deploy (Manual Trigger)
 
-The workflow triggers on every push to `main`. For the first deploy, push your code:
+The workflow triggers on every push to `master`. For the first deploy, push your code:
 
 ```bash
 git add .
 git commit -m "chore: deployment ready"
-git push origin main
+git push origin master
 ```
 
 Watch the workflow run: **Repo → Actions → Build & Deploy**
@@ -295,7 +295,7 @@ After the initial setup, deployment is fully automated.
 # Make changes locally
 git add .
 git commit -m "feat: add new feature"
-git push origin main
+git push origin master
 ```
 
 GitHub Actions builds and deploys automatically (~3-5 minutes).
@@ -357,7 +357,7 @@ docker compose down
 # Re-deploy previous Git commit
 git log --oneline -5  # find the good commit
 git revert <BAD_COMMIT_SHA>
-git push origin main
+git push origin master
 ```
 
 ---
