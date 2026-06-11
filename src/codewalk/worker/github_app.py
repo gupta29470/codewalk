@@ -1,3 +1,4 @@
+import os
 import jwt as _jwt         
 import time as _time
 import requests as _requests
@@ -5,6 +6,24 @@ import requests as _requests
 # In-memory token cache: {(app_id, installation_id): (token, expiry_timestamp)}
 _token_cache: dict[tuple[str, str], tuple[str, float]] = {}
 _TOKEN_CACHE_MARGIN = 300  # refresh 5 min before expiry
+
+
+def has_github_app_private_key() -> bool:
+    """True if GITHUB_APP_PRIVATE_KEY_PATH points to an existing PEM file."""
+    path = os.environ.get("GITHUB_APP_PRIVATE_KEY_PATH", "").strip()
+    return bool(path and os.path.isfile(path))
+
+
+def load_github_app_private_key() -> str:
+    """Load GitHub App PEM from GITHUB_APP_PRIVATE_KEY_PATH."""
+    path = os.environ.get("GITHUB_APP_PRIVATE_KEY_PATH", "").strip()
+    if not path:
+        raise RuntimeError("GITHUB_APP_PRIVATE_KEY_PATH is not set.")
+    if not os.path.isfile(path):
+        raise FileNotFoundError(f"GITHUB_APP_PRIVATE_KEY_PATH not found: {path}")
+    with open(path) as f:
+        return f.read()
+
 
 def get_installation_token(app_id: str, private_key_pem: str, installation_id: str) -> str:
     """Generate a short-lived GitHub App installation token (~1 hour, auto-expires).
@@ -44,4 +63,3 @@ def get_installation_token(app_id: str, private_key_pem: str, installation_id: s
 
     _token_cache[cache_key] = (token, expiry_ts)
     return token
-

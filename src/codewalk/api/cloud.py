@@ -19,10 +19,11 @@ MAX_WEBHOOK_SIZE = 50 * 1024 * 1024  # 50MB
 
 def is_cloud_enabled() -> bool:
     """Check if all required cloud environment variables are set."""
+    from src.codewalk.worker.github_app import has_github_app_private_key
     return bool(
         os.environ.get("DATABASE_URL")
         and os.environ.get("GITHUB_APP_ID")
-        and os.environ.get("GITHUB_APP_PRIVATE_KEY")
+        and has_github_app_private_key()
     )
 
 

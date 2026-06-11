@@ -39,7 +39,7 @@ Before touching any server, verify these items locally.
 - [ ] `.env` file created with all required variables (see [Environment Variables](#environment-variables))
 - [ ] `POSTGRES_PASSWORD` is strong (≥20 chars, mixed case + numbers + symbols)
 - [ ] LLM API key is valid and has sufficient quota
-- [ ] `GITHUB_APP_PRIVATE_KEY` is the full PEM content (not a file path) if using cloud mode
+- [ ] `GITHUB_APP_PRIVATE_KEY_PATH` points to the downloaded `.pem` file on the server
 - [ ] `ADMIN_API_KEY` is strong and unique
 
 ### DNS & Domain
@@ -161,7 +161,7 @@ GROQ_API_KEY=gsk_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
 # Cloud Mode (GitHub App + webhooks) — uncomment ALL three to enable
 # DATABASE_URL=postgresql://codewalk:your-very-strong-password-here-20-chars-min@postgres/codewalk
 # GITHUB_APP_ID=123456
-# GITHUB_APP_PRIVATE_KEY="-----BEGIN RSA PRIVATE KEY-----\n...\n-----END RSA PRIVATE KEY-----"
+# GITHUB_APP_PRIVATE_KEY_PATH=/var/codewalk/secrets/codewalk-cloud.private-key.pem
 # GITHUB_WEBHOOK_SECRET=whsec_xxxxxxxx
 # ADMIN_API_KEY=cw_admin_xxxxxxxx
 
@@ -287,7 +287,7 @@ After creation, note these values:
 |------------|-------|---------|
 | **App ID** | Top of app settings page | `GITHUB_APP_ID` |
 | **Client ID** | Same page | (not needed for webhooks) |
-| **Private Key** | "Private keys" → Generate → download `.pem` | `GITHUB_APP_PRIVATE_KEY` |
+| **Private Key** | "Private keys" → Generate → download `.pem` | `GITHUB_APP_PRIVATE_KEY_PATH` |
 | **Webhook Secret** | The secret you set above | `GITHUB_WEBHOOK_SECRET` |
 
 **Private key format:** Paste the entire `.pem` file content (including `-----BEGIN RSA PRIVATE KEY-----` and `-----END RSA PRIVATE KEY-----`) into the env var. It should be a single line with `\n` preserved, or the actual multiline PEM.
@@ -309,9 +309,7 @@ SSH into your server and add the cloud mode variables:
 ssh -i ~/.ssh/hetzner_codewalk root@62.238.42.150
 cat >> /opt/codewalk/.env << 'EOF'
 GITHUB_APP_ID=123456
-GITHUB_APP_PRIVATE_KEY=-----BEGIN RSA PRIVATE KEY-----
-...
------END RSA PRIVATE KEY-----
+GITHUB_APP_PRIVATE_KEY_PATH=/var/codewalk/secrets/codewalk-cloud.private-key.pem
 GITHUB_WEBHOOK_SECRET=your-webhook-secret
 ADMIN_API_KEY=$(openssl rand -hex 32)
 EOF
@@ -512,7 +510,7 @@ docker compose logs --tail 50 codewalk-api | grep worker
 ```
 
 Common causes:
-- `GITHUB_APP_PRIVATE_KEY` formatting (must be one-line with `\n` or raw multi-line)
+- `GITHUB_APP_PRIVATE_KEY_PATH` file missing or not mounted into container
 - `DATABASE_URL` incorrect
 - GitHub App not installed on the target repo
 
@@ -535,7 +533,7 @@ Common causes:
 | `CORS_ORIGINS` | ❌ | `*` | Comma-separated allowed origins |
 | `DATABASE_URL` | ❌ | — | Required for **cloud mode** only |
 | `GITHUB_APP_ID` | ❌ | — | Required for **cloud mode** only |
-| `GITHUB_APP_PRIVATE_KEY` | ❌ | — | Required for **cloud mode** only |
+| `GITHUB_APP_PRIVATE_KEY_PATH` | ❌ | — | Required for **cloud mode** only |
 | `GITHUB_WEBHOOK_SECRET` | ❌ | — | Required for **cloud mode** only |
 | `ADMIN_API_KEY` | ❌ | — | Required for **cloud mode** only |
 

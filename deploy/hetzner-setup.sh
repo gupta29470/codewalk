@@ -54,7 +54,7 @@ DEEPSEEK_API_KEY=
 # Uncomment and fill to enable cloud mode (GitHub App + webhooks)
 # DATABASE_URL=postgresql://codewalk:change-me-strong-password@postgres/codewalk
 # GITHUB_APP_ID=
-# GITHUB_APP_PRIVATE_KEY=
+# GITHUB_APP_PRIVATE_KEY_PATH=/var/codewalk/secrets/github-app.pem
 # GITHUB_WEBHOOK_SECRET=
 # ADMIN_API_KEY=
 
@@ -98,7 +98,7 @@ services:
       - DEEPSEEK_API_KEY=${DEEPSEEK_API_KEY:-}
       - DATABASE_URL=${DATABASE_URL:-}
       - GITHUB_APP_ID=${GITHUB_APP_ID:-}
-      - GITHUB_APP_PRIVATE_KEY=${GITHUB_APP_PRIVATE_KEY:-}
+      - GITHUB_APP_PRIVATE_KEY_PATH=${GITHUB_APP_PRIVATE_KEY_PATH:-}
       - GITHUB_WEBHOOK_SECRET=${GITHUB_WEBHOOK_SECRET:-}
       - ADMIN_API_KEY=${ADMIN_API_KEY:-}
       - INDEX_STORAGE_PATH=/var/codewalk
