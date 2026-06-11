@@ -97,6 +97,17 @@ if [ "$GHCR_AVAILABLE" != "true" ]; then
     echo "✅ Local build complete"
 fi
 
+# ── Sync deploy configs (.env stays manual) ─────────────────────────
+echo ""
+echo "Syncing docker-compose.yml and Caddyfile from $SRC_DIR ..."
+if [ ! -f "$SRC_DIR/deploy/docker-compose.yml" ] || [ ! -f "$SRC_DIR/deploy/Caddyfile" ]; then
+    echo "❌ Missing deploy configs in $SRC_DIR/deploy/" >&2
+    exit 1
+fi
+cp "$SRC_DIR/deploy/docker-compose.yml" "$COMPOSE_DIR/docker-compose.yml"
+cp "$SRC_DIR/deploy/Caddyfile" "$COMPOSE_DIR/Caddyfile"
+echo "✅ Deploy configs synced"
+
 # ── Restart containers ──────────────────────────────────────────────
 echo ""
 echo "Restarting containers..."
