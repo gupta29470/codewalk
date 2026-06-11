@@ -1,30 +1,14 @@
 # ═══════════════════════════════════════════════════════════════
-# Caddy Configuration
-# ═══════════════════════════════════════════════════════════════
-#
-# MODE A: IP-Only (default, no domain needed)
-#   Uncomment the first block below, comment out the domain block.
-#   Caddy serves HTTP on port 80. No HTTPS (that's fine for testing).
-#
-# MODE B: Custom Domain
-#   Comment out the IP block, uncomment the domain block.
-#   Replace codewalk.yourdomain.com with your actual domain.
-#   Caddy auto-provisions Let's Encrypt HTTPS.
-#
-# To switch modes after deploy:
-#   1. Edit this file on server
-#   2. docker compose restart caddy
+# Caddy — production (api.codewalk.xyz)
+# Copy to server: /opt/codewalk/Caddyfile
+# Then: docker compose restart caddy
 # ═══════════════════════════════════════════════════════════════
 
-# ─── MODE A: IP-Only (default) ────────────────────────────────
-# Caddy serves HTTP on the server IP. HTTPS is disabled.
-# After you get your Hetzner IP, replace __SERVER_IP__ below
-# or let hetzner-setup.sh auto-fill it.
-:80 {
+api.codewalk.xyz {
     reverse_proxy codewalk-api:8000
 }
 
-# ─── MODE B: Custom Domain (uncomment when ready) ─────────────
-# codewalk.yourdomain.com {
+# ─── DEV FALLBACK: IP-only HTTP (comment out domain block above) ───
+# :80 {
 #     reverse_proxy codewalk-api:8000
 # }
