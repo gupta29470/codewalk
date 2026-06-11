@@ -9,8 +9,8 @@
 <p align="center">
   <a href="#-features">Features</a> •
   <a href="#-demo">Demo</a> •
-  <a href="#%EF%B8%8F-setup">Setup</a> •
-  <a href="#-usage">Usage</a> •
+  <a href="#%EF%B8%8F-setup">Local Setup</a> •
+  <a href="#-cloud-deployment">Cloud</a> •
   <a href="#-mcp-integration">MCP</a> •
   <a href="#-api-reference">API</a> •
   <a href="#-architecture">Architecture</a> •
@@ -35,12 +35,15 @@ Codewalk analyzes any codebase and gives you:
 - **Corrective RAG** — distance-based chunk filtering + LLM answer grading + query rewriting for higher quality answers
 - **Voice interface** — talk to your codebase hands-free: mic → transcribe → Copilot routes → speak answer
 
-Four ways to use it:
+Three ways to use it locally, plus optional cloud indexing:
+
 | Interface | Best for |
 |-----------|----------|
 | **Web UI** (Next.js) | Visual exploration — diagrams, module browser, blast radius viewer |
-| **MCP Server** | VS Code Copilot, Claude Code, Cursor, Codex — AI agents use tools directly |
+| **MCP Server** | VS Code Copilot, Claude Code, Cursor — AI agents use tools directly |
 | **REST API** | Scripts, CI/CD, custom integrations |
+
+**Cloud (optional):** Push to GitHub → [Codewalk Cloud](https://api.codewalk.xyz) indexes on the server → MCP downloads the index and queries **locally**. See [Cloud Deployment](#-cloud-deployment).
 
 > **🎙️ Voice** is available via both **MCP** (`codewalk_voice_ask` + `codewalk_speak`) and **REST API** (`POST /voice/ask`) — ask questions by speaking, hear answers read aloud.
 
@@ -135,7 +138,9 @@ https://github.com/user-attachments/assets/51d41d48-970f-437e-8c50-e6a104d71e0e
 
 ---
 
-## ⚙️ Setup
+## ⚙️ Setup (local)
+
+> **Production cloud server?** See **[FULL_SETUP_GUIDE.md](FULL_SETUP_GUIDE.md)** — step-by-step: Hetzner, `api.codewalk.xyz`, GitHub App, webhooks, MCP download.
 
 ### Prerequisites
 
@@ -207,7 +212,7 @@ cd ..
 
 ### 4. Configure environment in codewalk
 
-Create a `.env` file in the project root:
+Copy the template: `cp env.local.example.txt .env` then edit:
 
 ```env
 # ─── LLM Configuration ──────────────────────────────────────
@@ -352,6 +357,44 @@ See [API Reference](#-api-reference) for full request/response details on every 
 ## 🔌 MCP Integration
 
 Codewalk runs as an MCP (Model Context Protocol) server, so any AI agent that speaks MCP can use it.
+
+### Cloud MCP (index on server, query locally)
+
+1. Cloud server indexes your repo on `git push` (GitHub App webhook)
+2. Clone **codewalk** locally (MCP server code)
+3. Open **target repo** in Cursor/VS Code (`${workspaceFolder}`)
+4. Configure MCP with cloud URL + repo token:
+
+```json
+{
+  "servers": {
+    "codewalk": {
+      "command": "/path/to/codewalk/.codewalk-env/bin/python",
+      "args": ["-m", "src.codewalk.mcp.server"],
+      "cwd": "/path/to/codewalk",
+      "env": {
+        "REPO_PATH": "${workspaceFolder}",
+        "CODEWALK_SERVER_URL": "https://api.codewalk.xyz",
+        "CODEWALK_REPO_NAME": "owner/repo",
+        "CODEWALK_REPO_TOKEN": "cw_repo_xxxxxxxx"
+      }
+    }
+  }
+}
+```
+
+Get `repo_token` after first index (on server):
+
+```bash
+docker compose exec postgres psql -U codewalk -d codewalk -c \
+  "SELECT repo_token FROM repos WHERE full_name='owner/repo';"
+```
+
+Run **`codewalk_connect_repo`** in Cursor or let analyze auto-download the index.
+
+### Local-only MCP (index on your machine)
+
+No cloud — index runs locally via `codewalk_analyze_codebase`.
 
 ### Starting the MCP Server in VS Code
 
@@ -1272,77 +1315,83 @@ curl http://localhost:8000/health
 
 ---
 
-## 🚀 Deployment
+## ☁️ Cloud Deployment
 
-### Docker (Recommended for Production)
+Production API: **`https://api.codewalk.xyz`** (indexing + webhooks + index download).  
+Marketing site (optional): **`https://codewalk.xyz`**
 
-Codewalk ships with a multi-stage Dockerfile and docker-compose for production deployment.
+### Architecture
 
-**Requirements:** Docker + Docker Compose
-
-```bash
-# Clone and enter the repo
-git clone https://github.com/gupta29470/codewalk.git
-cd codewalk
-
-# Create .env with your secrets
-cp env.example.txt .env
-# Edit .env — fill in LLM_PROVIDER, LLM_MODEL, and at least one API key
-
-# Build and start (includes Postgres, API, and Caddy reverse proxy)
-docker compose -f deploy/docker-compose.yml up -d
+```
+git push → GitHub App webhook → api.codewalk.xyz → index stored
+                                        ↓
+Local MCP → GET /indexes/{owner}/{repo} → query locally
 ```
 
-**Services:**
-| Service | Port | Description |
-|---------|------|-------------|
-| Postgres | 5432 (internal) | Persistent database for cloud mode |
-| Codewalk API | 8000 | FastAPI backend |
-| Caddy | 80 / 443 | Reverse proxy + auto-HTTPS (with domain) |
+| Component | Where | Role |
+|-----------|-------|------|
+| **Cloud server** | Hetzner + Docker | Index on push only |
+| **GitHub Actions** | GitHub | Build image + deploy server |
+| **GitHub App** | GitHub | Send `push` webhooks (must **install** app on repos) |
+| **Local MCP** | Your laptop | Download index, run queries |
 
-**Health check:** `curl http://localhost/health`
+### Quick start
 
-### Hetzner VPS (One-Click Setup)
+1. Follow **[FULL_SETUP_GUIDE.md](FULL_SETUP_GUIDE.md)** (complete step-by-step)
+2. Server `.env`: `cp env.server.example.txt` → `/opt/codewalk/.env`
+3. GitHub App webhook: `https://api.codewalk.xyz/webhooks/github`
+4. **Install App** on each repo to index (creating the app is not enough)
+5. **`git push`** to that repo — this registers it and starts indexing (install alone is not enough)
+6. Verify: `POST /admin/repos` with `X-Admin-Key` → `index_status: ready`
+7. Get `repo_token` from DB → set `CODEWALK_REPO_TOKEN` in MCP config
 
-For a dedicated server deployment on Hetzner Cloud:
+### Indexing a repo (checklist)
 
-```bash
-# 1. Create a CPX21 server (Ubuntu 24.04) on Hetzner Cloud
-# 2. Add your SSH key
-# 3. SSH in and run the setup script
+| Step | Required for indexing? |
+|------|------------------------|
+| Server running + cloud `.env` (App ID, PEM, webhook secret) | Yes |
+| GitHub Actions secrets (`HETZNER_*`) | No — deploy only |
+| Install GitHub App on the repo | Yes |
+| `git push` to the repo | Yes — triggers register + index |
+| `repo_token` in local MCP | Yes — for downloading the index |
 
-ssh root@<your-server-ip>
+> GitHub Actions **deploys the server**. **Indexing** is triggered by **GitHub App `push` webhooks**, not Actions.
 
-# Download and run the setup script
-curl -fsSL https://raw.githubusercontent.com/gupta29470/codewalk/master/deploy/hetzner-setup.sh | bash
+### Per-repo team config (`codewalk.yaml`)
 
-# Fill in secrets
-nano /opt/codewalk/.env
+Each indexed repo can have a `codewalk.yaml` at its root:
 
-# Start services
-cd /opt/codewalk && docker compose up -d
+```yaml
+indexing:
+  branches:          # only these branches trigger indexing (fnmatch)
+    - master
+    - release/**
+  exclude:
+    - frontend/**
+    - build/**
+    - docs/**
 ```
 
-See [`deploy/DEPLOY.md`](deploy/DEPLOY.md) for the full deployment guide including:
-- Pre-deployment checklist
-- GitHub Actions CI/CD setup
-- Domain + HTTPS configuration
-- Post-deployment verification
-- Troubleshooting
+Cloud reads this on every index. Pushes to other branches are ignored. See [FULL_SETUP_GUIDE.md § Phase 7](FULL_SETUP_GUIDE.md#9-phase-7--team-config-codewalkyaml).
+
+### Config templates
+
+| File | Use |
+|------|-----|
+| [FULL_SETUP_GUIDE.md](FULL_SETUP_GUIDE.md) | Complete A→Z setup |
+| [deploy/DEPLOY.md](deploy/DEPLOY.md) | Ops reference |
+| [env.server.example.txt](env.server.example.txt) | Hetzner `/opt/codewalk/.env` |
+| [env.local.example.txt](env.local.example.txt) | Local dev `.env` |
+| [mcp.json.example](mcp.json.example) | MCP config → `.vscode/mcp.json` |
+| [env.example.txt](env.example.txt) | All env vars index |
 
 ### CI/CD (GitHub Actions)
 
-Push to `master` automatically builds and deploys:
+Push to `master` → build image → GHCR → deploy to Hetzner (`deploy-server.sh` syncs compose + Caddyfile).
 
-1. GitHub Actions builds Docker image → pushes to GHCR
-2. SSH into Hetzner server → pulls latest image → restarts services
+**Secrets:** `HETZNER_HOST`, `HETZNER_USER`, `HETZNER_SSH_KEY`
 
-**Required GitHub Secrets:**
-| Secret | Description |
-|--------|-------------|
-| `HETZNER_HOST` | Your server IP |
-| `HETZNER_USER` | SSH user (usually `root`) |
-| `HETZNER_SSH_KEY` | Private SSH key for deployment |
+> GitHub Actions **deploys the server**. **Indexing** is triggered by **GitHub App push webhooks**, not Actions.
 
 ---
 
@@ -1551,7 +1600,11 @@ codewalk/
 │   └── deploy.yml                 #   Build Docker image → GHCR → deploy
 │
 ├── requirements.txt               # Python dependencies
-├── env.example.txt                # Environment variable template
+├── codewalk.yaml                  # Per-repo config (branches, excludes)
+├── env.example.txt                # Environment variable index
+├── env.server.example.txt         # Hetzner server .env template
+├── env.local.example.txt          # Local dev .env template
+├── FULL_SETUP_GUIDE.md            # Complete cloud + MCP setup (step by step)
 ├── .env                           # Configuration (gitignored)
 └── .vscode/mcp.json               # MCP server config
 ```
@@ -1579,6 +1632,13 @@ codewalk/
 | `RATE_LIMIT_REQUESTS` | `60` | Max requests per IP per window |
 | `RATE_LIMIT_WINDOW` | `60` | Rate limit window in seconds |
 | `INDEX_STORAGE_PATH` | `/var/codewalk` | Path for ChromaDB/DuckDB data (Docker default) |
+| `GITHUB_APP_ID` | — | GitHub App ID (server cloud mode) |
+| `GITHUB_APP_PRIVATE_KEY_PATH` | — | PEM path inside container, e.g. `/var/codewalk/secrets/key.pem` |
+| `GITHUB_WEBHOOK_SECRET` | — | Must match GitHub App webhook secret |
+| `ADMIN_API_KEY` | — | `X-Admin-Key` header for `/admin/*` routes |
+| `CODEWALK_SERVER_URL` | — | MCP: cloud API URL, e.g. `https://api.codewalk.xyz` |
+| `CODEWALK_REPO_NAME` | — | MCP: `owner/repo` slug |
+| `CODEWALK_REPO_TOKEN` | — | MCP: per-repo download token (`cw_repo_...`) |
 
 ---
 

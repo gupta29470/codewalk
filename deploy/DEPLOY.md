@@ -1,6 +1,8 @@
 # Codewalk Deployment Guide — Hetzner Cloud
 
 > One-stop guide for deploying Codewalk to a Hetzner VPS with Docker Compose, Caddy reverse proxy, and GitHub Actions CI/CD.
+>
+> **Production (this repo):** `api.codewalk.xyz` — see **[FULL_SETUP_GUIDE.md](../FULL_SETUP_GUIDE.md)** for the complete step-by-step (GitHub App install, webhooks, MCP, troubleshooting).
 
 ---
 
@@ -158,15 +160,15 @@ GROQ_API_KEY=gsk_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
 # CORS — restrict to your frontend domain(s) in production
 # CORS_ORIGINS=https://yourdomain.com,https://app.yourdomain.com
 
-# Cloud Mode (GitHub App + webhooks) — uncomment ALL three to enable
-# DATABASE_URL=postgresql://codewalk:your-very-strong-password-here-20-chars-min@postgres/codewalk
+# Cloud Mode (GitHub App + webhooks)
+# DATABASE_URL is auto-built from POSTGRES_PASSWORD in deploy/docker-compose.yml — do not paste PEM here
 # GITHUB_APP_ID=123456
 # GITHUB_APP_PRIVATE_KEY_PATH=/var/codewalk/secrets/codewalk-cloud.private-key.pem
 # GITHUB_WEBHOOK_SECRET=whsec_xxxxxxxx
 # ADMIN_API_KEY=cw_admin_xxxxxxxx
 
 # Embeddings model override
-# EMBEDDING_MODEL=jinaai/jina-embeddings-v2-base-code
+# EMBEDDING_MODEL=jinaai/jina-code-embeddings-1.5b
 ```
 
 ### Step 4: Start Services (First Time)
@@ -254,8 +256,8 @@ Required for **cloud mode** — automatic repo indexing via webhooks.
 | Field | Value |
 |-------|-------|
 | **GitHub App name** | `codewalk-yourname` (must be globally unique) |
-| **Homepage URL** | `http://62.238.42.150` (your Hetzner IP) |
-| **Webhook URL** | `http://62.238.42.150/webhooks/github` |
+| **Homepage URL** | `https://codewalk.xyz` (or your Hetzner IP) |
+| **Webhook URL** | `https://api.codewalk.xyz/webhooks/github` |
 | **Webhook secret** | Generate with `openssl rand -hex 32` |
 
 3. **Permissions:**
@@ -290,9 +292,11 @@ After creation, note these values:
 | **Private Key** | "Private keys" → Generate → download `.pem` | `GITHUB_APP_PRIVATE_KEY_PATH` |
 | **Webhook Secret** | The secret you set above | `GITHUB_WEBHOOK_SECRET` |
 
-**Private key format:** Paste the entire `.pem` file content (including `-----BEGIN RSA PRIVATE KEY-----` and `-----END RSA PRIVATE KEY-----`) into the env var. It should be a single line with `\n` preserved, or the actual multiline PEM.
+**Private key:** Copy `.pem` to `/var/codewalk/secrets/` on the server. Set `GITHUB_APP_PRIVATE_KEY_PATH=/var/codewalk/secrets/your-key.pem` in `.env` (container path, not `/opt/...`). Run `chown 999:999` and `chmod 600` on the PEM.
 
-### 3. Install the App
+### 3. Install the App (required — creating the app is not enough)
+
+> **Install does not register the repo.** Codewalk ignores `installation` webhooks and registers on the **first `push`** to an installed repo. Ping returns `pong` only. See [FULL_SETUP_GUIDE.md § What triggers registration](../FULL_SETUP_GUIDE.md#1-architecture).
 
 1. In your GitHub App settings → **Install App** (left sidebar)
 2. Select your account or organization
@@ -306,14 +310,14 @@ After creation, note these values:
 SSH into your server and add the cloud mode variables:
 
 ```bash
-ssh -i ~/.ssh/hetzner_codewalk root@62.238.42.150
+ssh -i ~/.ssh/hetzner_codewalk root@YOUR_SERVER_IP
 cat >> /opt/codewalk/.env << 'EOF'
 GITHUB_APP_ID=123456
 GITHUB_APP_PRIVATE_KEY_PATH=/var/codewalk/secrets/codewalk-cloud.private-key.pem
 GITHUB_WEBHOOK_SECRET=your-webhook-secret
 ADMIN_API_KEY=$(openssl rand -hex 32)
 EOF
-cd /opt/codewalk && docker compose restart codewalk-api
+cd /opt/codewalk && docker compose up -d --force-recreate codewalk-api
 ```
 
 ### 5. Verify Webhook Delivery
@@ -337,7 +341,7 @@ git push origin master
 Check indexing status:
 ```bash
 curl -H "X-Admin-Key: $ADMIN_API_KEY" \
-  http://62.238.42.150/admin/repos
+  https://api.codewalk.xyz/admin/repos
 ```
 
 ---
@@ -345,6 +349,8 @@ curl -H "X-Admin-Key: $ADMIN_API_KEY" \
 ## Post-Deployment Verification
 
 Run these checks immediately after first deploy and after every future deploy.
+
+> **This repo's production domain:** replace `codewalk.yourdomain.com` with `api.codewalk.xyz` below.
 
 ### Health Checks
 
@@ -529,9 +535,9 @@ Common causes:
 | `GOOGLE_API_KEY` | ⚠️ | — | Required if `LLM_PROVIDER=gemini` |
 | `OPENROUTER_API_KEY` | ⚠️ | — | Required if `LLM_PROVIDER=openrouter` |
 | `DEEPSEEK_API_KEY` | ⚠️ | — | Required if `LLM_PROVIDER=deepseek` |
-| `EMBEDDING_MODEL` | ❌ | `jinaai/jina-embeddings-v2-base-code` | HuggingFace model for embeddings |
+| `EMBEDDING_MODEL` | ❌ | `jinaai/jina-code-embeddings-1.5b` | HuggingFace model for embeddings |
 | `CORS_ORIGINS` | ❌ | `*` | Comma-separated allowed origins |
-| `DATABASE_URL` | ❌ | — | Required for **cloud mode** only |
+| `DATABASE_URL` | ❌ | auto in compose | Built from `POSTGRES_PASSWORD` — do not set manually unless custom compose |
 | `GITHUB_APP_ID` | ❌ | — | Required for **cloud mode** only |
 | `GITHUB_APP_PRIVATE_KEY_PATH` | ❌ | — | Required for **cloud mode** only |
 | `GITHUB_WEBHOOK_SECRET` | ❌ | — | Required for **cloud mode** only |
@@ -549,9 +555,10 @@ Common causes:
 └── data/                # Persistent data (optional volume)
 
 /var/codewalk/
-├── repos/               # Cloned repositories
-└── <repo-name>/
-    └── latest/          # Cloud indexes
+├── repos/               # Cloned repositories (owner/repo)
+├── indexes/             # Index artifacts (chroma, duckdb, manifest)
+│   └── owner/repo/
+└── secrets/             # GitHub App PEM (chmod 600, chown 999:999)
 ```
 
 ---

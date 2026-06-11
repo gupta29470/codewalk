@@ -7,9 +7,20 @@ import yaml
 @dataclass
 class TeamConfig:
     exclude: list[str] = field(default_factory=list)
-    branch: str = "master"
+    branches: list[str] = field(default_factory=list)  # allowed index branches (fnmatch)
     guidelines_path: str = ""   # relative to repo root
     docs_path: str = ""         # relative to repo root
+
+
+def index_branches(config: TeamConfig) -> list[str]:
+    """Branches that may trigger cloud indexing. Defaults to master if unset."""
+    return config.branches if config.branches else ["master"]
+
+
+def branch_allowed(branch: str, allowed: list[str]) -> bool:
+    """True if branch matches any allowed pattern (exact or fnmatch, e.g. release/**)."""
+    return any(fnmatch.fnmatch(branch, pattern) for pattern in allowed)
+
 
 def load_codewalk_yaml(repo_root: str) -> TeamConfig:
     """Load codewalk.yaml from repo root. Returns empty TeamConfig if missing."""
@@ -23,7 +34,7 @@ def load_codewalk_yaml(repo_root: str) -> TeamConfig:
     indexing = data.get("indexing", {})
     return TeamConfig(
         exclude=indexing.get("exclude", []),
-        branch=data.get("branch", "main"),
+        branches=indexing.get("branches") or [],
         guidelines_path=data.get("guidelines_path", ""),
         docs_path=data.get("docs_path", ""),
     )

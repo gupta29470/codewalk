@@ -173,6 +173,17 @@ def _verify_webhook(body: bytes, signature: str, secret: str) -> bool:
     return hmac.compare_digest(expected, signature)
 
 
+def _allowed_index_branches(repo: dict) -> list[str]:
+    """Resolve which branches may trigger indexing (from codewalk.yaml on server clone)."""
+    from src.codewalk.team_config import load_codewalk_yaml, index_branches
+
+    storage = repo.get("storage_path") or f"/var/codewalk/repos/{repo['full_name']}"
+    repo_path = Path(storage)
+    if (repo_path / "codewalk.yaml").exists():
+        return index_branches(load_codewalk_yaml(str(repo_path)))
+    return ["master"]
+
+
 def _get_or_create_repo(db, full_name: str, clone_url: str, installation_id: str, branch: str = "master") -> dict:
     """Get repo from DB or auto-register it on first webhook."""
     parts = full_name.split("/")
@@ -404,6 +415,21 @@ async def github_webhook(request: Request):
     repo = _get_or_create_repo(db, repo_full_name, clone_url, installation_id, branch)
     if not repo:
         raise HTTPException(500, "Failed to register repository")
+
+    # ── Branch allowlist (codewalk.yaml indexing.branches) ────────────
+    from src.codewalk.team_config import branch_allowed
+
+    allowed = _allowed_index_branches(repo)
+    if not branch_allowed(branch, allowed):
+        db.execute(
+            "UPDATE webhook_deliveries SET status=$1 WHERE delivery_id=$2",
+            "ignored_branch", delivery_id,
+        )
+        return {
+            "status": "ignored",
+            "reason": f"Branch '{branch}' not in allowed index branches",
+            "allowed_branches": allowed,
+        }
 
     # ── Skip if SHA unchanged ─────────────────────────────────────────
     if repo.get("last_indexed_sha") == commit:

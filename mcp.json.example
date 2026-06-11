@@ -1,0 +1,19 @@
+{
+  "servers": {
+    "codewalk": {
+      "command": "/path/to/codewalk/.codewalk-env/bin/python",
+      "args": ["-m", "src.codewalk.mcp.server"],
+      "cwd": "/path/to/codewalk",
+      "env": {
+        "REPO_PATH": "${workspaceFolder}",
+        "EXCLUDE_PATHS": "",
+        "REVIEW_GUIDELINES_PATH": "",
+        "CODE_DOCS_PATH": "",
+
+        "CODEWALK_SERVER_URL": "https://api.codewalk.xyz",
+        "CODEWALK_REPO_NAME": "owner/repo",
+        "CODEWALK_REPO_TOKEN": "cw_repo_xxxxxxxx"
+      }
+    }
+  }
+}

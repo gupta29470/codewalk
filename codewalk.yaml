@@ -1,9 +1,10 @@
 # Team config for gupta29470/codewalk — read on cloud index (load_codewalk_yaml)
 # Built-in file_filter.py also skips node_modules, .next, __pycache__, etc.
 
-branch: master
-
 indexing:
+  # Only these branches trigger cloud indexing (fnmatch patterns)
+  branches:
+    - master
   exclude:
     - .vscode/**
     - .git/**
@@ -17,5 +18,7 @@ indexing:
     - FULL_SETUP_GUIDE.md
     - deploy/DEPLOY.md
     - env.example.txt
+    - env.local.example.txt
     - env.server.example.txt
+    - mcp.json.example
     - src/codewalk/eval/**

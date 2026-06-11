@@ -51,10 +51,9 @@ OPENROUTER_API_KEY=
 DEEPSEEK_API_KEY=
 
 # ─── OPTIONAL: Cloud Mode ────────────────────────────────────────────
-# Uncomment and fill to enable cloud mode (GitHub App + webhooks)
-# DATABASE_URL=postgresql://codewalk:change-me-strong-password@postgres/codewalk
+# DATABASE_URL is auto-built from POSTGRES_PASSWORD in docker-compose.yml
 # GITHUB_APP_ID=
-# GITHUB_APP_PRIVATE_KEY_PATH=/var/codewalk/secrets/github-app.pem
+# GITHUB_APP_PRIVATE_KEY_PATH=/var/codewalk/secrets/codewalk-cloud.private-key.pem
 # GITHUB_WEBHOOK_SECRET=
 # ADMIN_API_KEY=
 
@@ -82,6 +81,8 @@ services:
   codewalk-api:
     image: ghcr.io/gupta29470/codewalk:latest
     command: uvicorn src.codewalk.api.main:app --host 0.0.0.0 --port 8000 --workers 1
+    ports:
+      - "8000:8000"
     volumes:
       - /var/codewalk:/var/codewalk
       - /root/.cache/huggingface:/root/.cache/huggingface
@@ -89,20 +90,22 @@ services:
       - REPO_PATH=/var/codewalk/repos
       - LLM_PROVIDER=${LLM_PROVIDER:-groq}
       - LLM_MODEL=${LLM_MODEL:-llama-3.1-70b-versatile}
-      - EMBEDDING_MODEL=${EMBEDDING_MODEL:-jinaai/jina-embeddings-v2-base-code}
+      - EMBEDDING_MODEL=${EMBEDDING_MODEL:-jinaai/jina-code-embeddings-1.5b}
       - GROQ_API_KEY=${GROQ_API_KEY:-}
       - OPENAI_API_KEY=${OPENAI_API_KEY:-}
       - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
       - GOOGLE_API_KEY=${GOOGLE_API_KEY:-}
       - OPENROUTER_API_KEY=${OPENROUTER_API_KEY:-}
       - DEEPSEEK_API_KEY=${DEEPSEEK_API_KEY:-}
-      - DATABASE_URL=${DATABASE_URL:-}
-      - GITHUB_APP_ID=${GITHUB_APP_ID:-}
-      - GITHUB_APP_PRIVATE_KEY_PATH=${GITHUB_APP_PRIVATE_KEY_PATH:-}
-      - GITHUB_WEBHOOK_SECRET=${GITHUB_WEBHOOK_SECRET:-}
-      - ADMIN_API_KEY=${ADMIN_API_KEY:-}
+      - DATABASE_URL=postgresql://codewalk:${POSTGRES_PASSWORD}@postgres/codewalk
+      - GITHUB_APP_ID=${GITHUB_APP_ID}
+      - GITHUB_APP_PRIVATE_KEY_PATH=${GITHUB_APP_PRIVATE_KEY_PATH}
+      - GITHUB_WEBHOOK_SECRET=${GITHUB_WEBHOOK_SECRET}
+      - ADMIN_API_KEY=${ADMIN_API_KEY}
       - INDEX_STORAGE_PATH=/var/codewalk
       - CORS_ORIGINS=${CORS_ORIGINS:-*}
+      - RATE_LIMIT_REQUESTS=${RATE_LIMIT_REQUESTS:-60}
+      - RATE_LIMIT_WINDOW=${RATE_LIMIT_WINDOW:-60}
     depends_on:
       - postgres
     restart: unless-stopped
@@ -139,11 +142,17 @@ ${DOMAIN} {
 }
 EOF
 
+# ── 7. Index storage (API container runs as uid 999) ─────────────────
+mkdir -p /var/codewalk/repos /var/codewalk/indexes /var/codewalk/secrets
+chown -R 999:999 /var/codewalk
+chmod 755 /var/codewalk
+
 echo "=== Setup complete ==="
 echo ""
 echo "Next steps:"
 echo "  1. Edit /opt/codewalk/.env with your secrets"
 echo "  2. Run: docker compose -f /opt/codewalk/docker-compose.yml up -d"
 echo "  3. Point your DNS A record to: $(curl -s ifconfig.me)"
-echo "  4. Caddy will auto-provision Let's Encrypt SSL"
+echo "  4. Copy PEM to /var/codewalk/secrets/ and set GITHUB_APP_PRIVATE_KEY_PATH"
+echo "  5. Caddy will auto-provision Let's Encrypt SSL"
 echo ""

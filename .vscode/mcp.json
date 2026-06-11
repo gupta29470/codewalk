@@ -12,9 +12,9 @@
                 "EXCLUDE_PATHS": "test,docs",
                 "REVIEW_GUIDELINES_PATH": "",
                 "CODE_DOCS_PATH": "",
-                "CODEWALK_SERVER_URL": "https://codewalk.your-org.internal",
-                "CODEWALK_REPO_NAME": "my-repo",
-                "CODEWALK_REPO_TOKEN": "cw_repo_abc123..."
+                "CODEWALK_SERVER_URL": "https://api.codewalk.xyz",
+                "CODEWALK_REPO_NAME": "gupta29470/codewalk",
+                "CODEWALK_REPO_TOKEN": "cw_repo_xxxxxxxx"
             }
         }
     }
