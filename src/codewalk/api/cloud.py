@@ -123,6 +123,7 @@ def _run_catchup_indexing(logger):
                         file_count=result.get("files_scanned", 0),
                         chunk_count=result.get("chunks_embedded", 0),
                         repo_name=full_name,
+                        collection_name=_collection_name(full_name),
                         commit_sha=git_sha,
                         commit_message=git_msg,
                         branch=git_branch,
@@ -245,6 +246,14 @@ def _artifacts_dir(repo_full_name: str) -> Path:
     return Path(storage) / "indexes" / repo_full_name
 
 
+def _collection_name(repo_full_name: str) -> str:
+    """Chroma collection prefix from GitHub slug (owner/repo → repo). Default: codebase."""
+    if not repo_full_name:
+        return "codebase"
+    name = repo_full_name.rsplit("/", 1)[-1].strip()
+    return name or "codebase"
+
+
 def _analyze_repo(repo_path: Path, repo_full_name: str) -> dict:
     """Run the FULL /analyze pipeline with team config support.
 
@@ -265,9 +274,10 @@ def _analyze_repo(repo_path: Path, repo_full_name: str) -> dict:
 
         # full_index_parallel scans files internally (with team_config exclusions)
         # and returns them in index_result["files"] — reuse instead of scanning twice
+        col = _collection_name(repo_full_name)
         index_result = full_index_parallel(
             repo_path=str(repo_path),
-            collection_name="codebase",
+            collection_name=col,
             persist_dir=persist_dir,
             team_config=config,
         )
@@ -314,9 +324,10 @@ def _run_incremental_index(repo_path: Path, repo_full_name: str) -> dict:
 
         # reindex() fetches indexed files from ChromaDB, compares hashes,
         # re-embeds only changed/new, deletes removed files.
+        col = _collection_name(repo_full_name)
         result = reindex(
             repo_path=str(repo_path),
-            collection_name="codebase",
+            collection_name=col,
             persist_dir=persist_dir,
             team_config=config,
         )
@@ -468,6 +479,7 @@ async def github_webhook(request: Request):
                     file_count=result.get("files_scanned", 0),
                     chunk_count=result.get("chunks_embedded", 0),
                     repo_name=repo_full_name,
+                    collection_name=_collection_name(repo_full_name),
                     commit_sha=commit,
                     commit_message=msg,
                     branch=branch,
@@ -632,6 +644,7 @@ async def trigger_index(
             file_count=result.get("files_scanned", 0),
             chunk_count=result.get("files_changed", 0),
             repo_name=full_name,
+            collection_name=_collection_name(full_name),
             commit_sha=git_sha,
             commit_message=git_msg,
             branch=git_branch,

@@ -75,7 +75,7 @@ Three ways to use it locally, plus optional cloud indexing:
 | 🔎 **Semantic Search** | ChromaDB vector search on embedded code chunks (RAG) |
 | 🔬 **Code Review** | Multi-stage review pipeline: test coverage, blast radius, guidelines RAG, context-enriched deep analysis |
 | 🔄 **Incremental Reindex** | Content hash comparison — only re-embeds changed files, skips unchanged |
-| 🧩 **MCP Server** | 22 tools for VS Code Copilot / Claude Code / Cursor / Codex |
+| 🧩 **MCP Server** | 27 MCP tools for VS Code Copilot / Claude Code / Cursor / Codex |
 | 🎙️ **Voice Interface** | Talk to your codebase — mic recording, local STT (faster-whisper), agent-driven routing (MCP + API), TTS response |
 | 🔬 **Graph Intelligence** | DuckDB persistent graph + igraph C-speed traversal: cycle detection, centrality, import chain tracing |
 | 🧬 **Corrective RAG** | Distance-based chunk filtering (free) + LLM answer grading + query rewriting for reliable answers |
@@ -394,7 +394,39 @@ Run **`codewalk_connect_repo`** in Cursor or let analyze auto-download the index
 
 ### Local-only MCP (index on your machine)
 
-No cloud — index runs locally via `codewalk_analyze_codebase`.
+No cloud — index runs locally via `codewalk_analyze_codebase`. After `rebuild_analysis_cache`, MCP embeds with **`index_from_paths_parallel`** (same pipeline helpers as the API, but MCP scans via `scan_repo_files` + `codewalk.yaml` excludes rather than calling `full_index_parallel` directly).
+
+| Surface | Local embed entrypoint | Notes |
+|---------|------------------------|-------|
+| **MCP** `codewalk_analyze_codebase` | `index_from_paths_parallel` | `rebuild_analysis_cache` → parallel chunk/embed → `write_manifest` |
+| **API** `POST /analyze` (+ `/analyze/stream`) | `full_index_parallel` | Same Chroma output under `REPO_PATH/.codewalk/` |
+
+### Review & approve fixes (agent + MCP)
+
+You talk to your **IDE agent**; the agent calls **Codewalk MCP tools**. Codewalk does not render UI — each host has its own approve/reject experience (Cursor approval cards, Copilot chat, Claude Code prompts, etc.). The agent must present each fix and wait for your approval through that host UI (or yes/no in chat).
+
+1. Agent runs `codewalk_review_diff` → `codewalk_reflect_review`
+2. Per fix: `codewalk_approve_action` → you approve/reject in **your host's UI**
+3. On approve: `codewalk_apply_fix(..., approval_token=<token>)` (enforced in code)
+4. After edits: `codewalk_incremental_reindex`
+
+Full agent rules: `src/codewalk/mcp/server.py` FastMCP `instructions` (sent on MCP connect).
+
+**Example:** `@codewalk review my changes, then fix each issue only after I approve`
+
+**Cloud re-download:** `codewalk_pull_index` / `codewalk_connect_repo` / auto-download on analyze all **replace** local `.codewalk/` (delete then extract). Force refresh: `rm -rf .codewalk` then pull.
+
+### MCP tools — index requirements
+
+| Tool | Index required? | Notes |
+|------|-----------------|-------|
+| `codewalk_analyze_codebase` | Builds/loads | Cloud download or local embed |
+| Query tools (search, overview, modules, …) | Yes | `_require_index()` auto-loads disk |
+| `codewalk_incremental_reindex`, `refresh_analysis` | Yes | |
+| `codewalk_review_diff` | Soft | Better with index |
+| `codewalk_pull_index`, `connect_repo`, `index_status` | Cloud config | Replace `.codewalk/` on download |
+| `codewalk_approve_action` / `apply_fix` | No / edits files | Token required for apply |
+| Docs / guidelines / voice / `check_version` | Varies | See MCP server `instructions` |
 
 ### Starting the MCP Server in VS Code
 
@@ -413,7 +445,7 @@ No cloud — index runs locally via `codewalk_analyze_codebase`.
    ![Start Server](assets/mcp-start-server.png)
 
 6. The server starts in the background (stdio transport)
-7. Open Copilot Chat → type **`@codewalk`** → all 22 tools are available
+7. Open Copilot Chat → type **`@codewalk`** → all Codewalk MCP tools are available
 
    ![MCP tools list](assets/mcp-tools-list.png)
 
@@ -582,7 +614,8 @@ You just tell the AI to analyze — **the AI handles the rest automatically**.
 │  codewalk_index_docs(path)      → index .md/.pdf/.txt docs          │
 │  codewalk_search_docs(query)    → search indexed documents           │
 │  codewalk_ask_docs(question)    → RAG answer grounded in docs        │
-│  codewalk_approve_action(text)  → HITL gate before code changes      │
+│  codewalk_approve_action(text)  → HITL gate (returns approval_token) │
+│  codewalk_apply_fix(..., token) → apply fix after user says yes      │
 └─────────────────────────────────────────────────────────────────────┘
 
 ┌─────────────────────────────────────────────────────────────────────┐
@@ -930,7 +963,7 @@ or
 | Search team docs | `@codewalk search docs for deployment` or `@codewalk_search_docs deployment` |
 | Ask docs a question | `@codewalk how do we deploy?` or `@codewalk_ask_docs how do we deploy` |
 | Deep research | `@codewalk research how error handling works across the codebase` |
-| Approve action | `@codewalk_approve_action apply fix to auth.py` |
+| Approve then apply fix | `@codewalk review my diff` → per issue: approve → you say yes → apply with token |
 | Ask by speaking (hands-free) | `@codewalk_voice_ask` → Copilot calls tool → `@codewalk_speak` |
 
 ---
@@ -962,7 +995,7 @@ curl -X POST http://localhost:8000/analyze \
 **Response:**
 ```json
 {
-  "status": "success",
+  "status": "complete",
   "repo_path": "/Users/you/projects/my-app",
   "files_scanned": 142,
   "chunks_created": 380,
@@ -971,7 +1004,9 @@ curl -X POST http://localhost:8000/analyze \
 ```
 
 - `index_mode`: `"auto"` (skip if indexed), `"reindex"` (smart update), `"full"` (wipe & rebuild)
-- `collection_name`: leave empty — auto-derived from repo path (e.g. `my-app`)
+- `collection_name`: leave empty — reads `manifest.collection_name` if present, else repo folder name
+- **`auto` + index on disk** → load only (`load_scoped_analysis`), no re-embed — same idea as MCP `codewalk_analyze_codebase`
+- **No index** → `full_index_parallel` with `codewalk.yaml` excludes (local embed on API server)
 
 #### `POST /analyze/stream` — Index with live progress (SSE)
 
@@ -981,15 +1016,73 @@ curl -N -X POST http://localhost:8000/analyze/stream \
   -d '{"repo_path": "/Users/you/projects/my-app", "index_mode": "auto"}'
 ```
 
-**Response (Server-Sent Events):**
+**Response (Server-Sent Events)** — `step` values from `analyze_stream()` in `main.py`:
+
+| `step` | When |
+|--------|------|
+| `init` | Always first — checking existing index |
+| `skip` | `index_mode: auto` + `.codewalk/` on disk (load only), or non-full/reindex skip |
+| `scan` | Full index or reindex — file scan (`codewalk.yaml` excludes on full) |
+| `chunk` | Full index — parallel chunk + embed |
+| `embed` | Full index — embed count |
+| `store` | Full index — Chroma persist + manifest |
+| `reindex` | `index_mode: reindex` — new/changed/deleted counts |
+| `analyze` | Dependency graph + module detection |
+| `agent` | `state.initialize` (DuckDB, docs, guidelines, agent) |
+| `done` | Success (`result` object on final event when complete) |
+| `error` | Exception message |
+
+**`index_mode: auto` + existing `.codewalk/`** (fast path):
 ```
-data: {"step": "scan", "message": "Scanning files..."}
-data: {"step": "scan", "message": "Found 142 files"}
-data: {"step": "deps", "message": "Building dependency graph..."}
-data: {"step": "modules", "message": "Detected 5 modules"}
-data: {"step": "embed", "message": "Embedding 142 files → 380 chunks"}
-data: {"step": "done", "message": "Analysis complete!"}
+data: {"step": "init", "message": "Checking existing index..."}
+data: {"step": "skip", "message": "Loaded existing index (380 chunks)"}
+data: {"step": "done", "message": "Analysis complete!", "result": {...}}
 ```
+
+**`index_mode: full`** (or empty index):
+```
+data: {"step": "init", "message": "Checking existing index..."}
+data: {"step": "scan", "message": "Scanning directory..."}
+data: {"step": "scan", "message": "Scanned 142 files (codewalk.yaml excludes applied)"}
+data: {"step": "chunk", "message": "Chunking + embedding in parallel..."}
+data: {"step": "chunk", "message": "Created 380 chunks"}
+data: {"step": "embed", "message": "Embedded 380 chunks"}
+data: {"step": "store", "message": "Storing in vector database..."}
+data: {"step": "store", "message": "Stored 380 chunks in ChromaDB"}
+data: {"step": "analyze", "message": "Building dependency graph..."}
+data: {"step": "agent", "message": "Creating AI agent..."}
+data: {"step": "analyze", "message": "Detected 5 modules"}
+data: {"step": "done", "message": "Analysis complete!", "result": {...}}
+```
+
+### API endpoints — index requirements (parity with MCP)
+
+All query endpoints call `state.require_index()` — auto-loads `.codewalk/` from disk after server restart (same as MCP `_require_index()`).
+
+| Endpoint | Index required? | MCP equivalent | Notes |
+|----------|-----------------|----------------|-------|
+| `POST /analyze` | Builds or loads | `codewalk_analyze_codebase` | API: `full_index_parallel`; MCP local: `index_from_paths_parallel` |
+| `POST /analyze/stream` | Builds or loads | same (SSE progress) | Steps: `init`→`skip`/`scan`→`chunk`→`embed`→`store`→`analyze`→`agent`→`done` |
+| `POST /chat`, `/chat/stream` | Yes | agent + tools | API HITL via `POST /chat/approve` |
+| `GET /overview` | Yes | `codewalk_get_overview` | |
+| `GET /modules`, `/modules/{name}` | Yes | `codewalk_get_module_info` | |
+| `GET /blast-radius`, `/blast-radius/{m}` | Yes | `codewalk_get_blast_radius_map` | |
+| `GET /reading-order` | Yes | `codewalk_get_reading_order` | |
+| `GET /execution-flow` | Yes | `codewalk_get_execution_flow` | |
+| `GET /architecture`, `/cycles` | Yes | `codewalk_get_architecture_health` | |
+| `POST /refresh` | Yes | `codewalk_refresh_analysis` | No re-embed |
+| `POST /incremental-reindex` | Yes | `codewalk_incremental_reindex` | `team_config` + manifest collection |
+| `POST /review` | Soft (better with index) | `codewalk_review_diff` | Works with partial context |
+| `POST /review/file` | Yes | `codewalk_review_file` | |
+| `POST /review/guidelines` | No | `codewalk_load_guidelines` | Guidelines Chroma only |
+| `POST /review/apply` | No (repo path only) | `codewalk_apply_fix` | Caller approves in UI; no token gate |
+| `POST /docs/index`, `/docs/search`, `/docs/ask` | Doc index only | `codewalk_index_docs` etc. | |
+| `POST /voice/ask` | Yes | `codewalk_voice_ask` | |
+| `POST /research` | Yes | deep research | |
+| `GET /health` | No | — | |
+| Cloud `GET /indexes/...` | Download only | `codewalk_pull_index` | Blocked when cloud-only mode |
+
+**Cloud API server** (`DATABASE_URL` set): query endpoints above return 400 — indexes are built on server, queried locally via MCP download.
 
 #### `POST /refresh` — Re-scan without re-embedding
 
@@ -1345,6 +1438,8 @@ Local MCP → GET /indexes/{owner}/{repo} → query locally
 6. Verify: `POST /admin/repos` with `X-Admin-Key` → `index_status: ready`
 7. Get `repo_token` from DB → set `CODEWALK_REPO_TOKEN` in MCP config
 
+**Day-to-day server ops:** [deploy/SERVER_OPS.md](deploy/SERVER_OPS.md) — health checks, indexing status, jobs/webhooks SQL, logs, reset/re-index.
+
 ### Indexing a repo (checklist)
 
 | Step | Required for indexing? |
@@ -1379,7 +1474,8 @@ Cloud reads this on every index. Pushes to other branches are ignored. See [FULL
 | File | Use |
 |------|-----|
 | [FULL_SETUP_GUIDE.md](FULL_SETUP_GUIDE.md) | Complete A→Z setup |
-| [deploy/DEPLOY.md](deploy/DEPLOY.md) | Ops reference |
+| [deploy/DEPLOY.md](deploy/DEPLOY.md) | Deployment guide |
+| [deploy/SERVER_OPS.md](deploy/SERVER_OPS.md) | Server ops cheat sheet — health, indexing, SQL, logs |
 | [env.server.example.txt](env.server.example.txt) | Hetzner `/opt/codewalk/.env` |
 | [env.local.example.txt](env.local.example.txt) | Local dev `.env` |
 | [mcp.json.example](mcp.json.example) | MCP config → `.vscode/mcp.json` |
@@ -1563,7 +1659,7 @@ codewalk/
 │   │   └── github_app.py          #   GitHub App webhook handler
 │   ├── cli.py                     #   Command-line interface
 │   └── mcp/                       # Model Context Protocol
-│       └── server.py              #   22 MCP tools (stdio)
+│       └── server.py              #   27 MCP tools (stdio)
 │
 ├── frontend/                      # Next.js 14 web UI
 │   └── src/app/
@@ -1594,7 +1690,8 @@ codewalk/
 │   ├── docker-compose.yml         #   Postgres + API + Caddy orchestration
 │   ├── Caddyfile                  #   Reverse proxy config (IP or domain mode)
 │   ├── hetzner-setup.sh           #   One-click Hetzner VPS provisioning
-│   └── DEPLOY.md                  #   Full deployment guide
+│   ├── DEPLOY.md                  #   Full deployment guide
+│   └── SERVER_OPS.md              #   Health, indexing, logs, SQL commands
 │
 ├── .github/workflows/             # CI/CD
 │   └── deploy.yml                 #   Build Docker image → GHCR → deploy

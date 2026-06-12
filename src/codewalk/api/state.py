@@ -1,3 +1,4 @@
+import json
 import logging
 import os
 import threading
@@ -5,6 +6,7 @@ import threading
 from src.codewalk.embeddings.vector_store import VectorStore
 from src.codewalk.agent.graph import create_agent
 from src.codewalk.ingestion.scanner import scan_directory
+from src.codewalk.team_config import load_codewalk_yaml, team_scan_directory
 from src.codewalk.analysis.dependency_graph import build_dependency_graph
 from src.codewalk.analysis.module_detector import detect_modules
 from src.codewalk.config import settings
@@ -140,50 +142,50 @@ def get_db():
     return _db
 
 def get_store() -> VectorStore:
-    """Get the VectorStore. Raises if not initialized."""
-    if _store is None:
-        raise RuntimeError("No codebase analyzed yet. Call POST /analyze first.")
+    """Get the VectorStore. Loads from disk if needed. Raises if no index."""
+    if not ensure_initialized():
+        raise RuntimeError(INDEX_REQUIRED_API)
     return _store
 
 
 def get_agent():
-    """Get the compiled agent. Raises if not initialized."""
-    if _agent is None:
-        raise RuntimeError("No codebase analyzed yet. Call POST /analyze first.")
+    """Get the compiled agent. Loads from disk if needed. Raises if no index."""
+    if not ensure_initialized():
+        raise RuntimeError(INDEX_REQUIRED_API)
     return _agent
 
 
 def get_modules_result() -> dict:
-    """Get the modules result. Raises if not initialized."""
-    if _modules_result is None:
-        raise RuntimeError("No codebase analyzed yet. Call POST /analyze first.")
+    """Get the modules result. Loads from disk if needed. Raises if no index."""
+    if not ensure_initialized():
+        raise RuntimeError(INDEX_REQUIRED_API)
     return _modules_result
 
 
 def get_analyze_result() -> dict:
-    """Get the last analyze result."""
-    if _analyze_result is None:
-        raise RuntimeError("No codebase analyzed yet. Call POST /analyze first.")
+    """Get the last analyze result. Loads from disk if needed."""
+    if not ensure_initialized():
+        raise RuntimeError(INDEX_REQUIRED_API)
     return _analyze_result
 
 
 def get_files() -> list[dict]:
-    """Get cached scan_directory() result."""
-    if _files is None:
-        raise RuntimeError("No codebase analyzed yet. Call POST /analyze first.")
+    """Get cached file list. Loads from disk if needed."""
+    if not ensure_initialized():
+        raise RuntimeError(INDEX_REQUIRED_API)
     return _files
 
 
 def get_deps() -> dict:
-    """Get cached build_dependency_graph() result."""
-    if _deps is None:
-        raise RuntimeError("No codebase analyzed yet. Call POST /analyze first.")
+    """Get cached dependency graph. Loads from disk if needed."""
+    if not ensure_initialized():
+        raise RuntimeError(INDEX_REQUIRED_API)
     return _deps
 
 def get_graph_runtime() -> GraphRuntime:
-    """Get the GraphRuntime (igraph). Raises if not initialized."""
-    if _graph_runtime is None:
-        raise RuntimeError("No codebase analyzed yet. Call POST /analyze first.")
+    """Get the GraphRuntime (igraph). Loads from disk if needed."""
+    if not ensure_initialized():
+        raise RuntimeError(INDEX_REQUIRED_API)
     return _graph_runtime
 
 def get_graph_store() -> GraphStore | None:
@@ -266,19 +268,24 @@ def refresh(files: list[dict], deps: dict, modules_result: dict):
 
 # ─── Helper functions (shared by MCP + API) ─────────────────────────
 
+INDEX_REQUIRED_API = "No index found. Call POST /analyze first."
+INDEX_REQUIRED_MCP = "No index found. Call codewalk_analyze_codebase first."
+
+
+def set_repo_path(repo_path: str) -> None:
+    """Set active repo path for index lookups (MCP REPO_PATH / API request)."""
+    global _repo_path
+    _repo_path = repo_path
+
+
 def get_repo_path() -> str:
     """Return the current repo path (from state or settings fallback)."""
     return _repo_path or settings.repo_path
 
 
 def get_collection_name() -> str:
-    """Derive the ChromaDB collection name from the repo path (last segment).
-
-    e.g. /home/user/my-project  →  "my-project"
-         /opt/repos/backend     →  "backend"
-    """
-    path = _repo_path or settings.repo_path
-    return path.rstrip("/").split("/")[-1] or "codebase"
+    """ChromaDB collection prefix for parents/children collections."""
+    return _collection_name_for_path(get_repo_path())
 
 
 def chroma_path() -> str:
@@ -287,25 +294,105 @@ def chroma_path() -> str:
     return f"{repo}/.codewalk/chroma"
 
 
+def scan_repo_files(repo_path: str | None = None) -> list[dict]:
+    """Scan repo respecting codewalk.yaml indexing.exclude (same as cloud indexer)."""
+    path = (repo_path or _repo_path or settings.repo_path).rstrip("/")
+    config = load_codewalk_yaml(path)
+    if config.exclude:
+        files = team_scan_directory(path, config)
+        _log(f"[scan] team_scan: {len(files)} files (codewalk.yaml excludes applied)")
+        return files
+    _log(f"[scan] default scan: no indexing.exclude in codewalk.yaml")
+    return scan_directory(path)
+
+
 def _rebuild_memory_caches():
     """Re-scan files and rebuild in-memory caches only. Does NOT touch DuckDB."""
     global _files, _deps, _modules_result, _repo_path
     repo_path = _repo_path or settings.repo_path
     _repo_path = repo_path
-    _files = scan_directory(repo_path)
+    _files = scan_repo_files(repo_path)
     _deps = build_dependency_graph(_files)
     _modules_result = detect_modules(_files, _deps)
     _log(f"[cache] Memory caches rebuilt: {len(_files)} files, "
          f"{len(_deps['graph'])} in graph, {len(_modules_result['modules'])} modules")
 
 
+def _collection_name_for_path(repo_path: str) -> str:
+    """Collection prefix for a repo path (used before _repo_path is set)."""
+    path = repo_path.rstrip("/")
+    folder_name = path.split("/")[-1] or "codebase"
+    manifest_path = f"{path}/.codewalk/manifest.json"
+    if os.path.exists(manifest_path):
+        try:
+            with open(manifest_path) as f:
+                meta = json.load(f)
+            if meta.get("collection_name"):
+                return meta["collection_name"]
+            if meta.get("commit_sha"):
+                return "codebase"
+        except (json.JSONDecodeError, OSError):
+            pass
+    return folder_name
+
+
+def index_on_disk(repo_path: str | None = None) -> bool:
+    """True if .codewalk has chroma + duckdb and at least one embedded chunk."""
+    path = (repo_path or _repo_path or settings.repo_path).rstrip("/")
+    chroma = f"{path}/.codewalk/chroma"
+    duckdb = f"{path}/.codewalk/graph.duckdb"
+    if not os.path.isdir(chroma) or not os.path.isfile(duckdb):
+        return False
+    store = VectorStore(persist_dir=chroma)
+    store.create_collection(_collection_name_for_path(path))
+    return store.chunk_count() > 0
+
+
+def _wire_query_state():
+    """Attach VectorStore + agent after DuckDB/files are ready. No rescan."""
+    global _store, _agent, _analyze_result
+    from src.codewalk.agent.graph import create_agent
+
+    _store = VectorStore(persist_dir=chroma_path())
+    _store.create_collection(get_collection_name())
+    if _graph_store:
+        _graph_store.populate_chunks_from_chromadb(_store)
+    _analyze_result = {"repo_path": get_repo_path(), "skipped": True}
+    if _store is not None and _modules_result is not None:
+        _agent = create_agent(
+            _store, _modules_result, files=_files, deps=_deps,
+            graph_runtime=_graph_runtime, graph_store=_graph_store,
+        )
+
+
+def load_scoped_analysis():
+    """Load team-scoped caches + existing DuckDB/Chroma from disk. Does not re-embed."""
+    global _files, _deps, _modules_result, _repo_path, _graph_store, _graph_runtime
+
+    repo_path = _repo_path or settings.repo_path
+    _repo_path = repo_path
+    _files = scan_repo_files(repo_path)
+    _deps = build_dependency_graph(_files)
+    _modules_result = detect_modules(_files, _deps)
+
+    db_path = f"{repo_path.rstrip('/')}/.codewalk/graph.duckdb"
+    if _graph_store is not None:
+        _graph_store.close()
+    _graph_store = GraphStore(db_path)
+    _graph_runtime = GraphRuntime(_graph_store)
+
+    _wire_query_state()
+    _check_upgrade_banner(get_repo_path())
+    _log(f"[load_scoped] {len(_files)} scoped files, {_store.chunk_count()} chroma chunks")
+
+
 def rebuild_analysis_cache(embedded_chunks: list[dict] | None = None,
                            guidelines_path: str = "", docs_path: str = "",
-                           force_reindex_extras: bool = False):
-    """Re-scan files, rebuild in-memory caches, AND repopulate DuckDB.
+                           force_reindex_extras: bool = False,
+                           files: list[dict] | None = None):
+    """Re-scan files (or reuse ``files``), rebuild DuckDB, wire store + agent.
 
-    Use this when the codebase or index has changed (analyze, reindex, refresh).
-    For cold start (no changes), use _load_from_disk() instead.
+    Pass ``files`` from full_index_parallel to avoid a redundant scan.
     """
     global _files, _deps, _modules_result, _repo_path, _graph_store, _graph_runtime
     from src.codewalk.pipeline import build_full_analysis
@@ -318,8 +405,8 @@ def rebuild_analysis_cache(embedded_chunks: list[dict] | None = None,
         if _graph_store is not None:
             _graph_store.close()
 
-        # API/MCP path: scan with file_filter defaults (scan_directory)
-        files = scan_directory(repo_path)
+        if files is None:
+            files = scan_repo_files(repo_path)
 
         result = build_full_analysis(
             db_path=db_path,
@@ -333,70 +420,36 @@ def rebuild_analysis_cache(embedded_chunks: list[dict] | None = None,
         _deps = result["deps"]
         _modules_result = result["modules_result"]
 
-        # Reopen GraphStore + runtime for query tools (build_full_analysis closes it)
         _graph_store = GraphStore(db_path)
         _graph_runtime = GraphRuntime(_graph_store)
+        _wire_query_state()
 
 
-def ensure_initialized():
-    """Auto-load index + analysis cache from disk if not already in memory.
+def require_index() -> None:
+    """Load index from disk if present. Raises RuntimeError(INDEX_REQUIRED_API) if not."""
+    if not ensure_initialized():
+        raise RuntimeError(INDEX_REQUIRED_API)
 
-    Called by query tools and API endpoints so users don't have to run
-    codewalk_analyze_codebase / POST /analyze manually after a restart.
-    """
-    global _store, _agent, _analyze_result, _graph_store, _graph_runtime 
 
-    if _store is not None and _modules_result is not None:
-        return  # Already initialized
+def ensure_initialized() -> bool:
+    """Load index from disk if present. Returns True if ready to query."""
+    global _store, _modules_result
+
+    if _store is not None and _modules_result is not None and _store.chunk_count() > 0:
+        return True
 
     with _init_lock:
-        # Double-check inside lock — another thread may have initialized while we waited.
-        if _store is not None and _modules_result is not None:
-            return
-
-        _ensure_initialized_locked()
-
-
-def _ensure_initialized_locked():
-    """Inner initialization logic — called under _init_lock."""
-    global _store, _agent, _analyze_result, _graph_store, _graph_runtime
-
-    chroma = chroma_path()
-    if not os.path.isdir(chroma):
-        _log("[ensure_initialized] No index found on disk — skipping auto-load. Call POST /analyze or codewalk_analyze_codebase first.")
-        return  # No index on disk — nothing to load
-
-    _log("[ensure_initialized] Auto-loading index + analysis from disk...")
-
-    # Rebuild in-memory caches (files, deps, modules) — fast, no DuckDB writes.
-    _rebuild_memory_caches()
-
-    # Open existing DuckDB — DON'T repopulate. Data persists from last analyze/reindex.
-    repo = get_repo_path()
-    db_path = f"{repo.rstrip('/')}/.codewalk/graph.duckdb"
-    if _graph_store is not None:
-        _graph_store.close()
-    _graph_store = GraphStore(db_path)
-    _graph_runtime = GraphRuntime(_graph_store)
-
-    _store = VectorStore(persist_dir=chroma)
-    _store.create_collection(get_collection_name())
-
-    # Backfill chunks table if empty (bridge between DuckDB symbols and ChromaDB embeddings)
-    if _graph_store:
-        _graph_store.populate_chunks_from_chromadb(_store)
-
-    count = _store.chunk_count()
-    _check_upgrade_banner(get_repo_path())
-    _log(f"[ensure_initialized] Loaded {count} chunks from {chroma}")
-
-    # Set _analyze_result so API endpoints can read repo_path
-    _analyze_result = {"repo_path": get_repo_path(), "skipped": True}
-
-    # Recreate the agent so /chat works after restart
-    if _agent is None and _store is not None and _modules_result is not None:
-        _agent = create_agent(_store, _modules_result, files=_files, deps=_deps, graph_runtime=_graph_runtime, graph_store=_graph_store)
-        _log("[ensure_initialized] Agent recreated")
+        if _store is not None and _modules_result is not None and _store.chunk_count() > 0:
+            return True
+        if not index_on_disk():
+            _log("[ensure_initialized] No index on disk — call POST /analyze or codewalk_analyze_codebase")
+            return False
+        _log("[ensure_initialized] Loading index from disk...")
+        load_scoped_analysis()
+        ready = _store is not None and _store.chunk_count() > 0
+        if ready:
+            _log(f"[ensure_initialized] Ready — {_store.chunk_count()} chunks")
+        return ready
 
 def _check_upgrade_banner(repo_path: str):
     """Show one-time upgrade banner if index was built with older codewalk."""

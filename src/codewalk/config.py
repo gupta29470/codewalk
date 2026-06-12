@@ -1,8 +1,12 @@
 import os
-from pydantic_settings import BaseSettings
+from pydantic_settings import BaseSettings, SettingsConfigDict
 from langchain_core.language_models.chat_models import BaseChatModel
 
 class Settings(BaseSettings):
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        extra="ignore",  # server-only vars (POSTGRES_PASSWORD, RATE_LIMIT_*, etc.) are OK in .env
+    )
     # LLM
     llm_provider: str = os.getenv("LLM_PROVIDER", "ollama")
     llm_model: str = os.getenv("LLM_MODEL", "qwen3.5:27b")
@@ -38,9 +42,6 @@ class Settings(BaseSettings):
 
     # CORS
     cors_origins: str = os.getenv("CORS_ORIGINS", "*")
-
-    class Config:
-        env_file = ".env"
 
 
 settings = Settings()

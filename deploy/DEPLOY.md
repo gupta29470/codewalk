@@ -16,6 +16,7 @@
 6. [Future Deploys (CI/CD)](#future-deploys-cicd)
 7. [Rollback Procedure](#rollback-procedure)
 8. [Troubleshooting](#troubleshooting)
+9. [Server Ops Command Reference](./SERVER_OPS.md) — health, indexing, SQL, logs (cheat sheet)
 
 ---
 

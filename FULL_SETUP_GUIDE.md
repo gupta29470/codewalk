@@ -500,7 +500,7 @@ GET https://api.codewalk.xyz/indexes/{owner}/{repo}/manifest
 GET https://api.codewalk.xyz/indexes/{owner}/{repo}
 ```
 
-Index extracts to `.codewalk/` in the git root.
+Index extracts to `REPO_PATH/.codewalk/` (full **replace** — MCP deletes any existing `.codewalk/` before extract). No MCP restart; query tools auto-load from disk.
 
 ### Step 10.5 — Test manifest from laptop
 
@@ -508,6 +508,18 @@ Index extracts to `.codewalk/` in the git root.
 curl -s https://api.codewalk.xyz/indexes/gupta29470/codewalk/manifest \
   -H "X-Repo-Token: cw_repo_xxxx" | python3 -m json.tool
 ```
+
+### Step 10.6 — Review & approve fixes (agent + host UI)
+
+Codewalk does not ship its own approve/reject UI. You talk to your **IDE agent** (Cursor, Copilot, Claude Code, etc.); the agent calls **Codewalk MCP tools**. Each host shows its own approval experience (Cursor approval cards, chat yes/no, etc.).
+
+1. Ask the agent to review — e.g. `@codewalk review my changes`
+2. Agent: `codewalk_review_diff` → `codewalk_reflect_review`
+3. Per fix: `codewalk_approve_action` → you approve or reject in **your host's UI**
+4. On approve only: `codewalk_apply_fix(..., approval_token=<token>)` — enforced in MCP server code
+5. After edits: `codewalk_incremental_reindex`
+
+Canonical agent rules: `src/codewalk/mcp/server.py` FastMCP `instructions` (sent when MCP connects). See also README § “Review & approve fixes”.
 
 ---
 
@@ -684,6 +696,8 @@ Not required for indexing or MCP.
 ---
 
 ## Quick reference
+
+> **Full command list:** [deploy/SERVER_OPS.md](deploy/SERVER_OPS.md) — health, indexing, jobs, webhooks, deploy, reset.
 
 | Check | Command |
 |-------|---------|
