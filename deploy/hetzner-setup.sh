@@ -143,9 +143,13 @@ ${DOMAIN} {
 EOF
 
 # ── 7. Index storage (API container runs as uid 999) ─────────────────
-mkdir -p /var/codewalk/repos /var/codewalk/indexes /var/codewalk/secrets
-chown -R 999:999 /var/codewalk
-chmod 755 /var/codewalk
+if [ -f "$(dirname "$0")/ensure-storage.sh" ]; then
+    bash "$(dirname "$0")/ensure-storage.sh"
+else
+    mkdir -p /var/codewalk/repos /var/codewalk/indexes /var/codewalk/secrets
+    chown -R 999:999 /var/codewalk
+    chmod 755 /var/codewalk
+fi
 
 echo "=== Setup complete ==="
 echo ""

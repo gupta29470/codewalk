@@ -1438,7 +1438,7 @@ Local MCP → GET /indexes/{owner}/{repo} → query locally
 6. Verify: `POST /admin/repos` with `X-Admin-Key` → `index_status: ready`
 7. Get `repo_token` from DB → set `CODEWALK_REPO_TOKEN` in MCP config
 
-**Day-to-day server ops:** [deploy/SERVER_OPS.md](deploy/SERVER_OPS.md) — health checks, indexing status, jobs/webhooks SQL, logs, reset/re-index.
+**Day-to-day server ops:** [deploy/SERVER_OPS.md](deploy/SERVER_OPS.md) — health, SQL, logs, [reset-repo.sh](deploy/reset-repo.sh) (prepare/reset/delete, `--dry-run`).
 
 ### Indexing a repo (checklist)
 
@@ -1475,7 +1475,7 @@ Cloud reads this on every index. Pushes to other branches are ignored. See [FULL
 |------|-----|
 | [FULL_SETUP_GUIDE.md](FULL_SETUP_GUIDE.md) | Complete A→Z setup |
 | [deploy/DEPLOY.md](deploy/DEPLOY.md) | Deployment guide |
-| [deploy/SERVER_OPS.md](deploy/SERVER_OPS.md) | Server ops cheat sheet — health, indexing, SQL, logs |
+| [deploy/SERVER_OPS.md](deploy/SERVER_OPS.md) | Server ops — health, indexing, SQL, [reset-repo.sh](deploy/reset-repo.sh) |
 | [env.server.example.txt](env.server.example.txt) | Hetzner `/opt/codewalk/.env` |
 | [env.local.example.txt](env.local.example.txt) | Local dev `.env` |
 | [mcp.json.example](mcp.json.example) | MCP config → `.vscode/mcp.json` |

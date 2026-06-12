@@ -114,6 +114,11 @@ echo "Restarting containers..."
 cd "$COMPOSE_DIR"
 docker compose up -d --force-recreate --remove-orphans
 
+# ── Index storage permissions (root rm/chown breaks Chroma writes) ─
+if [ -f "$SRC_DIR/deploy/ensure-storage.sh" ]; then
+    bash "$SRC_DIR/deploy/ensure-storage.sh" || echo "⚠️  ensure-storage.sh failed (non-fatal)"
+fi
+
 # ── Health check ────────────────────────────────────────────────────
 echo ""
 echo "Running health check..."

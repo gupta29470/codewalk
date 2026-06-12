@@ -267,6 +267,8 @@ def _analyze_repo(repo_path: Path, repo_full_name: str) -> dict:
 
     try:
         adir = _artifacts_dir(repo_full_name)
+        adir.mkdir(parents=True, exist_ok=True)
+        (adir / "chroma").mkdir(parents=True, exist_ok=True)
         persist_dir = str(adir / "chroma")
         db_path = str(adir / "graph.duckdb")
 
@@ -317,6 +319,8 @@ def _run_incremental_index(repo_path: Path, repo_full_name: str) -> dict:
 
     try:
         adir = _artifacts_dir(repo_full_name)
+        adir.mkdir(parents=True, exist_ok=True)
+        (adir / "chroma").mkdir(parents=True, exist_ok=True)
         persist_dir = str(adir / "chroma")
         db_path = str(adir / "graph.duckdb")
 

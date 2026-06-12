@@ -396,12 +396,63 @@ cd /opt/codewalk && docker compose up -d --force-recreate codewalk-api
 
 ## 11. Re-index, reset & fix stuck indexing
 
+> **Preferred:** use `deploy/reset-repo.sh` — works for **new** and **existing** repos. Detects on-disk index: **update** (incremental) vs **create** (full embed). Every mode supports **`--dry-run`**.
+
+```bash
+cd /opt/codewalk-src
+chmod +x deploy/reset-repo.sh deploy/ensure-storage.sh
+
+# Inspect state + plans (no changes)
+./deploy/reset-repo.sh inspect gupta29470/codewalk
+
+# Dry-run any action first
+./deploy/reset-repo.sh prepare gupta29470/codewalk --index --dry-run
+./deploy/reset-repo.sh soft-reset gupta29470/codewalk --index --dry-run
+
+# Smart prepare: existing index → UPDATE (incremental); new → CREATE + register
+./deploy/reset-repo.sh prepare gupta29470/codewalk --index
+
+# Fix permissions — one repo or all
+./deploy/reset-repo.sh fix-perms
+./deploy/reset-repo.sh fix-perms gupta29470/codewalk --dry-run
+
+# Force wipe index (keep clone) + full re-create
+./deploy/reset-repo.sh soft-reset gupta29470/codewalk --index
+
+# Force wipe index + clone
+./deploy/reset-repo.sh full-reset gupta29470/codewalk --index
+
+# Delete from DB + disk
+./deploy/reset-repo.sh delete-repo gupta29470/codewalk --dry-run
+```
+
+**Coverage matrix** (see `inspect` for your repo):
+
+| Situation | Command |
+|-----------|---------|
+| New repo (no DB, no index) | `prepare owner/repo --index` → register + CREATE |
+| Existing index OK | `prepare owner/repo --index` → UPDATE (incremental) |
+| Permissions broken (code 14) | `fix-perms owner/repo` then `prepare --index` |
+| `index_status=failed` / stuck job | `prepare owner/repo --index` (unsticks + retries) |
+| Corrupt index (chroma, no manifest) | `soft-reset owner/repo --index` |
+| Force full rebuild | `soft-reset` (keep clone) or `full-reset` (wipe clone) |
+| Remove repo entirely | `delete-repo` → then `prepare --index` or git push |
+| All repos perms | `fix-perms` (no slug) |
+| Preview any of the above | add `--dry-run` or `inspect owner/repo` |
+
+**Not in script** (manual): private-repo clone auth (GitHub App PEM), DuckDB `.wal` lock delete, webhook branch allowlist (`codewalk.yaml`), laptop `rm -rf .codewalk` + MCP pull.
+
+`deploy-server.sh` and `hetzner-setup.sh` call `ensure-storage.sh` so deploys keep `/var/codewalk` writable.
+
+**Manual equivalents** (if script unavailable):
+
 ```bash
 cd /opt/codewalk
 export REPO="gupta29470/codewalk"
 
 # ── Soft re-index (keep clone, wipe index artifacts) ─────────────────
 rm -rf /var/codewalk/indexes/${REPO}
+/opt/codewalk-src/deploy/ensure-storage.sh "${REPO}"
 
 docker compose exec postgres psql -U codewalk -d codewalk -c \
   "UPDATE repos SET last_indexed_sha=NULL, index_status='pending', index_version=0
@@ -414,6 +465,7 @@ curl -s -X POST https://api.codewalk.xyz/admin/index \
 
 # ── Full reset (index + clone) ─────────────────────────────────────
 rm -rf /var/codewalk/indexes/${REPO} /var/codewalk/repos/${REPO}
+/opt/codewalk-src/deploy/ensure-storage.sh "${REPO}"
 # then UPDATE repos + admin/index as above
 
 # ── Unstick zombie row (indexing for hours, job still queued) ───────
@@ -440,7 +492,12 @@ docker compose exec postgres psql -U codewalk -d codewalk -c \
 ## 12. Permissions & common fixes
 
 ```bash
-# Permission denied on /var/codewalk/repos
+# Permission denied on /var/codewalk/repos (Chroma code 14: unable to open database file)
+/opt/codewalk-src/deploy/ensure-storage.sh
+# or per-repo:
+/opt/codewalk-src/deploy/ensure-storage.sh gupta29470/codewalk
+
+# Manual equivalent:
 chown -R 999:999 /var/codewalk
 chmod 600 /var/codewalk/secrets/*.pem
 

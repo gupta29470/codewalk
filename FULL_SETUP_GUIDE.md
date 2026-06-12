@@ -574,11 +574,25 @@ curl -s -X POST "$API/admin/register" \
 
 ## 13. Delete / re-index
 
-### Index files only
+> **Preferred (server):** [deploy/reset-repo.sh](deploy/reset-repo.sh) — new + existing repos, `prepare`/`soft-reset`/`full-reset`, `--dry-run`, auto `chown 999:999`. See [SERVER_OPS.md §11](deploy/SERVER_OPS.md#11-re-index-reset--fix-stuck-indexing).
+
+```bash
+cd /opt/codewalk-src
+chmod +x deploy/reset-repo.sh deploy/ensure-storage.sh
+
+./deploy/reset-repo.sh inspect gupta29470/codewalk
+./deploy/reset-repo.sh prepare gupta29470/codewalk --index --dry-run   # preview
+./deploy/reset-repo.sh prepare gupta29470/codewalk --index             # update or create
+./deploy/reset-repo.sh soft-reset gupta29470/codewalk --index          # wipe index, rebuild
+./deploy/reset-repo.sh delete-repo gupta29470/codewalk
+```
+
+### Index files only (manual)
 
 ```bash
 REPO="gupta29470/codewalk"
 rm -rf /var/codewalk/indexes/${REPO}
+/opt/codewalk-src/deploy/ensure-storage.sh "${REPO}"   # required after rm as root
 
 docker compose exec postgres psql -U codewalk -d codewalk -c \
   "UPDATE repos SET last_indexed_sha=NULL, index_status='pending', index_version=0 WHERE full_name='${REPO}';"
