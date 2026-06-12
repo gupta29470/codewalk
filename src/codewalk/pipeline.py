@@ -423,7 +423,7 @@ def write_manifest(
     out.parent.mkdir(parents=True, exist_ok=True)
     with open(out, "w") as f:
         json.dump(manifest, f, indent=2)
-    _log(f"[manifest] Wrote {out} (v{CODEWALK_VERSION})")
+    _log(f"[manifest] Wrote {out} (index v{index_version}, codewalk v{CODEWALK_VERSION})")
 
 
 def build_full_analysis(

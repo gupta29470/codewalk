@@ -32,6 +32,7 @@ from src.codewalk.embeddings.vector_store import VectorStore
 from src.codewalk.analysis.reading_order import generate_reading_order
 from src.codewalk.generation.flow_generator import generate_execution_flow
 from src.codewalk.config import settings
+from src.codewalk import __version__
 from src.codewalk.analysis.blast_radius import calculate_full_blast_map
 from src.codewalk.query import (
     compute_file_risks, resolve_module_with_fallback, short_name,
@@ -62,7 +63,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="Codewalk API",
     description="AI-powered codebase onboarding tool",
-    version="1.0.0",
+    version=__version__,
     lifespan=lifespan,
 )
 
@@ -106,7 +107,7 @@ _CLOUD_DISABLED_PREFIXES = (
     "/analyze", "/chat", "/overview", "/modules",
     "/blast-radius", "/reading-order", "/execution-flow",
     "/refresh", "/incremental-reindex", "/review",
-    "/voice", "/cycles", "/architecture", "/docs",
+    "/voice", "/cycles", "/architecture", "/knowledge-graph", "/docs",
 )
 
 @app.middleware("http")
@@ -127,6 +128,26 @@ async def cloud_mode_middleware(request, call_next):
                 },
             )
     return await call_next(request)
+
+
+@app.middleware("http")
+async def staleness_middleware(request, call_next):
+    """Attach index/software staleness to local API responses (same checks as MCP)."""
+    from src.codewalk.api.cloud import is_cloud_enabled
+    from src.codewalk.staleness import should_attach_staleness, staleness_status
+
+    response = await call_next(request)
+
+    if is_cloud_enabled() or not should_attach_staleness(request.url.path):
+        return response
+
+    status = staleness_status()
+    if not status.get("has_updates"):
+        return response
+
+    response.headers["X-Codewalk-Staleness"] = json.dumps(status)
+    return response
+
 
 @app.exception_handler(Exception)
 async def global_exception_handler(request, exc):
@@ -1202,9 +1223,29 @@ def apply_fixes_endpoint(request: ApplyFixesRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+# ─── Version & staleness (shared with MCP) ───────────────────────────
+
+@app.get("/version")
+def get_version():
+    """Codewalk software version — same schema as cloud GET /version."""
+    from src.codewalk.staleness import version_info
+
+    info = version_info()
+    info["runtime"] = "api"
+    return info
+
+
+@app.get("/staleness")
+def get_staleness():
+    """Index + software freshness for API/frontend clients."""
+    from src.codewalk.staleness import staleness_status
+
+    return staleness_status()
+
+
 # ─── Health check ───────────────────────────────────────────────────
 
 @app.get("/health")
 def health():
     """Health check endpoint."""
-    return {"status": "ok"}
+    return {"status": "ok", "codewalk_version": __version__}

@@ -203,7 +203,13 @@ mcp = FastMCP(
         "- codewalk_index_status() — Show local vs cloud version numbers, commit SHA,\n"
         "  file count, and how many versions behind local is.\n"
         "- codewalk_check_version() — Check if a newer Codewalk release is deployed on the\n"
-        "  cloud server. Also runs silently on codewalk_analyze_codebase startup.\n"
+        "  cloud server.\n"
+        "\n"
+        "## STALENESS NOTIFICATIONS (automatic)\n"
+        "When cloud env vars are set, EVERY tool response may prepend banners if:\n"
+        "  • Cloud index_version > local → run codewalk_pull_index\n"
+        "  • Cloud API commit/version > local MCP → git pull origin master + restart MCP\n"
+        "Also call codewalk_index_status() to compare local vs cloud index versions.\n"
         "\n"
         "## ERROR HANDLING\n"
         "If any tool returns a message starting with 'Error:':\n"
@@ -251,14 +257,8 @@ def ensure_local_index():
     local_version = local.get("index_version", 0)
     remote_version = remote.get("index_version", 0)
 
-    if remote_version > local_version:
-        from src.codewalk.api import state
-        state.pending_update = (
-            f"⚡ NEW INDEX AVAILABLE: v{remote_version} (you have v{local_version})\n"
-            f"  Commit: {remote.get('commit_sha','?')[:7]}\n"
-            f"  Indexed: {remote.get('indexed_at','?')}\n"
-            f"  Run codewalk_pull_index to update.\n"
-        )
+    # Index staleness banners: every MCP tool via src/codewalk/staleness.py wrappers.
+    _ = (local_version, remote_version, remote)
 
 
 def _download_index(server_url: str, repo_name: str, repo_token: str):
@@ -320,12 +320,7 @@ def codewalk_analyze_codebase() -> str:
     guidelines_path = os.getenv("REVIEW_GUIDELINES_PATH", "")
     docs_path = os.getenv("CODE_DOCS_PATH", "")
 
-    _version_banner = codewalk_check_version() if os.getenv("CODEWALK_SERVER_URL") else ""
-    pending_msg = state.pending_update or ""
-    if _version_banner and "up to date" not in _version_banner and "Cloud not configured" not in _version_banner:
-        pending_msg = (_version_banner + "\n\n" + pending_msg).strip()
-
-    # Cloud: download index if missing; show staleness banner if remote is newer
+    # Cloud: download index if missing; staleness checks run on every tool (staleness.py)
     ensure_local_index()
 
     built = False
@@ -407,11 +402,9 @@ def codewalk_analyze_codebase() -> str:
             if dc > 0:
                 docs_msg = f"Docs: {dc} chunks embedded\n"
 
-        header = f"{pending_msg}\n\n" if pending_msg else ""
         if built and embed_result:
             return (
-                header
-                + f"Codebase analyzed and indexed successfully.\n"
+                f"Codebase analyzed and indexed successfully.\n"
                 + f"Files found: {len(state._files)}\n"
                 + f"Files indexed: {embed_result.get('files_scanned', len(state._files))}\n"
                 + f"Chunks embedded: {embed_result.get('chunks_embedded', existing)}\n"
@@ -422,8 +415,7 @@ def codewalk_analyze_codebase() -> str:
                 + f"✅ Local embedding complete — use query tools directly."
             )
         return (
-            header
-            + f"Codebase analyzed successfully.\n"
+            f"Codebase analyzed successfully.\n"
             + f"Files found: {len(state._files)}\n"
             + f"Modules found: {', '.join(modules)}\n"
             + f"Search index: INDEX READY — {existing} chunks available.\n"
@@ -433,10 +425,8 @@ def codewalk_analyze_codebase() -> str:
             + f"Ready to answer questions — use query tools directly."
         )
 
-    header = f"{pending_msg}\n\n" if pending_msg else ""
     return (
-        header
-        + f"⚠️ Indexing produced 0 chunks.\n"
+        f"⚠️ Indexing produced 0 chunks.\n"
         + f"Files scanned (codewalk.yaml excludes applied): {len(state._files or [])}\n"
         + f"Modules: {', '.join(modules)}\n"
         + f"Local: check embedder (Jina/HF) is installed and REPO_PATH is correct.\n"
@@ -1891,65 +1881,17 @@ def codewalk_connect_repo(repo_name: str, repo_token: str) -> str:
 @mcp.tool()
 def codewalk_check_version() -> str:
     """Check if a newer version of Codewalk is available on the cloud server."""
-    from src.codewalk import __version__
+    from src.codewalk.staleness import check_version_message
 
-    server_url = os.getenv("CODEWALK_SERVER_URL", "")
-    if not server_url:
-        return "Cloud not configured. Set CODEWALK_SERVER_URL to enable version checks."
-
-    try:
-        remote = requests.get(f"{server_url}/version", timeout=5).json()
-    except Exception as exc:
-        return f"Could not check version: {exc}"
-
-    local_version = __version__
-    remote_version = remote.get("codewalk_version", "unknown")
-    remote_sha = remote.get("commit_sha", "")[:7]
-
-    if local_version == remote_version:
-        return f"Codewalk is up to date (v{local_version})."
-
-    return (
-        f"🆕 Codewalk update available!\n"
-        f"  Local:    v{local_version}\n"
-        f"  Cloud:    v{remote_version} ({remote_sha})\n"
-        f"  Released: {remote.get('released_at', '?')}\n"
-        f"  Notes:    {remote.get('release_notes_url', '')}\n"
-        f"  Update:   {remote.get('update_command', 'git pull origin master')}"
-    )
+    return check_version_message()
 
 
-# ─── Shared tool lookup map (used by voice_ask, backends.py) ──
-# NOTE: Must be defined AFTER all tool functions.
-_TOOL_MAP = {
-    "codewalk_analyze_codebase": codewalk_analyze_codebase,
-    "codewalk_search_codebase": codewalk_search_codebase,
-    "codewalk_get_module_info": codewalk_get_module_info,
-    "codewalk_explain_function": codewalk_explain_function,
-    "codewalk_get_overview": codewalk_get_overview,
-    "codewalk_get_blast_radius_map": codewalk_get_blast_radius_map,
-    "codewalk_get_reading_order": codewalk_get_reading_order,
-    "codewalk_get_execution_flow": codewalk_get_execution_flow,
-    "codewalk_incremental_reindex": codewalk_incremental_reindex,
-    "codewalk_refresh_analysis": codewalk_refresh_analysis,
-    "codewalk_review_diff": codewalk_review_diff,
-    "codewalk_reflect_review": codewalk_reflect_review,
-    "codewalk_review_file": codewalk_review_file,
-    "codewalk_load_guidelines": codewalk_load_guidelines,
-    "codewalk_get_architecture_health": codewalk_get_architecture_health,
-    "codewalk_call_chain": codewalk_call_chain,
-    "codewalk_index_docs": codewalk_index_docs,
-    "codewalk_search_docs": codewalk_search_docs,
-    "codewalk_ask_docs": codewalk_ask_docs,
-    "codewalk_approve_action": codewalk_approve_action,
-    "codewalk_apply_fix": codewalk_apply_fix,
-    "codewalk_voice_ask": codewalk_voice_ask,
-    "codewalk_speak": codewalk_speak,
-    "codewalk_pull_index": codewalk_pull_index,
-    "codewalk_index_status": codewalk_index_status,
-    "codewalk_connect_repo": codewalk_connect_repo,
-    "codewalk_check_version": codewalk_check_version,
-}
+# ─── Staleness wrappers + shared tool map (voice_ask, backends.py) ──
+from src.codewalk.staleness import install_staleness_wrappers
+
+install_staleness_wrappers(mcp._tool_manager)
+
+_TOOL_MAP = {tool.name: tool.fn for tool in mcp._tool_manager.list_tools()}
 
 if __name__ == "__main__":
     mcp.run(transport="stdio")

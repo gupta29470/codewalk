@@ -9,6 +9,7 @@ from pathlib import Path
 from fastapi import APIRouter, Request, HTTPException, Header, FastAPI
 from fastapi.responses import StreamingResponse
 
+from src.codewalk import __version__ as _codewalk_version
 from src.codewalk.api import state as api_state
 from src.codewalk.config import settings as _settings
 
@@ -129,7 +130,7 @@ def _run_catchup_indexing(logger):
                         branch=git_branch,
                         index_version=new_version,
                         embedding_model=_settings.embedding_model,
-                        minimum_mcp_version="1.0.0",
+                        minimum_mcp_version=_codewalk_version,
                     )
                     db.execute(
                         "UPDATE repos SET last_indexed_sha=$1, index_status=$2, index_version=$3, updated_at=NOW() WHERE full_name=$4",
@@ -489,7 +490,7 @@ async def github_webhook(request: Request):
                     branch=branch,
                     index_version=new_version,
                     embedding_model=_settings.embedding_model,
-                    minimum_mcp_version="1.0.0",
+                    minimum_mcp_version=_codewalk_version,
                 )
                 db.execute(
                     "UPDATE repos SET last_indexed_sha=$1, index_status=$2, index_version=$3, updated_at=NOW() WHERE full_name=$4",
@@ -654,7 +655,7 @@ async def trigger_index(
             branch=git_branch,
             index_version=new_version,
             embedding_model=_settings.embedding_model,
-            minimum_mcp_version="1.0.0",
+            minimum_mcp_version=_codewalk_version,
         )
         db.execute(
             "UPDATE repos SET index_status=$1, index_version=$2, updated_at=NOW() WHERE full_name=$3",
