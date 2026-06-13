@@ -109,7 +109,9 @@ def _cloud_configured() -> tuple[str, str, str] | None:
 def _repo_root() -> Path:
     from src.codewalk.api import state
 
-    raw = state.get_repo_path() or os.getenv("REPO_PATH", "") or "."
+    # Prefer the live REPO_PATH env var so dynamic tool/MCP changes (and tests)
+    # are respected over settings cached at import time.
+    raw = os.getenv("REPO_PATH") or state.get_repo_path() or "."
     return Path(raw).resolve()
 
 

@@ -343,13 +343,68 @@ def _clone_or_pull_repo(repo: dict, branch: str) -> Path:
 
 
 def _artifacts_dir(repo_full_name: str) -> Path:
-    """Active (latest) index artifacts — served by download API and manifest."""
+    """Public symlink path to the active index.
+
+    The returned path is a symlink that atomically points to a versioned
+    real directory (e.g. repo.v3). Callers that need the real directory
+    should use _active_index_dir().
+    """
     storage = os.environ.get("INDEX_STORAGE_PATH", "/var/codewalk")
     return Path(storage) / "indexes" / repo_full_name
 
 
+def _active_index_dir(repo_full_name: str) -> Path | None:
+    """Resolved real directory currently serving as the active index."""
+    active = _artifacts_dir(repo_full_name)
+    if active.is_symlink():
+        resolved = active.resolve(strict=False)
+        if resolved.is_dir():
+            return resolved
+    # Legacy layout: a real directory at the active path.
+    if active.is_dir():
+        return active
+    return None
+
+
+def _versioned_index_dir(repo_full_name: str, index_version: int) -> Path:
+    """Versioned real directory for a given index version."""
+    storage = os.environ.get("INDEX_STORAGE_PATH", "/var/codewalk")
+    return Path(storage) / "indexes" / f"{repo_full_name}.v{index_version}"
+
+
+def _cleanup_old_index_versions(repo_full_name: str, keep: int = 3) -> None:
+    """Remove old versioned index dirs, keeping the latest `keep` plus current symlink target."""
+    active = _artifacts_dir(repo_full_name)
+    parent = active.parent
+    if not parent.exists():
+        return
+
+    versions = sorted(
+        parent.glob(f"{active.name}.v*"),
+        key=lambda p: int(p.name.split(".v")[-1]),
+        reverse=True,
+    )
+
+    active_target: Path | None = None
+    if active.is_symlink():
+        try:
+            active_target = active.resolve(strict=True)
+        except OSError:
+            pass
+
+    for old in versions[keep:]:
+        if active_target and old.resolve(strict=False) == active_target:
+            continue
+        shutil.rmtree(old, ignore_errors=True)
+
+    # Also remove legacy atomic_swap backup dirs if any remain.
+    legacy_backup = parent / f"{active.name}_old"
+    if legacy_backup.exists():
+        shutil.rmtree(legacy_backup, ignore_errors=True)
+
+
 def _incoming_artifacts_dir(repo_full_name: str, run_id: str) -> Path:
-    """Per-run scratch space; promoted via atomic_swap after manifest is written."""
+    """Per-run scratch space; promoted to a versioned dir on publish."""
     active = _artifacts_dir(repo_full_name)
     safe = "".join(c if c.isalnum() else "_" for c in run_id)[:20] or "run"
     return active.parent / f"{active.name}.incoming.{safe}"
@@ -373,13 +428,13 @@ def _prepare_incoming_workspace(
     *,
     seed_from_active: bool,
 ) -> Path:
-    """Create incoming workspace; optionally copy current latest as incremental base."""
+    """Create incoming workspace; optionally copy current active index as incremental base."""
     _cleanup_orphan_incoming(repo_full_name)
     incoming = _incoming_artifacts_dir(repo_full_name, run_id)
     if incoming.exists():
         shutil.rmtree(incoming)
-    active = _artifacts_dir(repo_full_name)
-    if seed_from_active and active.exists() and any(active.iterdir()):
+    active = _active_index_dir(repo_full_name)
+    if seed_from_active and active is not None and any(active.iterdir()):
         shutil.copytree(active, incoming)
     else:
         incoming.mkdir(parents=True, exist_ok=True)
@@ -406,9 +461,8 @@ def _publish_index(
     branch: str,
     index_version: int,
 ) -> None:
-    """Write manifest into incoming/, then atomic_swap incoming → latest (active dir)."""
+    """Write manifest into incoming/, then atomically promote it via symlink."""
     from src.codewalk.pipeline import write_manifest
-    from src.codewalk.worker.atomic_store import atomic_swap
     from src.codewalk.graph.knowledge_graph_export import _patch_manifest
 
     incoming = _incoming_artifacts_dir(repo_full_name, run_id)
@@ -430,9 +484,32 @@ def _publish_index(
     )
     # Stamp manifest with knowledge-graph metadata if the file was generated.
     _patch_manifest(str(incoming))
+
     active = _artifacts_dir(repo_full_name)
     active.parent.mkdir(parents=True, exist_ok=True)
-    atomic_swap(str(incoming), str(active))
+
+    target = _versioned_index_dir(repo_full_name, index_version)
+    if target.exists():
+        shutil.rmtree(target, ignore_errors=True)
+
+    # Move incoming scratch dir to its versioned permanent location.
+    incoming.rename(target)
+
+    # Legacy layout migration: if active path is a real directory, archive it first.
+    if active.exists() and active.is_dir() and not active.is_symlink():
+        legacy_target = _versioned_index_dir(repo_full_name, 0)
+        if legacy_target.exists():
+            shutil.rmtree(legacy_target, ignore_errors=True)
+        active.rename(legacy_target)
+
+    # Atomically repoint the public symlink to the new version.
+    tmp_link = active.parent / f"{active.name}.new"
+    if tmp_link.exists() or tmp_link.is_symlink():
+        tmp_link.unlink()
+    tmp_link.symlink_to(target, target_is_directory=True)
+    tmp_link.replace(active)
+
+    _cleanup_old_index_versions(repo_full_name)
 
 
 def _manifest_codewalk_version(repo_full_name: str) -> str:
@@ -622,8 +699,8 @@ def _run_incremental_index(repo_path: Path, repo_full_name: str, run_id: str) ->
     from src.codewalk.pipeline import reindex, build_full_analysis
 
     try:
-        active = _artifacts_dir(repo_full_name)
-        seed = active.exists() and (active / "chroma").exists()
+        active = _active_index_dir(repo_full_name)
+        seed = active is not None and (active / "chroma").exists()
         adir = _prepare_incoming_workspace(repo_full_name, run_id, seed_from_active=seed)
         persist_dir = str(adir / "chroma")
         db_path = str(adir / "graph.duckdb")
@@ -1045,8 +1122,8 @@ async def download_index(
     if not row or not secrets.compare_digest(row["repo_token"], x_repo_token):
         raise HTTPException(403, "Invalid token")
 
-    index_path = _artifacts_dir(repo_name)
-    if not index_path.exists():
+    active_dir = _active_index_dir(repo_name)
+    if active_dir is None:
         raise HTTPException(404, "No index available yet")
 
     import tarfile
@@ -1056,7 +1133,9 @@ async def download_index(
         tmp_path = Path(storage) / f"{owner}__{repo}.tmp.tar.gz"
         try:
             with tarfile.open(tmp_path, "w:gz") as tar:
-                tar.add(index_path, arcname=".codewalk")
+                # Follow the active symlink so the tarball contains the real files,
+                # not a symlink member.
+                tar.add(active_dir, arcname=".codewalk")
             with open(tmp_path, "rb") as f:
                 while True:
                     chunk = f.read(65536)
