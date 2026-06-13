@@ -202,7 +202,7 @@ curl -s "$API/version" | python3 -m json.tool
 
 ## 6. Index download & manifest (MCP / laptop)
 
-**MCP tools (preferred):** `codewalk_pull_index`, `codewalk_connect_repo`, or first `codewalk_analyze_codebase` when no local index — all **delete `REPO_PATH/.codewalk/` and extract fresh** (full replace, not merge). No MCP restart needed; run `codewalk_analyze_codebase` or any query tool to load from disk.
+**MCP tools (preferred):** `codewalk_pull_index`, `codewalk_connect_repo`, or first `codewalk_analyze_codebase` when no local index — all **delete `REPO_PATH/.codewalk/` and extract fresh** (full replace, not merge). Index pull does not require MCP restart; **Codewalk code updates** (`git pull` on codewalk repo) require MCP restart in Cursor.
 
 **Force re-download** when `pull_index` says “Already up to date” but index is wrong:
 
@@ -212,6 +212,16 @@ rm -rf /path/to/your/repo/.codewalk
 ```
 
 **Manifest fields** (check `collection_name` matches repo slug, e.g. `codewalk` not stale `codebase`):
+
+| Field | Meaning | When it changes |
+|-------|---------|-----------------|
+| `index_version` | Index generation counter (1, 2, 3…) | Every successful cloud re-index (+1) |
+| `codewalk_version` | Codewalk **software** that wrote the index | When indexer container runs a newer `__version__` |
+| `commit_sha` | Git commit of the **indexed repo** | Each webhook/admin re-index after `git pull` |
+
+Log line format: `[manifest] Wrote ... (index vN, codewalk vX.Y.Z)` — first number is `index_version`, second is `codewalk_version`.
+
+**Do not confuse** repo `git pull` (`/var/codewalk/repos/owner/repo`) with API deploy — only the **Docker container** version stamps `codewalk_version`.
 
 ```bash
 # Get repo_token from DB first (see §7), then:
@@ -228,6 +238,10 @@ ls -lh /tmp/index.tar.gz
 ```
 
 **After server re-index** (§11): bump `index_version` on cloud → laptop `codewalk_pull_index` or `rm -rf .codewalk` + pull.
+
+**Stale-index notifications (MCP):** When cloud env is set, every MCP tool may prepend banners if cloud `index_version` or API `commit_sha` is ahead of local. Run `codewalk_pull_index` for index; `git pull` + **restart MCP** for Codewalk software updates. `codewalk_index_status` compares local vs cloud.
+
+**Local API / frontend:** `GET /staleness`, `GET /version`, and `X-Codewalk-Staleness` header on query endpoints (local mode only, not cloud-only).
 
 ---
 
@@ -356,6 +370,17 @@ swapon --show
 ---
 
 ## 10. Deploy & update code
+
+**Post-deploy catch-up (automatic):** ~15s after API restart, catch-up re-indexes repos whose manifest `codewalk_version` is older than the running container (e.g. webhook indexed with 1.0.0 before deploy finished). Expect one extra `index_version` bump per semver deploy. Verify:
+
+```bash
+curl -s "$API/version" | python3 -m json.tool          # running API version
+docker compose logs codewalk-api | grep -E 'catchup|manifest' | tail -20
+curl -s "$API/indexes/$OWNER/$NAME/manifest" \
+  -H "X-Repo-Token: $REPO_TOKEN" | python3 -m json.tool  # codewalk_version should match /version
+```
+
+Laptop after catch-up: `codewalk_pull_index`. Bump `__init__.py` + `deploy/pyproject.toml` only for **named releases**; routine pushes notify via `commit_sha` without a semver bump.
 
 ```bash
 # ── CI/CD path (normal) ────────────────────────────────────────────

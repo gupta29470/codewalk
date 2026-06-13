@@ -34,10 +34,9 @@ def start_cloud_worker() -> None:
     Safe to call even when cloud is not configured — it becomes a no-op.
     Called from the FastAPI lifespan startup handler in main.py.
 
-    Also triggers catch-up indexing for any registered repos that have never
-    been indexed or are in a failed state. This ensures that after a fresh
-    deployment (or a deployment that fixes an indexing bug), indexing starts
-    automatically without waiting for a GitHub webhook.
+    Also triggers catch-up indexing for repos that have never been indexed,
+    are in a failed state, or whose manifest codewalk_version is older than
+    the running API (re-stamp after deploy).
     """
     if not is_cloud_enabled():
         return
@@ -64,24 +63,20 @@ def start_cloud_worker() -> None:
 
 
 def _run_catchup_indexing(logger):
-    """Index any repos that have never been indexed or are in failed state."""
+    """Index repos never indexed, failed, or stamped with an older Codewalk version."""
     try:
         db = api_state.get_db()
-        rows = db.fetchall(
-            """SELECT * FROM repos
-            WHERE last_indexed_sha IS NULL
-               OR index_status IN ('pending', 'failed')
-            ORDER BY updated_at DESC"""
-        )
-        if not rows:
+        repos = _repos_needing_catchup(db)
+        if not repos:
             logger.info("[catchup] No repos need indexing")
             return
 
-        logger.info(f"[catchup] {len(rows)} repo(s) need indexing: "
-                    f"{', '.join(dict(r)['full_name'] for r in rows)}")
+        logger.info(
+            f"[catchup] {len(repos)} repo(s) need indexing: "
+            f"{', '.join(r['full_name'] for r in repos)}"
+        )
 
-        for row in rows:
-            repo = dict(row)
+        for repo in repos:
             full_name = repo.get("full_name", "")
             branch = repo.get("branch", "master")
 
@@ -245,6 +240,57 @@ def _artifacts_dir(repo_full_name: str) -> Path:
     """
     storage = os.environ.get("INDEX_STORAGE_PATH", "/var/codewalk")
     return Path(storage) / "indexes" / repo_full_name
+
+
+def _manifest_codewalk_version(repo_full_name: str) -> str:
+    """Read codewalk_version from on-disk manifest, or empty string."""
+    manifest_path = _artifacts_dir(repo_full_name) / "manifest.json"
+    if not manifest_path.exists():
+        return ""
+    try:
+        return json.loads(manifest_path.read_text()).get("codewalk_version", "")
+    except (json.JSONDecodeError, OSError):
+        return ""
+
+
+def _repos_needing_catchup(db) -> list[dict]:
+    """Repos that need catch-up indexing on API startup.
+
+    Includes never-indexed / failed repos AND repos whose manifest was built
+    with an older Codewalk version than the running API (post-deploy re-stamp).
+    """
+    from packaging.version import parse as parse_version
+    from src.codewalk import __version__
+
+    current = parse_version(__version__)
+    rows = db.fetchall(
+        """SELECT * FROM repos
+        WHERE last_indexed_sha IS NULL
+           OR index_status IN ('pending', 'failed')
+        ORDER BY updated_at DESC"""
+    )
+    seen = {dict(r)["full_name"] for r in rows}
+    result = [dict(r) for r in rows]
+
+    ready = db.fetchall(
+        "SELECT * FROM repos WHERE index_status = 'ready' ORDER BY updated_at DESC"
+    )
+    for row in ready:
+        repo = dict(row)
+        full_name = repo.get("full_name", "")
+        if not full_name or full_name in seen:
+            continue
+        stored_ver = _manifest_codewalk_version(full_name)
+        if not stored_ver:
+            continue
+        try:
+            if parse_version(stored_ver) < current:
+                result.append(repo)
+                seen.add(full_name)
+        except Exception:
+            pass
+
+    return result
 
 
 def _collection_name(repo_full_name: str) -> str:
