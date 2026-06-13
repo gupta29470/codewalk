@@ -433,8 +433,10 @@ def build_full_analysis(
     guidelines_path: str = "",
     docs_path: str = "",
     force_reindex_extras: bool = False,
+    repo_path: str = "",
+    repo_name: str = "",
 ) -> dict:
-    """Stateless analysis: deps → modules → DuckDB → docs → guidelines.
+    """Stateless analysis: deps → modules → DuckDB → knowledge-graph → docs → guidelines.
 
     Caller must scan first (scan_directory or team_scan_directory) and pass files.
     Shared by CLI, worker, MCP, and API — zero duplication.
@@ -446,12 +448,16 @@ def build_full_analysis(
         guidelines_path:       Folder with .md/.txt/.rst guidelines (absolute).
         docs_path:             Folder with .md/.pdf/.txt docs (absolute).
         force_reindex_extras:  If True, wipe + re-embed docs/guidelines.
+        repo_path:             Repo root path (defaults to parent of db_path's parent).
+        repo_name:             Repo name (defaults to repo_path basename).
 
-    Returns: {"files", "deps", "modules_result", "docs_indexed", "guidelines_indexed"}
+    Returns: {"files", "deps", "modules_result", "knowledge_graph_path",
+              "docs_indexed", "guidelines_indexed"}
     """
     from src.codewalk.analysis.dependency_graph import build_dependency_graph
     from src.codewalk.analysis.module_detector import detect_modules
     from src.codewalk.graph.graph_store import GraphStore
+    from src.codewalk.graph.knowledge_graph_export import export_knowledge_graph_from_store
 
     deps = build_dependency_graph(files)
     modules_result = detect_modules(files, deps)
@@ -461,6 +467,25 @@ def build_full_analysis(
         files, deps, modules_result,
         embedded_chunks=embedded_chunks,
     )
+
+    index_dir = str(Path(db_path).parent)
+    derived_repo_path = repo_path or str(Path(db_path).parent.parent)
+    derived_repo_name = repo_name or Path(derived_repo_path).name
+
+    try:
+        knowledge_graph_path = export_knowledge_graph_from_store(
+            graph_store,
+            index_dir=index_dir,
+            files=files,
+            modules_result=modules_result,
+            repo_path=derived_repo_path,
+            repo_name=derived_repo_name,
+        )
+        _log(f"[analysis] Knowledge graph: {knowledge_graph_path}")
+    except Exception as e:
+        _log(f"[analysis] Knowledge graph export failed (non-fatal): {e}")
+        knowledge_graph_path = ""
+
     graph_store.close()
 
     _log(f"[analysis] {len(files)} files, {len(deps['graph'])} in graph, "
@@ -497,6 +522,7 @@ def build_full_analysis(
         "files": files,
         "deps": deps,
         "modules_result": modules_result,
+        "knowledge_graph_path": knowledge_graph_path,
         "docs_indexed": docs_indexed,
         "guidelines_indexed": guidelines_indexed,
     }

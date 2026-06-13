@@ -409,6 +409,7 @@ def _publish_index(
     """Write manifest into incoming/, then atomic_swap incoming → latest (active dir)."""
     from src.codewalk.pipeline import write_manifest
     from src.codewalk.worker.atomic_store import atomic_swap
+    from src.codewalk.graph.knowledge_graph_export import _patch_manifest
 
     incoming = _incoming_artifacts_dir(repo_full_name, run_id)
     if not incoming.is_dir():
@@ -427,6 +428,8 @@ def _publish_index(
         embedding_model=_settings.embedding_model,
         minimum_mcp_version=_codewalk_version,
     )
+    # Stamp manifest with knowledge-graph metadata if the file was generated.
+    _patch_manifest(str(incoming))
     active = _artifacts_dir(repo_full_name)
     active.parent.mkdir(parents=True, exist_ok=True)
     atomic_swap(str(incoming), str(active))
