@@ -16,6 +16,15 @@ from src.codewalk.config import settings as _settings
 cloud_router = APIRouter()
 
 MAX_WEBHOOK_SIZE = 50 * 1024 * 1024  # 50MB
+_STUCK_INDEX_WATCH_SEC = 600  # periodic stuck-index sweep (10 min)
+
+
+def _stuck_index_minutes() -> int:
+    raw = os.environ.get("CODEWALK_STUCK_INDEX_MINUTES", "30")
+    try:
+        return max(5, int(raw))
+    except ValueError:
+        return 30
 
 
 def is_cloud_enabled() -> bool:
@@ -53,12 +62,34 @@ def start_cloud_worker() -> None:
     # and the worker has schema mismatches (repo.name vs full_name).
     # All cloud indexing goes through: webhook → _do_index() OR catch-up → _analyze_repo().
 
-    # Start catch-up indexer after a short delay so the API finishes startup
+    try:
+        db = api_state.get_db()
+        reconciled = _reconcile_orphaned_indexing(db)
+        if reconciled:
+            logger.info(f"[cloud] Reconciled {reconciled} orphaned job(s) after API startup")
+    except Exception:
+        logger.exception("[cloud] Startup orphan reconciliation failed")
+
     def _delayed_catchup():
         time.sleep(15)
         _run_catchup_indexing(logger)
 
+    def _watchdog_loop():
+        while True:
+            time.sleep(_STUCK_INDEX_WATCH_SEC)
+            try:
+                stuck = _reconcile_stuck_indexing(api_state.get_db())
+                if stuck:
+                    logger.warning(
+                        f"[cloud] Reconciled {stuck} stuck indexing repo(s); "
+                        "catch-up will retry on next API restart or admin/index"
+                    )
+                    _run_catchup_indexing(logger)
+            except Exception:
+                logger.exception("[cloud] Stuck-index watchdog failed")
+
     threading.Thread(target=_delayed_catchup, daemon=True).start()
+    threading.Thread(target=_watchdog_loop, daemon=True).start()
     logger.info("[cloud] Catch-up indexer scheduled (15s delay)")
 
 
@@ -81,6 +112,10 @@ def _run_catchup_indexing(logger):
             branch = repo.get("branch", "master")
 
             logger.info(f"[catchup] Starting index for {full_name}")
+            db.execute(
+                "UPDATE jobs SET status=$1, error=$2, finished_at=NOW() WHERE repo_name=$3 AND status IN ('queued', 'running')",
+                "failed", "superseded by catch-up", full_name,
+            )
             db.execute(
                 "UPDATE repos SET index_status=$1, updated_at=NOW() WHERE full_name=$2",
                 "indexing", full_name,
@@ -253,16 +288,63 @@ def _manifest_codewalk_version(repo_full_name: str) -> str:
         return ""
 
 
+def _reconcile_orphaned_indexing(db, reason: str = "API restarted — job orphaned") -> int:
+    """After API restart: daemon indexing threads are dead; unblock repos for catch-up."""
+    indexing_rows = db.fetchall("SELECT full_name FROM repos WHERE index_status='indexing'")
+    job_row = db.fetchone(
+        "SELECT COUNT(*) AS n FROM jobs WHERE status IN ('queued', 'running')"
+    )
+    open_jobs = int(job_row["n"]) if job_row else 0
+
+    db.execute(
+        """UPDATE jobs SET status='failed', error=$1, finished_at=NOW()
+           WHERE status IN ('queued', 'running')""",
+        reason,
+    )
+    db.execute(
+        """UPDATE repos SET index_status='pending', updated_at=NOW()
+           WHERE index_status='indexing'"""
+    )
+    return len(indexing_rows) + open_jobs
+
+
+def _reconcile_stuck_indexing(db, reason: str = "Indexing timed out") -> int:
+    """While API is running: fail jobs/repos stuck in indexing past the threshold."""
+    stuck_mins = _stuck_index_minutes()
+    stuck_rows = db.fetchall(
+        f"""SELECT full_name FROM repos
+            WHERE index_status='indexing'
+              AND updated_at < NOW() - INTERVAL '{stuck_mins} minutes'"""
+    )
+    if not stuck_rows:
+        return 0
+
+    db.execute(
+        f"""UPDATE jobs SET status='failed', error=$1, finished_at=NOW()
+            WHERE status IN ('queued', 'running')
+              AND queued_at < NOW() - INTERVAL '{stuck_mins} minutes'""",
+        reason,
+    )
+    db.execute(
+        f"""UPDATE repos SET index_status='pending', updated_at=NOW()
+            WHERE index_status='indexing'
+              AND updated_at < NOW() - INTERVAL '{stuck_mins} minutes'"""
+    )
+    return len(stuck_rows)
+
+
 def _repos_needing_catchup(db) -> list[dict]:
     """Repos that need catch-up indexing on API startup.
 
-    Includes never-indexed / failed repos AND repos whose manifest was built
-    with an older Codewalk version than the running API (post-deploy re-stamp).
+    Includes never-indexed / failed / pending repos, stuck indexing zombies,
+    repos behind their latest queued job commit, AND repos whose manifest was
+    built with an older Codewalk version than the running API (post-deploy).
     """
     from packaging.version import parse as parse_version
     from src.codewalk import __version__
 
     current = parse_version(__version__)
+    stuck_mins = _stuck_index_minutes()
     rows = db.fetchall(
         """SELECT * FROM repos
         WHERE last_indexed_sha IS NULL
@@ -271,6 +353,36 @@ def _repos_needing_catchup(db) -> list[dict]:
     )
     seen = {dict(r)["full_name"] for r in rows}
     result = [dict(r) for r in rows]
+
+    stuck = db.fetchall(
+        f"""SELECT * FROM repos
+            WHERE index_status = 'indexing'
+              AND updated_at < NOW() - INTERVAL '{stuck_mins} minutes'
+            ORDER BY updated_at DESC"""
+    )
+    for row in stuck:
+        repo = dict(row)
+        full_name = repo.get("full_name", "")
+        if full_name and full_name not in seen:
+            result.append(repo)
+            seen.add(full_name)
+
+    behind_job = db.fetchall(
+        """SELECT r.* FROM repos r
+           JOIN LATERAL (
+               SELECT commit_sha, status FROM jobs
+               WHERE repo_name = r.full_name
+               ORDER BY queued_at DESC LIMIT 1
+           ) j ON TRUE
+           WHERE j.status IN ('queued', 'running')
+             AND (r.last_indexed_sha IS NULL OR r.last_indexed_sha <> j.commit_sha)"""
+    )
+    for row in behind_job:
+        repo = dict(row)
+        full_name = repo.get("full_name", "")
+        if full_name and full_name not in seen:
+            result.append(repo)
+            seen.add(full_name)
 
     ready = db.fetchall(
         "SELECT * FROM repos WHERE index_status = 'ready' ORDER BY updated_at DESC"
@@ -405,6 +517,7 @@ def _run_incremental_index(repo_path: Path, repo_full_name: str) -> dict:
             "files_scanned": result.get("files_scanned", 0),
             "files_changed": result.get("changed_files", 0),
             "files_deleted": result.get("deleted_files", 0),
+            "chunks_embedded": result.get("chunks_embedded", 0),
         }
     except Exception as e:
         return {"status": "failed", "error": str(e)}
@@ -517,6 +630,10 @@ async def github_webhook(request: Request):
 
     def _do_index():
         try:
+            db.execute(
+                "UPDATE jobs SET status=$1, started_at=NOW() WHERE repo_name=$2 AND commit_sha=$3 AND status=$4",
+                "running", repo_full_name, commit, "queued",
+            )
             repo_path = _clone_or_pull_repo(repo, branch)
             result = _run_incremental_index(repo_path, repo_full_name)
 
@@ -543,7 +660,7 @@ async def github_webhook(request: Request):
                     commit, "ready", new_version, repo_full_name,
                 )
                 db.execute(
-                    "UPDATE jobs SET status=$1, finished_at=NOW() WHERE repo_name=$2 AND commit_sha=$3 AND status='queued'",
+                    "UPDATE jobs SET status=$1, finished_at=NOW() WHERE repo_name=$2 AND commit_sha=$3 AND status IN ('queued', 'running')",
                     "done", repo_full_name, commit,
                 )
                 db.execute(
@@ -558,7 +675,7 @@ async def github_webhook(request: Request):
                     "failed", repo_full_name,
                 )
                 db.execute(
-                    "UPDATE jobs SET status=$1, error=$2, finished_at=NOW() WHERE repo_name=$3 AND commit_sha=$4 AND status='queued'",
+                    "UPDATE jobs SET status=$1, error=$2, finished_at=NOW() WHERE repo_name=$3 AND commit_sha=$4 AND status IN ('queued', 'running')",
                     "failed", error_msg, repo_full_name, commit,
                 )
                 db.execute(
@@ -572,7 +689,7 @@ async def github_webhook(request: Request):
                 "failed", repo_full_name,
             )
             db.execute(
-                "UPDATE jobs SET status=$1, error=$2, finished_at=NOW() WHERE repo_name=$3 AND commit_sha=$4 AND status='queued'",
+                "UPDATE jobs SET status=$1, error=$2, finished_at=NOW() WHERE repo_name=$3 AND commit_sha=$4 AND status IN ('queued', 'running')",
                 "failed", str(e), repo_full_name, commit,
             )
             db.execute(
@@ -693,7 +810,7 @@ async def trigger_index(
         write_manifest(
             str(_artifacts_dir(full_name)),
             file_count=result.get("files_scanned", 0),
-            chunk_count=result.get("files_changed", 0),
+            chunk_count=result.get("chunks_embedded", 0),
             repo_name=full_name,
             collection_name=_collection_name(full_name),
             commit_sha=git_sha,
@@ -704,8 +821,8 @@ async def trigger_index(
             minimum_mcp_version=_codewalk_version,
         )
         db.execute(
-            "UPDATE repos SET index_status=$1, index_version=$2, updated_at=NOW() WHERE full_name=$3",
-            "ready", new_version, full_name,
+            "UPDATE repos SET last_indexed_sha=$1, index_status=$2, index_version=$3, updated_at=NOW() WHERE full_name=$4",
+            git_sha or "admin-index", "ready", new_version, full_name,
         )
     else:
         db.execute(

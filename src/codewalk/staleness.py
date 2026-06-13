@@ -218,6 +218,7 @@ def _index_staleness(tool_name: str) -> dict | None:
     return {
         "kind": "index",
         "stale": True,
+        "context": "cloud",
         "local_version": local_v,
         "remote_version": remote_v,
         "local_commit_sha": local_sha,
@@ -229,7 +230,7 @@ def _index_staleness(tool_name: str) -> dict | None:
             f"is newer than local v{local_v} (commit {local_sha[:7] or 'none'})."
         ),
         "action_mcp": "Run codewalk_pull_index",
-        "action_api": "Re-analyze the repo or download the cloud index tarball",
+        "action_api": "Download cloud index (GET /indexes/{owner}/{repo}) or re-analyze after pull",
     }
 
 
@@ -278,6 +279,7 @@ def _software_staleness() -> dict | None:
     return {
         "kind": "software",
         "stale": True,
+        "context": "cloud" if _is_cloud_mode() else "local",
         "local_version": local_version,
         "remote_version": remote_version,
         "local_commit_sha": local_sha,
@@ -290,13 +292,21 @@ def _software_staleness() -> dict | None:
             + (f" ({local_sha[:7]})" if local_sha else "")
             + "."
         ),
-        "action_mcp": remote.get("update_command", "git pull origin master"),
+        "action_mcp": (
+            f"{remote.get('update_command', 'git pull origin master')} "
+            "in your codewalk install, then restart MCP in Cursor"
+        ),
         "action_api": remote.get("update_command", "git pull origin master"),
         "release_notes_url": remote.get("release_notes_url"),
     }
 
 
+def _is_cloud_mode() -> bool:
+    return _cloud_configured() is not None
+
+
 def _index_build_staleness() -> dict | None:
+    """Index on disk was built with an older Codewalk than this MCP/API process."""
     local_manifest = _read_local_manifest()
     if not local_manifest:
         return None
@@ -315,15 +325,56 @@ def _index_build_staleness() -> dict | None:
     except Exception:
         return None
 
+    cloud = _is_cloud_mode()
+    if cloud:
+        remote_manifest = _fetch_remote_manifest() or {}
+        remote_api = _fetch_remote_deployment() or {}
+        remote_stamp = remote_manifest.get("codewalk_version", "")
+        api_version = remote_api.get("codewalk_version", "")
+
+        server_behind = False
+        try:
+            if api_version and remote_stamp:
+                server_behind = parse_version(str(api_version)) > parse_version(str(remote_stamp))
+        except Exception:
+            pass
+
+        if server_behind:
+            title = "Cloud index needs server re-index"
+            message = (
+                f"Downloaded index has codewalk v{stored}; cloud API is v{api_version}. "
+                f"Server must re-index before pull will fix this."
+            )
+            action_mcp = (
+                "Wait for post-deploy catch-up on server (or run reset-repo.sh --index), "
+                "then run codewalk_pull_index"
+            )
+            action_api = (
+                "Trigger server re-index (reset-repo.sh --index), then download the cloud index"
+            )
+        else:
+            title = "Downloaded cloud index built with older Codewalk"
+            message = (
+                f"Local .codewalk/ manifest has codewalk v{stored}; running v{__version__}."
+            )
+            action_mcp = "Run codewalk_pull_index to download a fresh cloud index"
+            action_api = "Download cloud index tarball or wait for server re-index, then pull locally"
+    else:
+        title = "Local index built with older Codewalk"
+        message = f"Index was built with v{stored}; running v{__version__}."
+        action_mcp = "Run codewalk_analyze_codebase to rebuild the index locally"
+        action_api = "POST /analyze to rebuild the local index"
+
     return {
         "kind": "index_build",
         "stale": True,
+        "context": "cloud" if cloud else "local",
         "index_codewalk_version": stored,
         "running_version": __version__,
-        "title": "Local index built with older Codewalk",
-        "message": f"Index was built with v{stored}; running v{__version__}.",
-        "action_mcp": "Run codewalk_pull_index or codewalk_analyze_codebase",
-        "action_api": "POST /analyze to rebuild the local index",
+        "title": title,
+        "message": message,
+        "action_mcp": action_mcp,
+        "action_api": action_api,
     }
 
 
@@ -356,23 +407,26 @@ def get_staleness_banners(tool_name: str) -> str:
 
     blocks = []
     for alert in status["alerts"]:
+        ctx = alert.get("context", "local")
+        prefix = "[Cloud] " if ctx == "cloud" else "[Local] "
         if alert["kind"] == "index":
             blocks.append(
-                "⚡ NEW INDEX AVAILABLE on cloud server\n"
+                f"⚡ {prefix}NEW INDEX AVAILABLE\n"
                 f"  {alert['message']}\n"
                 f"  → {alert['action_mcp']}"
             )
         elif alert["kind"] == "software":
             blocks.append(
-                "🆕 NEW CODEWALK VERSION on cloud server\n"
+                f"🆕 {prefix}NEW CODEWALK VERSION\n"
                 f"  {alert['message']}\n"
-                f"  → Update local Codewalk: {alert['action_mcp']}"
+                f"  → {alert['action_mcp']}"
             )
             if alert.get("release_notes_url"):
                 blocks.append(f"  Notes: {alert['release_notes_url']}")
         elif alert["kind"] == "index_build":
             blocks.append(
-                f"⚠️  {alert['message']}\n"
+                f"⚠️  {prefix}{alert['title']}\n"
+                f"  {alert['message']}\n"
                 f"  → {alert['action_mcp']}"
             )
     return "\n\n".join(blocks)

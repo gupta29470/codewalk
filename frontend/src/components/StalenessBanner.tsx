@@ -20,7 +20,10 @@ export function StalenessBanner() {
         <div className="mb-4 space-y-2 rounded-lg border border-amber-500/40 bg-amber-500/10 p-4 text-sm">
             {status.alerts.map((alert) => (
                 <div key={alert.kind}>
-                    <p className="font-medium text-amber-200">{alert.title}</p>
+                    <p className="font-medium text-amber-200">
+                        {alert.context === "cloud" ? "[Cloud] " : alert.context === "local" ? "[Local] " : ""}
+                        {alert.title}
+                    </p>
                     <p className="text-muted-foreground">{alert.message}</p>
                     <p className="mt-1 text-amber-100/90">→ {alert.action_api}</p>
                 </div>

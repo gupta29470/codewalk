@@ -208,6 +208,30 @@ export interface StreamEvent {
     proposed_action?: string;   // present for type="interrupted"
 }
 
+export interface StalenessAlert {
+    kind: "index" | "software" | "index_build";
+    stale: boolean;
+    context?: "cloud" | "local";
+    title: string;
+    message: string;
+    action_mcp: string;
+    action_api: string;
+    release_notes_url?: string;
+}
+
+export interface StalenessStatus {
+    has_updates: boolean;
+    index_stale: boolean;
+    software_stale: boolean;
+    index_build_stale: boolean;
+    alerts: StalenessAlert[];
+    version: {
+        codewalk_version: string;
+        commit_sha_short: string;
+    };
+    cloud_configured: boolean;
+}
+
 // ─── API Client ─────────────────────────────────────────────────────
 
 async function apiFetch<T>(path: string, options?: RequestInit): Promise<T> {
@@ -229,6 +253,8 @@ async function apiFetch<T>(path: string, options?: RequestInit): Promise<T> {
 
 export const api = {
     health: () => apiFetch<{ status: string }>("/health"),
+
+    getStaleness: () => apiFetch<StalenessStatus>("/staleness"),
 
     analyze: (repoPath: string, indexMode: string = "auto") =>
         apiFetch<AnalyzeResponse>("/analyze", {

@@ -371,7 +371,7 @@ swapon --show
 
 ## 10. Deploy & update code
 
-**Post-deploy catch-up (automatic):** ~15s after API restart, catch-up re-indexes repos whose manifest `codewalk_version` is older than the running container (e.g. webhook indexed with 1.0.0 before deploy finished). Expect one extra `index_version` bump per semver deploy. Verify:
+**Post-deploy catch-up (automatic):** On API startup, orphaned `indexing`/`queued` jobs are cancelled and repos reset to `pending`. ~15s later, catch-up re-indexes repos that are pending/failed, stuck in `indexing` (>30 min, `CODEWALK_STUCK_INDEX_MINUTES`), behind their latest job commit, or whose manifest `codewalk_version` is older than the running container. A watchdog runs every 10 min for long-running stuck jobs. Expect one extra `index_version` bump per semver deploy. Verify:
 
 ```bash
 curl -s "$API/version" | python3 -m json.tool          # running API version
