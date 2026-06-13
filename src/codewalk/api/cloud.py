@@ -3,7 +3,9 @@ import hashlib
 import secrets
 import json
 import os
+import shutil
 import subprocess
+import threading
 from pathlib import Path
 
 from fastapi import APIRouter, Request, HTTPException, Header, FastAPI
@@ -18,6 +20,10 @@ cloud_router = APIRouter()
 MAX_WEBHOOK_SIZE = 50 * 1024 * 1024  # 50MB
 _STUCK_INDEX_WATCH_SEC = 600  # periodic stuck-index sweep (10 min)
 
+# One active index writer per repo — newer push/catch-up supersedes the previous claim.
+_index_claim_lock = threading.Lock()
+_active_index_commit: dict[str, str] = {}
+
 
 def _stuck_index_minutes() -> int:
     raw = os.environ.get("CODEWALK_STUCK_INDEX_MINUTES", "30")
@@ -25,6 +31,71 @@ def _stuck_index_minutes() -> int:
         return max(5, int(raw))
     except ValueError:
         return 30
+
+
+def _claim_index_slot(full_name: str, commit: str) -> None:
+    """Mark commit as the only writer allowed to publish index artifacts for this repo."""
+    with _index_claim_lock:
+        _active_index_commit[full_name] = commit
+
+
+def _index_slot_active(full_name: str, commit: str) -> bool:
+    with _index_claim_lock:
+        return _active_index_commit.get(full_name) == commit
+
+
+def _cancel_open_jobs(
+    db,
+    full_name: str,
+    reason: str,
+    *,
+    except_commit: str | None = None,
+) -> None:
+    """Fail queued/running jobs so a newer index run can take over."""
+    if except_commit:
+        db.execute(
+            """UPDATE jobs SET status='failed', error=$1, finished_at=NOW()
+               WHERE repo_name=$2 AND status IN ('queued', 'running') AND commit_sha <> $3""",
+            reason, full_name, except_commit,
+        )
+    else:
+        db.execute(
+            """UPDATE jobs SET status='failed', error=$1, finished_at=NOW()
+               WHERE repo_name=$2 AND status IN ('queued', 'running')""",
+            reason, full_name,
+        )
+
+
+def _git_head_sha(repo_path: Path) -> str:
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=str(repo_path),
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        return result.stdout.strip()
+    except Exception:
+        return ""
+
+
+def _abort_superseded_index(
+    db,
+    full_name: str,
+    commit: str,
+    *,
+    reason: str = "superseded by newer push",
+) -> dict | None:
+    """If another run claimed this repo, stop without touching manifest or repo status."""
+    if _index_slot_active(full_name, commit):
+        return None
+    db.execute(
+        """UPDATE jobs SET status='failed', error=$1, finished_at=NOW()
+           WHERE repo_name=$2 AND commit_sha=$3 AND status IN ('queued', 'running')""",
+        reason, full_name, commit,
+    )
+    return {"status": "superseded", "reason": reason}
 
 
 def is_cloud_enabled() -> bool:
@@ -112,28 +183,32 @@ def _run_catchup_indexing(logger):
             branch = repo.get("branch", "master")
 
             logger.info(f"[catchup] Starting index for {full_name}")
-            db.execute(
-                "UPDATE jobs SET status=$1, error=$2, finished_at=NOW() WHERE repo_name=$3 AND status IN ('queued', 'running')",
-                "failed", "superseded by catch-up", full_name,
-            )
+            repo_path = _clone_or_pull_repo(repo, branch)
+            head_sha = _git_head_sha(repo_path) or "catchup"
+            _claim_index_slot(full_name, head_sha)
+            _cancel_open_jobs(db, full_name, "superseded by catch-up")
             db.execute(
                 "UPDATE repos SET index_status=$1, updated_at=NOW() WHERE full_name=$2",
                 "indexing", full_name,
             )
 
             try:
-                repo_path = _clone_or_pull_repo(repo, branch)
                 # Catch-up does a full index + full DuckDB rebuild to ensure consistency
-                result = _analyze_repo(repo_path, full_name)
+                result = _analyze_repo(repo_path, full_name, head_sha)
+
+                superseded = _abort_superseded_index(
+                    db, full_name, head_sha, reason="superseded by catch-up"
+                )
+                if superseded:
+                    _discard_incoming(full_name, head_sha)
+                    logger.info(f"[catchup] Skipped {full_name} — newer index run claimed slot")
+                    continue
 
                 if result["status"] == "success":
                     # Get commit info from the cloned repo
                     git_sha = git_msg = git_branch = ""
                     try:
-                        git_sha = subprocess.run(
-                            ["git", "rev-parse", "HEAD"], cwd=str(repo_path),
-                            capture_output=True, text=True, check=True,
-                        ).stdout.strip()
+                        git_sha = head_sha or _git_head_sha(repo_path)
                         git_msg = subprocess.run(
                             ["git", "log", "-1", "--format=%s"], cwd=str(repo_path),
                             capture_output=True, text=True, check=True,
@@ -148,9 +223,9 @@ def _run_catchup_indexing(logger):
                     # Write manifest and increment index_version
                     row_ver = db.fetchone("SELECT index_version FROM repos WHERE full_name=$1", full_name)
                     new_version = ((row_ver["index_version"] or 0) if row_ver else 0) + 1
-                    from src.codewalk.pipeline import write_manifest
-                    write_manifest(
-                        str(_artifacts_dir(full_name)),
+                    _publish_index(
+                        full_name,
+                        head_sha,
                         file_count=result.get("files_scanned", 0),
                         chunk_count=result.get("chunks_embedded", 0),
                         repo_name=full_name,
@@ -159,8 +234,6 @@ def _run_catchup_indexing(logger):
                         commit_message=git_msg,
                         branch=git_branch,
                         index_version=new_version,
-                        embedding_model=_settings.embedding_model,
-                        minimum_mcp_version=_codewalk_version,
                     )
                     db.execute(
                         "UPDATE repos SET last_indexed_sha=$1, index_status=$2, index_version=$3, updated_at=NOW() WHERE full_name=$4",
@@ -173,6 +246,7 @@ def _run_catchup_indexing(logger):
                     )
                 else:
                     error = result.get("error", "unknown")
+                    _discard_incoming(full_name, head_sha)
                     db.execute(
                         "UPDATE repos SET index_status=$1, updated_at=NOW() WHERE full_name=$2",
                         "failed", full_name,
@@ -181,6 +255,7 @@ def _run_catchup_indexing(logger):
 
             except Exception as e:
                 logger.exception(f"[catchup] ❌ {full_name} exception: {e}")
+                _discard_incoming(full_name, head_sha)
                 db.execute(
                     "UPDATE repos SET index_status=$1, updated_at=NOW() WHERE full_name=$2",
                     "failed", full_name,
@@ -268,13 +343,93 @@ def _clone_or_pull_repo(repo: dict, branch: str) -> Path:
 
 
 def _artifacts_dir(repo_full_name: str) -> Path:
-    """Return the standard artifacts directory for a repo's index.
-
-    All cloud index artifacts (chroma/, graph.duckdb, manifest.json) live here.
-    Source code lives separately at /var/codewalk/repos/{owner}/{repo}/.
-    """
+    """Active (latest) index artifacts — served by download API and manifest."""
     storage = os.environ.get("INDEX_STORAGE_PATH", "/var/codewalk")
     return Path(storage) / "indexes" / repo_full_name
+
+
+def _incoming_artifacts_dir(repo_full_name: str, run_id: str) -> Path:
+    """Per-run scratch space; promoted via atomic_swap after manifest is written."""
+    active = _artifacts_dir(repo_full_name)
+    safe = "".join(c if c.isalnum() else "_" for c in run_id)[:20] or "run"
+    return active.parent / f"{active.name}.incoming.{safe}"
+
+
+def _cleanup_orphan_incoming(repo_full_name: str) -> None:
+    """Remove abandoned .incoming.* dirs from failed or superseded runs."""
+    active = _artifacts_dir(repo_full_name)
+    parent = active.parent
+    if not parent.exists():
+        return
+    prefix = f"{active.name}.incoming."
+    for entry in parent.iterdir():
+        if entry.is_dir() and entry.name.startswith(prefix):
+            shutil.rmtree(entry, ignore_errors=True)
+
+
+def _prepare_incoming_workspace(
+    repo_full_name: str,
+    run_id: str,
+    *,
+    seed_from_active: bool,
+) -> Path:
+    """Create incoming workspace; optionally copy current latest as incremental base."""
+    _cleanup_orphan_incoming(repo_full_name)
+    incoming = _incoming_artifacts_dir(repo_full_name, run_id)
+    if incoming.exists():
+        shutil.rmtree(incoming)
+    active = _artifacts_dir(repo_full_name)
+    if seed_from_active and active.exists() and any(active.iterdir()):
+        shutil.copytree(active, incoming)
+    else:
+        incoming.mkdir(parents=True, exist_ok=True)
+        (incoming / "chroma").mkdir(parents=True, exist_ok=True)
+    return incoming
+
+
+def _discard_incoming(repo_full_name: str, run_id: str) -> None:
+    incoming = _incoming_artifacts_dir(repo_full_name, run_id)
+    if incoming.exists():
+        shutil.rmtree(incoming, ignore_errors=True)
+
+
+def _publish_index(
+    repo_full_name: str,
+    run_id: str,
+    *,
+    file_count: int,
+    chunk_count: int,
+    repo_name: str,
+    collection_name: str,
+    commit_sha: str,
+    commit_message: str,
+    branch: str,
+    index_version: int,
+) -> None:
+    """Write manifest into incoming/, then atomic_swap incoming → latest (active dir)."""
+    from src.codewalk.pipeline import write_manifest
+    from src.codewalk.worker.atomic_store import atomic_swap
+
+    incoming = _incoming_artifacts_dir(repo_full_name, run_id)
+    if not incoming.is_dir():
+        raise FileNotFoundError(f"Incoming index missing for {repo_full_name}")
+
+    write_manifest(
+        str(incoming),
+        file_count=file_count,
+        chunk_count=chunk_count,
+        repo_name=repo_name,
+        collection_name=collection_name,
+        commit_sha=commit_sha,
+        commit_message=commit_message,
+        branch=branch,
+        index_version=index_version,
+        embedding_model=_settings.embedding_model,
+        minimum_mcp_version=_codewalk_version,
+    )
+    active = _artifacts_dir(repo_full_name)
+    active.parent.mkdir(parents=True, exist_ok=True)
+    atomic_swap(str(incoming), str(active))
 
 
 def _manifest_codewalk_version(repo_full_name: str) -> str:
@@ -413,28 +568,18 @@ def _collection_name(repo_full_name: str) -> str:
     return name or "codebase"
 
 
-def _analyze_repo(repo_path: Path, repo_full_name: str) -> dict:
-    """Run the FULL /analyze pipeline with team config support.
-
-    Reads codewalk.yaml from the repo root, respects exclude patterns,
-    and produces both ChromaDB embeddings and DuckDB analysis.
-    Artifacts are stored at /var/codewalk/indexes/{owner}/{repo}/.
-    Manifest writing and index_version increment are the caller's responsibility.
-    """
+def _analyze_repo(repo_path: Path, repo_full_name: str, run_id: str) -> dict:
+    """Run the FULL /analyze pipeline into incoming/, then caller publishes via atomic_swap."""
     from src.codewalk.team_config import load_codewalk_yaml
     from src.codewalk.pipeline import full_index_parallel, build_full_analysis
 
     try:
-        adir = _artifacts_dir(repo_full_name)
-        adir.mkdir(parents=True, exist_ok=True)
-        (adir / "chroma").mkdir(parents=True, exist_ok=True)
+        adir = _prepare_incoming_workspace(repo_full_name, run_id, seed_from_active=False)
         persist_dir = str(adir / "chroma")
         db_path = str(adir / "graph.duckdb")
 
         config = load_codewalk_yaml(str(repo_path))
 
-        # full_index_parallel scans files internally (with team_config exclusions)
-        # and returns them in index_result["files"] — reuse instead of scanning twice
         col = _collection_name(repo_full_name)
         index_result = full_index_parallel(
             repo_path=str(repo_path),
@@ -464,29 +609,24 @@ def _analyze_repo(repo_path: Path, repo_full_name: str) -> dict:
             "chunks_embedded": index_result.get("chunks_embedded", 0),
         }
     except Exception as e:
+        _discard_incoming(repo_full_name, run_id)
         return {"status": "failed", "error": str(e)}
 
 
-def _run_incremental_index(repo_path: Path, repo_full_name: str) -> dict:
-    """Run incremental re-index, then rebuild full DuckDB analysis.
-
-    Artifacts are stored at /var/codewalk/indexes/{owner}/{repo}/.
-    Manifest writing and index_version increment are the caller's responsibility.
-    """
+def _run_incremental_index(repo_path: Path, repo_full_name: str, run_id: str) -> dict:
+    """Incremental re-index into incoming/ (seeded from latest), then caller publishes."""
     from src.codewalk.team_config import load_codewalk_yaml, team_scan_directory
     from src.codewalk.pipeline import reindex, build_full_analysis
 
     try:
-        adir = _artifacts_dir(repo_full_name)
-        adir.mkdir(parents=True, exist_ok=True)
-        (adir / "chroma").mkdir(parents=True, exist_ok=True)
+        active = _artifacts_dir(repo_full_name)
+        seed = active.exists() and (active / "chroma").exists()
+        adir = _prepare_incoming_workspace(repo_full_name, run_id, seed_from_active=seed)
         persist_dir = str(adir / "chroma")
         db_path = str(adir / "graph.duckdb")
 
         config = load_codewalk_yaml(str(repo_path))
 
-        # reindex() fetches indexed files from ChromaDB, compares hashes,
-        # re-embeds only changed/new, deletes removed files.
         col = _collection_name(repo_full_name)
         result = reindex(
             repo_path=str(repo_path),
@@ -495,7 +635,6 @@ def _run_incremental_index(repo_path: Path, repo_full_name: str) -> dict:
             team_config=config,
         )
 
-        # Rebuild deps/modules/DuckDB even for incremental changes
         files = team_scan_directory(str(repo_path), config)
 
         guidelines_path = ""
@@ -520,6 +659,7 @@ def _run_incremental_index(repo_path: Path, repo_full_name: str) -> dict:
             "chunks_embedded": result.get("chunks_embedded", 0),
         }
     except Exception as e:
+        _discard_incoming(repo_full_name, run_id)
         return {"status": "failed", "error": str(e)}
 
 
@@ -614,6 +754,10 @@ async def github_webhook(request: Request):
         )
         return {"status": "skipped", "reason": "Commit already indexed", "sha": commit[:7]}
 
+    # ── Supersede any in-flight index; newest push wins ─────────────
+    _cancel_open_jobs(db, repo_full_name, "superseded by newer push")
+    _claim_index_slot(repo_full_name, commit)
+
     # ── Queue job and update status ───────────────────────────────────
     db.execute(
         "INSERT INTO jobs (repo_name, commit_sha, commit_message, status) VALUES ($1, $2, $3, $4)",
@@ -634,16 +778,28 @@ async def github_webhook(request: Request):
                 "UPDATE jobs SET status=$1, started_at=NOW() WHERE repo_name=$2 AND commit_sha=$3 AND status=$4",
                 "running", repo_full_name, commit, "queued",
             )
+            aborted = _abort_superseded_index(db, repo_full_name, commit)
+            if aborted:
+                return aborted
+
             repo_path = _clone_or_pull_repo(repo, branch)
-            result = _run_incremental_index(repo_path, repo_full_name)
+            aborted = _abort_superseded_index(db, repo_full_name, commit)
+            if aborted:
+                return aborted
+
+            result = _run_incremental_index(repo_path, repo_full_name, commit)
 
             if result["status"] == "success":
+                aborted = _abort_superseded_index(db, repo_full_name, commit)
+                if aborted:
+                    _discard_incoming(repo_full_name, commit)
+                    return aborted
                 # Fetch current version, increment, write manifest, then update DB
                 row = db.fetchone("SELECT index_version FROM repos WHERE full_name=$1", repo_full_name)
                 new_version = ((row["index_version"] or 0) if row else 0) + 1
-                from src.codewalk.pipeline import write_manifest
-                write_manifest(
-                    str(_artifacts_dir(repo_full_name)),
+                _publish_index(
+                    repo_full_name,
+                    commit,
                     file_count=result.get("files_scanned", 0),
                     chunk_count=result.get("chunks_embedded", 0),
                     repo_name=repo_full_name,
@@ -652,8 +808,6 @@ async def github_webhook(request: Request):
                     commit_message=msg,
                     branch=branch,
                     index_version=new_version,
-                    embedding_model=_settings.embedding_model,
-                    minimum_mcp_version=_codewalk_version,
                 )
                 db.execute(
                     "UPDATE repos SET last_indexed_sha=$1, index_status=$2, index_version=$3, updated_at=NOW() WHERE full_name=$4",
@@ -670,6 +824,7 @@ async def github_webhook(request: Request):
                 return result
             else:
                 error_msg = result.get("error", "Unknown indexing error")
+                _discard_incoming(repo_full_name, commit)
                 db.execute(
                     "UPDATE repos SET index_status=$1, updated_at=NOW() WHERE full_name=$2",
                     "failed", repo_full_name,
@@ -684,6 +839,7 @@ async def github_webhook(request: Request):
                 )
                 return result
         except Exception as e:
+            _discard_incoming(repo_full_name, commit)
             db.execute(
                 "UPDATE repos SET index_status=$1, updated_at=NOW() WHERE full_name=$2",
                 "failed", repo_full_name,
@@ -783,9 +939,24 @@ async def trigger_index(
 
     repo = dict(repo)
     repo_path = _clone_or_pull_repo(repo, branch or repo["branch"])
-    result = _run_incremental_index(repo_path, full_name)
+    head_sha = _git_head_sha(repo_path) or "admin-index"
+    _cancel_open_jobs(db, full_name, "superseded by admin/index")
+    _claim_index_slot(full_name, head_sha)
+    db.execute(
+        "UPDATE repos SET index_status=$1, updated_at=NOW() WHERE full_name=$2",
+        "indexing", full_name,
+    )
+    result = _run_incremental_index(repo_path, full_name, head_sha)
 
     if result["status"] == "success":
+        if not _index_slot_active(full_name, head_sha):
+            _discard_incoming(full_name, head_sha)
+            db.execute(
+                "UPDATE repos SET index_status=$1, updated_at=NOW() WHERE full_name=$2",
+                "failed", full_name,
+            )
+            return {"repo": full_name, "status": "superseded"}
+
         # Get commit info from the cloned repo
         git_sha = git_msg = git_branch = ""
         try:
@@ -806,9 +977,9 @@ async def trigger_index(
 
         row_ver = db.fetchone("SELECT index_version FROM repos WHERE full_name=$1", full_name)
         new_version = ((row_ver["index_version"] or 0) if row_ver else 0) + 1
-        from src.codewalk.pipeline import write_manifest
-        write_manifest(
-            str(_artifacts_dir(full_name)),
+        _publish_index(
+            full_name,
+            head_sha,
             file_count=result.get("files_scanned", 0),
             chunk_count=result.get("chunks_embedded", 0),
             repo_name=full_name,
@@ -817,14 +988,13 @@ async def trigger_index(
             commit_message=git_msg,
             branch=git_branch,
             index_version=new_version,
-            embedding_model=_settings.embedding_model,
-            minimum_mcp_version=_codewalk_version,
         )
         db.execute(
             "UPDATE repos SET last_indexed_sha=$1, index_status=$2, index_version=$3, updated_at=NOW() WHERE full_name=$4",
             git_sha or "admin-index", "ready", new_version, full_name,
         )
     else:
+        _discard_incoming(full_name, head_sha)
         db.execute(
             "UPDATE repos SET index_status=$1, updated_at=NOW() WHERE full_name=$2",
             "failed", full_name,

@@ -396,7 +396,20 @@ curl -s -X POST https://api.codewalk.xyz/admin/repos \
   -H "X-Admin-Key: YOUR_ADMIN_KEY" | python3 -m json.tool
 ```
 
-Expected progression: `index_status: "indexing"` → `"ready"`.
+Expected progression: `index_status: "indexing"` → `"ready"`, `job_status: "done"`.
+
+While indexing: `index_status: indexing` + `job_status: running` (or briefly `queued`) is normal.
+
+**Push during indexing:** Older jobs are marked `failed` (superseded); only the newest commit is published.
+
+**After deploy:** API reconciles orphaned jobs and catch-up re-indexes stale repos automatically (~15s). Verify:
+
+```bash
+docker compose logs --tail 30 codewalk-api | grep -E 'Reconciled|catchup|manifest'
+curl -s https://api.codewalk.xyz/version | python3 -m json.tool
+```
+
+Indexes are built in `indexes/{owner}/{repo}.incoming.{sha}/` and promoted via atomic swap to `indexes/{owner}/{repo}/` — a failed mid-write run does not corrupt the active index.
 
 First index takes **5–15+ minutes** (model download + full scan).
 

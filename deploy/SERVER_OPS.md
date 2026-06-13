@@ -29,7 +29,8 @@ export NAME="codewalk"
 | `/opt/codewalk` | `docker-compose.yml`, `.env`, `Caddyfile` — **run compose here** |
 | `/opt/codewalk-src` | Git clone — `git pull` for source; **does not update running container** |
 | `/var/codewalk/repos/{owner}/{repo}` | Cloned git repos |
-| `/var/codewalk/indexes/{owner}/{repo}` | Index artifacts (chroma, duckdb, manifest) |
+| `/var/codewalk/indexes/{owner}/{repo}` | Active index (latest) — chroma, duckdb, manifest |
+| `/var/codewalk/indexes/{owner}/{repo}.incoming.*` | Scratch builds; promoted via atomic swap (safe to delete if orphaned) |
 | `/var/codewalk/secrets/` | GitHub App PEM (`chmod 600`, owner `999:999`) |
 | `/opt/codewalk/.deploy-state` | Last deployed SHAs (2 lines: prev, curr) |
 | `/opt/codewalk/.deploy-log` | Deploy script log |
@@ -200,7 +201,58 @@ curl -s "$API/version" | python3 -m json.tool
 
 ---
 
-## 6. Index download & manifest (MCP / laptop)
+## 6. Index download, manifest & indexing lifecycle
+
+### 6.1 How cloud indexing works
+
+```
+git push
+  → webhook: queue job, supersede any in-flight run
+  → build in indexes/{owner}/{repo}.incoming.{commit}/
+  → write manifest → atomic_swap → indexes/{owner}/{repo}/ (active)
+
+API restart / deploy
+  → reconcile: fail orphaned queued/running jobs, indexing → pending
+  → catch-up ~15s: full re-index for pending/failed/stuck/stale repos
+
+Push while indexing
+  → older job failed ("superseded by newer push")
+  → only newest commit publishes (stale threads discard result)
+
+Watchdog (every 10 min)
+  → repos stuck in indexing > CODEWALK_STUCK_INDEX_MINUTES (default 30)
+  → reset + catch-up retry
+```
+
+| Trigger | Index type | Publish |
+|---------|------------|---------|
+| GitHub `push` webhook | Incremental (seeds from active) | atomic swap |
+| Post-deploy catch-up | Full rebuild | atomic swap |
+| `POST /admin/index` | Incremental + supersede slot | atomic swap |
+
+**Disk layout:**
+
+| Path | Role |
+|------|------|
+| `indexes/{owner}/{repo}/` | Active index — download API + manifest |
+| `indexes/{owner}/{repo}.incoming.{sha}/` | Per-run scratch (deleted after successful swap) |
+| `indexes/{owner}/{repo}_old` | Brief backup during swap (auto-removed) |
+
+**Status fields:**
+
+| `repos.index_status` | Meaning |
+|---------------------|---------|
+| `pending` | Waiting for catch-up or manual trigger |
+| `indexing` | Run in progress |
+| `ready` | Active index matches `last_indexed_sha` |
+| `failed` | Last run failed — catch-up or `reset-repo.sh` |
+
+| `jobs.status` | Meaning |
+|---------------|---------|
+| `queued` → `running` → `done` | Normal webhook job |
+| `failed` | Error or superseded / orphaned |
+
+### 6.2 Download & manifest (MCP / laptop)
 
 **MCP tools (preferred):** `codewalk_pull_index`, `codewalk_connect_repo`, or first `codewalk_analyze_codebase` when no local index — all **delete `REPO_PATH/.codewalk/` and extract fresh** (full replace, not merge). Index pull does not require MCP restart; **Codewalk code updates** (`git pull` on codewalk repo) require MCP restart in Cursor.
 
@@ -239,7 +291,7 @@ ls -lh /tmp/index.tar.gz
 
 **After server re-index** (§11): bump `index_version` on cloud → laptop `codewalk_pull_index` or `rm -rf .codewalk` + pull.
 
-**Stale-index notifications (MCP):** When cloud env is set, every MCP tool may prepend banners if cloud `index_version` or API `commit_sha` is ahead of local. Run `codewalk_pull_index` for index; `git pull` + **restart MCP** for Codewalk software updates. `codewalk_index_status` compares local vs cloud.
+**Stale-index notifications (MCP):** When cloud env is set, every MCP tool may prepend `[Cloud]` / `[Local]` banners. Cloud users: `codewalk_pull_index` for index updates; wait for server catch-up if manifest `codewalk_version` lags API `/version`. Local-only: `codewalk_analyze_codebase`. Software updates: `git pull` + **restart MCP**. `codewalk_index_status` compares local vs cloud.
 
 **Local API / frontend:** `GET /staleness`, `GET /version`, and `X-Codewalk-Staleness` header on query endpoints (local mode only, not cloud-only).
 
@@ -306,7 +358,11 @@ docker compose exec postgres psql -U codewalk -d codewalk -c \
 
 **`index_status` values:** `pending` → `indexing` → `ready` (or `failed`)
 
-**`jobs.status` values:** `queued` → `running` → `done` (or `failed`)
+**`jobs.status` values:** `queued` → `running` → `done` (or `failed` / superseded)
+
+**Concurrent pushes:** Newer push fails older `queued`/`running` jobs and takes the index slot; only the latest commit is published.
+
+**Stuck indexing:** Usually self-heals on deploy (reconcile + catch-up) or via watchdog (`CODEWALK_STUCK_INDEX_MINUTES`, default 30). Manual: §11 `prepare --index`.
 
 ---
 

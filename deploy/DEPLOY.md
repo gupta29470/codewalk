@@ -370,6 +370,11 @@ docker compose ps
 
 # 4. API logs (no errors)
 docker compose logs --tail 50 codewalk-api
+
+# 5. Post-deploy catch-up (repos with stale manifest or stuck indexing)
+docker compose logs codewalk-api | grep -E 'Reconciled|catchup|indexed' | tail -20
+curl -s https://api.codewalk.xyz/version | python3 -m json.tool
+# manifest codewalk_version should match /version after catch-up completes
 ```
 
 ### Security Checks

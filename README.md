@@ -1416,10 +1416,31 @@ Marketing site (optional): **`https://codewalk.xyz`**
 ### Architecture
 
 ```
-git push → GitHub App webhook → api.codewalk.xyz → index stored
-                                        ↓
+git push → GitHub App webhook → api.codewalk.xyz
+              ↓
+         build in .incoming.{commit}/ → atomic_swap → active index
+              ↓
 Local MCP → GET /indexes/{owner}/{repo} → query locally
 ```
+
+**Indexing is server-side only** — the cloud API does not serve `/analyze` or `/chat` for indexed repos. MCP downloads the index tarball and queries locally.
+
+### Cloud indexing lifecycle
+
+| Event | What happens |
+|-------|----------------|
+| **First `git push`** | Auto-registers repo, incremental index, `index_status: ready` |
+| **Later pushes** | Incremental re-index; `index_version` bumps |
+| **Push during indexing** | Older run superseded; newest commit wins |
+| **Deploy / API restart** | Orphan jobs cancelled; catch-up re-indexes stale/pending repos (~15s) |
+| **Stale `codewalk_version`** | Catch-up full re-index after semver deploy |
+| **Crash mid-write** | Atomic swap — active index unchanged until publish succeeds |
+
+**Laptop after server index updates:** `codewalk_pull_index` (not `codewalk_analyze_codebase` when cloud is configured).
+
+**Staleness banners (MCP):** `[Cloud]` → pull index / wait for server catch-up; `[Local]` → `codewalk_analyze_codebase`. See [deploy/SERVER_OPS.md](deploy/SERVER_OPS.md) §6.
+
+### Architecture (components)
 
 | Component | Where | Role |
 |-----------|-------|------|
