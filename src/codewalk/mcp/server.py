@@ -1,4 +1,4 @@
-"""Codewalk MCP server — 27 tools for codebase onboarding, search, review, voice, and cloud index management.
+"""Codewalk MCP server — 28 tools for codebase onboarding, search, review, voice, visualization, and cloud index management.
 
 Tool categories:
   SETUP  (1):           Analyze repo — scans, filters, chunks, embeds in one call.
@@ -82,6 +82,8 @@ mcp = FastMCP(
         "- 'Where should I start reading?' → codewalk_get_reading_order — returns ALL files\n"
         "- 'Show me the dependency flow' → codewalk_get_execution_flow — "
         "no arg = module-to-module flow, with module_name = file-to-file flow\n"
+        "- 'Show me the knowledge graph' → codewalk_show_knowledge_graph — opens interactive "
+        "visualization of the codebase in the browser\n"
         "- 'Fix this bug / apply this change' → search + produce fix → codewalk_approve_action FIRST → then apply\n"
         "\n"
         "## MAINTENANCE (after code changes)\n"
@@ -103,6 +105,8 @@ mcp = FastMCP(
         "\n"
         "Step 2: WRITE YOUR REVIEW merging all three results:\n"
         "        - Use codewalk_review_diff for per-file issues (bugs, security, logic)\n"
+        "        - STRICTLY use the blast radius information from codewalk_review_diff; if a changed file is\n"
+        "          high-risk, say what can break and what downstream code should be tested\n"
         "        - Use codewalk_get_architecture_health to flag if any changed file is a\n"
         "          bottleneck (high centrality) or part of a circular dependency\n"
         "        - Use codewalk_get_module_info to check if changed symbols are widely used\n"
@@ -219,10 +223,24 @@ mcp = FastMCP(
     ),
 )
 
+def _mcp_repo_path() -> str:
+    """Return the repo path for MCP operations.
+
+    The MCP server is launched with cwd set to the workspace folder, so
+    os.getcwd() is the repo root.
+    """
+    return os.getcwd()
+
+
+# Seed the shared state from the MCP workspace so query/cloud tools have a
+# default repo path without requiring an explicit argument.
+state.set_repo_path(_mcp_repo_path())
+
+
 # For cloud support
 def _target_repo_root() -> Path:
-    """Git root where .codewalk/ lives — must match REPO_PATH, not MCP server cwd."""
-    return Path(state.get_repo_path()).resolve()
+    """Git root where .codewalk/ lives — must match MCP workspace repo path."""
+    return Path(_mcp_repo_path()).resolve()
 
 
 def _local_manifest_path() -> Path:
@@ -230,7 +248,7 @@ def _local_manifest_path() -> Path:
 
 
 def ensure_local_index():
-    """Downloads cloud index into REPO_PATH/.codewalk if missing; shows banner if stale."""
+    """Downloads cloud index into the MCP workspace's .codewalk/ if missing; shows banner if stale."""
     server_url = os.getenv("CODEWALK_SERVER_URL")
     repo_name  = os.getenv("CODEWALK_REPO_NAME")
     repo_token = os.getenv("CODEWALK_REPO_TOKEN")
@@ -310,9 +328,9 @@ def codewalk_analyze_codebase() -> str:
 
     ⏩ NEXT STEP: use any query tool directly
     """
-    _log(f"[codewalk_analyze_codebase] Starting analysis: {settings.repo_path}")
+    repo_path = _mcp_repo_path()
+    _log(f"[codewalk_analyze_codebase] Starting analysis: {repo_path}")
 
-    repo_path = settings.repo_path
     if not repo_path or not os.path.isdir(repo_path):
         return f"❌ Invalid repo path: '{repo_path}' is not a directory."
 
@@ -429,7 +447,7 @@ def codewalk_analyze_codebase() -> str:
         f"⚠️ Indexing produced 0 chunks.\n"
         + f"Files scanned (codewalk.yaml excludes applied): {len(state._files or [])}\n"
         + f"Modules: {', '.join(modules)}\n"
-        + f"Local: check embedder (Jina/HF) is installed and REPO_PATH is correct.\n"
+        + f"Local: check embedder (Jina/HF) is installed and the MCP workspace is the target repo.\n"
         + f"Cloud: rm -rf .codewalk && codewalk_pull_index, then analyze again."
     )
 
@@ -617,7 +635,7 @@ def codewalk_get_overview() -> str:
         return err
 
     _log("[codewalk_get_overview] Generating overview...")
-    return overview_text(state._repo_path, state._modules_result, state._deps, state._graph_runtime)
+    return overview_text(state.get_repo_path(), state._modules_result, state._deps, state._graph_runtime)
 
 # ─── TOOL 6 [QUERY · user+AI]: codewalk_get_blast_radius_map ─────────
 @mcp.tool()
@@ -876,10 +894,13 @@ def codewalk_review_diff(
         "Focus on: OWASP top 10 (injection, auth bypass, XSS, SSRF, open redirect), "
         "race conditions, resource leaks, null safety, async gaps (setState after await "
         "without mounted check), unbounded growth, hardcoded secrets, certificate pinning "
-        "bypass, SQL injection, path traversal. Be AGGRESSIVE — better to over-flag.\n\n"
+        "bypass, SQL injection, path traversal. Be AGGRESSIVE — better to over-flag.\n"
+        "STRICTLY use blast radius context in your review: when blast radius warnings are present,\n"
+        "state what can break, which dependents or callers are at risk, and what should be tested.\n\n"
         "⏩ NEXT STEPS (if you haven't already called them in parallel):\n"
         "  - codewalk_get_architecture_health — check if changed files are bottlenecks or in cycles\n"
-        "  - codewalk_get_module_info(<module>) — check blast radius of changed symbols\n"
+        "  - codewalk_get_module_info(<module>) — check blast radius and usage of changed symbols\n"
+        "  - codewalk_get_blast_radius_map(target) — use this when you need explicit downstream break/test impact\n"
         "  Then merge all results and call codewalk_reflect_review(initial_review=<your review>)"
     )
 
@@ -1133,14 +1154,13 @@ def codewalk_load_guidelines(docs_path: str | None = None) -> str:
 #     import shlex
 #
 #     python = sys.executable
-#     repo_path = settings.repo_path
+#     repo_path = _mcp_repo_path()
 #     package_root = __name__.rsplit(".", 2)[0]
 #     companion_module = f"{package_root}.voice.companion"
 #     server_cwd = os.getcwd()
 #
 #     cmd = (
 #         f"cd {shlex.quote(server_cwd)} && "
-#         f"REPO_PATH={shlex.quote(repo_path)} "
 #         f"{shlex.quote(python)} -m {companion_module} --backend {backend}"
 #     )
 #
@@ -1230,7 +1250,7 @@ def codewalk_voice_ask() -> str:
         f"   - User asks about risk or what breaks → `codewalk_get_blast_radius_map(target)`\n"
         f"   - User asks about dependencies or execution flow → `codewalk_get_execution_flow()`\n"
         f"   - User asks where to start reading → `codewalk_get_reading_order()`\n"
-        f"   - User asks to review changes → call codewalk_review_diff + codewalk_get_architecture_health + codewalk_get_module_info simultaneously\n"
+        f"   - User asks to review changes → call codewalk_review_diff + codewalk_get_architecture_health + codewalk_get_module_info simultaneously, and strictly use blast radius findings in the review\n"
         f"   - User says 'apply that fix' / 'make that change' → `codewalk_approve_action(proposed_action=<fix>)` first, wait for yes\n"
         f"   - User asks about docs/guides/runbooks → `codewalk_ask_docs(question)`\n"
         f"   - User asks to index/load documents → `codewalk_index_docs(path)`\n"
@@ -1884,6 +1904,115 @@ def codewalk_check_version() -> str:
     from src.codewalk.staleness import check_version_message
 
     return check_version_message()
+
+
+# ─── TOOL 26 [VISUALIZATION · user+AI]: codewalk_show_knowledge_graph ──
+@mcp.tool()
+def codewalk_show_knowledge_graph(repo_path: str = "", port: int = 3000) -> str:
+    """Open the interactive knowledge graph dashboard for the current repo.
+
+    This tool checks for a generated knowledge graph, ensures the Codewalk
+    frontend is running, and returns a URL the user can open in a browser.
+
+    Args:
+        repo_path: Absolute path to the repo to visualize. If empty, uses the
+                   current MCP workspace repo path.
+        port: Port where the Codewalk frontend is expected (default 3000).
+    """
+    import time
+    import urllib.request
+    import urllib.error
+
+    # 1. Resolve repo path
+    target = (repo_path or _mcp_repo_path()).strip()
+    try:
+        git_root = subprocess.run(
+            ["git", "rev-parse", "--show-toplevel"],
+            cwd=target,
+            capture_output=True, text=True, check=True,
+        ).stdout.strip()
+        target = git_root
+    except Exception:
+        target = str(Path(target).resolve())
+
+    # 2. Check for knowledge graph JSON
+    kg_path = Path(target) / ".codewalk" / "knowledge-graph.json"
+    if not kg_path.exists():
+        return (
+            f"❌ No knowledge graph found at {kg_path}\n\n"
+            f"Run `codewalk analyze` locally, or `@codewalk analyze this codebase` "
+            f"in MCP/cloud if cloud indexing is set up. Then try again."
+        )
+
+    # 3. Find Codewalk install root (where frontend/ lives)
+    # server.py is at src/codewalk/mcp/server.py, so parents[3] is the repo root.
+    # Prefer explicit override so tests and non-standard installs can point to it.
+    env_root = os.getenv("CODEWALK_INSTALL_ROOT", "").strip()
+    install_root = Path(env_root).resolve() if env_root else Path(__file__).resolve().parents[3]
+    if not (install_root / "frontend" / "package.json").exists():
+        return (
+            f"❌ Could not find Codewalk frontend installation.\n"
+            f"Set CODEWALK_INSTALL_ROOT to the directory containing frontend/package.json."
+        )
+
+    frontend_dir = install_root / "frontend"
+    encoded_repo = requests.utils.quote(target, safe="")
+    api_url = f"http://localhost:{port}/api/knowledge-graph?repoPath={encoded_repo}"
+    ui_url = f"http://localhost:{port}/knowledge-graph?repoPath={encoded_repo}"
+
+    # 4. Check if frontend is already running
+    try:
+        urllib.request.urlopen(api_url, timeout=2)
+        return (
+            f"✅ Knowledge graph ready.\n"
+            f"Open: {ui_url}"
+        )
+    except urllib.error.URLError:
+        pass  # not running, try to start
+
+    # 5. Start frontend if built
+    next_dir = frontend_dir / ".next"
+    node_modules = frontend_dir / "node_modules"
+    if not node_modules.exists():
+        return (
+            f"❌ Codewalk frontend dependencies not installed.\n"
+            f"Run: cd {frontend_dir} && npm install && npm run build\n"
+            f"Then start it with: cd {frontend_dir} && npm start"
+        )
+    if not next_dir.exists():
+        return (
+            f"❌ Codewalk frontend not built.\n"
+            f"Run: cd {frontend_dir} && npm run build\n"
+            f"Then start it with: cd {frontend_dir} && npm start"
+        )
+
+    # Start in background, detached
+    try:
+        subprocess.Popen(
+            ["npm", "start"],
+            cwd=str(frontend_dir),
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+    except Exception as exc:
+        return f"❌ Failed to start Codewalk frontend: {exc}\nRun manually: cd {frontend_dir} && npm start"
+
+    # 6. Wait up to ~12s for server to come up
+    for _ in range(24):
+        try:
+            urllib.request.urlopen(api_url, timeout=1)
+            return (
+                f"✅ Codewalk frontend started. Knowledge graph ready.\n"
+                f"Open: {ui_url}"
+            )
+        except urllib.error.URLError:
+            time.sleep(0.5)
+
+    return (
+        f"⏳ Codewalk frontend is starting on port {port}.\n"
+        f"Open this URL in a few seconds: {ui_url}"
+    )
 
 
 # ─── Staleness wrappers + shared tool map (voice_ask, backends.py) ──

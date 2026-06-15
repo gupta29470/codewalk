@@ -80,13 +80,14 @@ def is_excluded_file(filename: str, relative_path: str, config: TeamConfig) -> b
 
 
 def team_scan_directory(directory: str, config: TeamConfig) -> list[dict]:
-    """Walk a directory using team's exclude list + built-in ignores for filtering.
+    """Walk a directory and filter using ONLY the team's codewalk.yaml exclude list.
     Returns same format as scanner.scan_directory: list of file dicts.
-    Step 1: prune excluded dirs via os.walk (is_excluded_dir + built-in)
-    Step 2: filter files from remaining dirs (is_excluded_file + built-in)
+
+    Steps:
+      1. Prune directories in-place using is_excluded_dir() only.
+      2. Skip individual files using is_excluded_file() only.
     """
     from src.codewalk.ingestion.scanner import detect_language
-    from src.codewalk.ingestion.file_filter import should_skip, should_skip_dir
 
     root = Path(directory)
     if not root.exists():
@@ -98,21 +99,19 @@ def team_scan_directory(directory: str, config: TeamConfig) -> list[dict]:
     for dirpath, dirs, filenames in _os.walk(root):
         rel_dir = _os.path.relpath(dirpath, root_str)
 
-        # Step 1: Prune excluded dirs IN-PLACE
-        # Combine team config exclusions with built-in ignore rules
+        # Step 1: Prune excluded dirs IN-PLACE using only team config exclude
+        # paths. Intentionally does NOT use file_filter.should_skip_dir().
         dirs[:] = [
             directory for directory in dirs
             if not is_excluded_dir(directory, rel_dir, config)
-            and not should_skip_dir(directory)
         ]
 
-        # Step 2: Filter files
+        # Step 2: Filter files using only team config exclude paths.
+        # Intentionally does NOT use file_filter.should_skip().
         for fname in filenames:
             relative = _os.path.join(rel_dir, fname) if rel_dir != "." else fname
 
             if is_excluded_file(fname, relative, config):
-                continue
-            if should_skip(relative):
                 continue
 
             full_path = _os.path.join(dirpath, fname)

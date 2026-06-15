@@ -21,7 +21,7 @@ def apply_fix_to_file(repo_path: str, file_path: str, old_code: str, new_code: s
 
     # Path traversal guard: file must be inside repo
     try:
-        full_path.relative_to(Path(repo_path).resolve())
+        full_path.resolve().relative_to(Path(repo_path).resolve())
     except ValueError:
         return {"ok": False, "error": f"Path traversal blocked: {file_path}"}
     

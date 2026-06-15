@@ -223,11 +223,6 @@ LLM_MODEL=qwen2.5-coder:7b
 # ─── Embeddings ──────────────────────────────────────────────
 EMBEDDING_MODEL=jinaai/jina-code-embeddings-1.5b
 
-# ─── Repository to Analyze ──────────────────────────────────
-# Relative path (self-analysis): src/codewalk
-# Absolute path (any repo):      /Users/you/projects/my-app/src
-REPO_PATH=src/codewalk
-
 # ─── API Keys (only fill the one you're using) ──────────────
 # GROQ_API_KEY=gsk_...
 # OPENAI_API_KEY=sk-...
@@ -371,9 +366,8 @@ Codewalk runs as an MCP (Model Context Protocol) server, so any AI agent that sp
     "codewalk": {
       "command": "/path/to/codewalk/.codewalk-env/bin/python",
       "args": ["-m", "src.codewalk.mcp.server"],
-      "cwd": "/path/to/codewalk",
+      "cwd": "${workspaceFolder}",
       "env": {
-        "REPO_PATH": "${workspaceFolder}",
         "CODEWALK_SERVER_URL": "https://api.codewalk.xyz",
         "CODEWALK_REPO_NAME": "owner/repo",
         "CODEWALK_REPO_TOKEN": "cw_repo_xxxxxxxx"
@@ -382,6 +376,8 @@ Codewalk runs as an MCP (Model Context Protocol) server, so any AI agent that sp
   }
 }
 ```
+
+> The repo path comes from the MCP server's `cwd` (`${workspaceFolder}`). Open the target repo in your editor and the MCP server runs from that workspace.
 
 Get `repo_token` after first index (on server):
 
@@ -399,7 +395,7 @@ No cloud — index runs locally via `codewalk_analyze_codebase`. After `rebuild_
 | Surface | Local embed entrypoint | Notes |
 |---------|------------------------|-------|
 | **MCP** `codewalk_analyze_codebase` | `index_from_paths_parallel` | `rebuild_analysis_cache` → parallel chunk/embed → `write_manifest` |
-| **API** `POST /analyze` (+ `/analyze/stream`) | `full_index_parallel` | Same Chroma output under `REPO_PATH/.codewalk/` |
+| **API** `POST /analyze` (+ `/analyze/stream`) | `full_index_parallel` | Same Chroma output under `{repo_path}/.codewalk/` |
 
 ### Review & approve fixes (agent + MCP)
 
@@ -455,6 +451,7 @@ Full agent rules: `src/codewalk/mcp/server.py` FastMCP `instructions` (sent on M
 Add to `.vscode/mcp.json` in your desired project:
 
 > ⚠️ **Replace `/path/to/codewalk`** with the actual absolute path where you cloned codewalk.
+> The repo to analyze is determined by `cwd` (`${workspaceFolder}`). Open the target repo in your editor so the MCP server starts from that workspace.
 
 ```json
 {
@@ -462,9 +459,8 @@ Add to `.vscode/mcp.json` in your desired project:
     "codewalk": {
       "command": "/path/to/codewalk/.codewalk-env/bin/python",
       "args": ["-m", "src.codewalk.mcp.server"],
-      "cwd": "/path/to/codewalk",
+      "cwd": "${workspaceFolder}",
       "env": {
-        "REPO_PATH": "${workspaceFolder}",
         "EXCLUDE_PATHS": "",
         "REVIEW_GUIDELINES_PATH": "",
         "CODE_DOCS_PATH": ""
@@ -524,11 +520,10 @@ Add to `~/.claude/mcp.json`:
 {
   "mcpServers": {
     "codewalk": {
-      "command": "python",
+      "command": "/path/to/codewalk/.codewalk-env/bin/python",
       "args": ["-m", "src.codewalk.mcp.server"],
-      "cwd": "/path/to/codewalk",
+      "cwd": "${workspaceFolder}",
       "env": {
-        "REPO_PATH": "/path/to/target/repo",
         "EXCLUDE_PATHS": "",
         "REVIEW_GUIDELINES_PATH": "",
         "CODE_DOCS_PATH": ""
@@ -545,11 +540,10 @@ Settings → MCP Servers → Add:
 ```json
 {
   "codewalk": {
-    "command": "python",
+    "command": "/path/to/codewalk/.codewalk-env/bin/python",
     "args": ["-m", "src.codewalk.mcp.server"],
-    "cwd": "/path/to/codewalk",
+    "cwd": "${workspaceFolder}",
     "env": {
-      "REPO_PATH": "/path/to/target/repo",
       "EXCLUDE_PATHS": "",
       "REVIEW_GUIDELINES_PATH": "",
       "CODE_DOCS_PATH": ""
@@ -566,11 +560,10 @@ Add to `~/.codex/mcp.json`:
 {
   "mcpServers": {
     "codewalk": {
-      "command": "python",
+      "command": "/path/to/codewalk/.codewalk-env/bin/python",
       "args": ["-m", "src.codewalk.mcp.server"],
-      "cwd": "/path/to/codewalk",
+      "cwd": "${workspaceFolder}",
       "env": {
-        "REPO_PATH": "/path/to/target/repo",
         "EXCLUDE_PATHS": "",
         "REVIEW_GUIDELINES_PATH": "",
         "CODE_DOCS_PATH": ""
@@ -1736,7 +1729,6 @@ codewalk/
 | `LLM_PROVIDER` | `ollama` | LLM backend: `ollama`, `openai`, `anthropic`, `gemini`, `groq`, `openrouter` |
 | `LLM_MODEL` | `qwen3.5:27b` | Model name (must match provider) |
 | `EMBEDDING_MODEL` | `jinaai/jina-code-embeddings-1.5b` | Sentence-transformer model for code embeddings |
-| `REPO_PATH` | `src/codewalk` | Default repository path to analyze |
 | `EXCLUDE_PATHS` | — | Comma-separated paths to exclude from scanning (e.g. `tests,docs,*.generated.*`) |
 | `GROQ_API_KEY` | — | Groq API key |
 | `OPENAI_API_KEY` | — | OpenAI API key |

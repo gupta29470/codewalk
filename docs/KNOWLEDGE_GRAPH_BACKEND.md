@@ -11,8 +11,8 @@
 ### Local (after `POST /analyze` or MCP analyze)
 
 ```bash
-ls -la REPO_PATH/.codewalk/knowledge-graph.json
-ls -la REPO_PATH/.codewalk/manifest.json
+ls -la {repo_path}/.codewalk/knowledge-graph.json
+ls -la {repo_path}/.codewalk/manifest.json
 ```
 
 `manifest.json` should include:
@@ -63,7 +63,7 @@ print('edge types', {e['type'] for e in g['edges']})
 | Item | Location |
 |------|----------|
 | Export on index | `build_full_analysis()` → `knowledge_graph_export.py` |
-| Output path | `REPO_PATH/.codewalk/knowledge-graph.json` |
+| Output path | `{repo_path}/.codewalk/knowledge-graph.json` |
 | API | `GET /knowledge-graph` (local query; blocked on cloud-only server) |
 | Tests | `python -m unittest tests.test_knowledge_graph_export -v` |
 
@@ -205,7 +205,7 @@ on mount:
 
 **Do not** read `file://` paths from the browser — use API or `public/demo/` static file only.
 
-**Cloud users:** run local API against downloaded index (`REPO_PATH` = target repo), then `GET /knowledge-graph`. Or copy `.codewalk/knowledge-graph.json` into `public/demo/` manually for offline dev.
+**Cloud users:** run the local API, download the index with MCP (`codewalk_pull_index` / `codewalk_connect_repo`), then `GET /knowledge-graph`. Or copy `.codewalk/knowledge-graph.json` into `public/demo/` manually for offline dev.
 
 ### 4.5 React Flow conversion
 
@@ -293,9 +293,13 @@ After every **incremental** index, JSON is **rewritten** (full export from DuckD
 ### 5.2 Local dev workflow
 
 ```bash
-# Terminal 1 — API pointed at indexed repo
-export REPO_PATH=/path/to/target/repo
+# Terminal 1 — start the API
 .codewalk-env/bin/uvicorn src.codewalk.api.main:app --reload
+
+# Then analyze the target repo (via the web UI or curl):
+curl -X POST http://localhost:8000/analyze \
+  -H "Content-Type: application/json" \
+  -d '{"repo_path": "/path/to/target/repo", "index_mode": "auto"}'
 
 # Terminal 2 — frontend
 cd frontend && npm run dev

@@ -3,6 +3,9 @@ import asyncio
 import inspect
 import json
 
+from mcp.client.stdio import stdio_client
+from mcp import ClientSession, StdioServerParameters
+
 from src.codewalk.mcp.server import _TOOL_MAP
 
 # Reuse the shared map — single source of truth
@@ -47,7 +50,10 @@ def execute_direct(tool_name: str, arguments: dict) -> str:
     
     # Remove None values and args the function doesn't accept
     # (tiny routing models sometimes hallucinate extra parameters)
-    valid_params = set(inspect.signature(fn).parameters.keys())
+    try:
+        valid_params = set(inspect.signature(fn).parameters.keys())
+    except (TypeError, ValueError):
+        valid_params = set()
     clean_args = {k: v for k, v in arguments.items() if v is not None and k in valid_params}
     return fn(**clean_args)
 
@@ -56,9 +62,6 @@ async def execute_mcp(tool_name: str, arguments: dict) -> str:
 
     Spawns the MCP server as a subprocess if not already running.
     """
-    from mcp.client.stdio import stdio_client
-    from mcp import ClientSession, StdioServerParameters
-
     server_params = StdioServerParameters(
         command="python",
         args=["-m", "src.codewalk.mcp.server"]

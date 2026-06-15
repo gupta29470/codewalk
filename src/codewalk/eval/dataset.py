@@ -41,12 +41,19 @@ def load_dataset(files: list[str] | None = None) -> list[EvalSample]:
     """Load eval samples from JSON files.
 
     Args:
-        files: Specific JSON filenames to load. None = load all.
+        files: Specific JSON filenames to load. None = load all JSON files
+               found in the data directory.
 
     Returns:
         List of EvalSample objects.
     """
-    targets = files or DATASET_FILES
+    if files is None:
+        if _DATA_DIR.exists():
+            targets = sorted(p.name for p in _DATA_DIR.glob("*.json"))
+        else:
+            targets = []
+    else:
+        targets = files
     samples: list[EvalSample] = []
 
     for filename in targets:

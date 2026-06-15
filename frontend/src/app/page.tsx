@@ -70,12 +70,12 @@ export default function HomePage() {
               <div className="space-y-2">
                 <label className="text-sm font-medium">Repo Path</label>
                 <Input
-                  placeholder="/path/to/repo/src (leave empty for default)"
+                  placeholder="/path/to/repo"
                   value={repoPath}
                   onChange={(e) => setRepoPath(e.target.value)}
                 />
                 <p className="text-xs text-muted-foreground">
-                  Leave empty to use the configured REPO_PATH from the backend
+                  Required — absolute path to the repo you want to analyze
                 </p>
               </div>
 

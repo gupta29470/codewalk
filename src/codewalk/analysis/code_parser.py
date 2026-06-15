@@ -231,8 +231,87 @@ def walk_tree(node, target_types: set, skip_children_types: set = None):
     for child in node.children:
         yield from walk_tree(child, target_types, skip_children_types)
 
+def _extract_decorators(node) -> list[str]:
+    """Collect decorator/annotation texts from a class/function node."""
+    decorators: list[str] = []
+    for child in node.children:
+        if child.type in ("decorator", "annotation"):
+            text = child.text.decode("utf-8", errors="replace").strip()
+            if text.startswith("@"):
+                text = text[1:].strip()
+            decorators.append(text)
+    return decorators
+
+
+def _extract_identifier_names(node) -> list[str]:
+    """Recursively collect identifier-like names from a type/base node."""
+    names: list[str] = []
+    seen: set[str] = set()
+    for child in node.walk():
+        if child.type in (
+            "identifier", "simple_identifier", "type_identifier",
+            "property_identifier", "field_identifier", "name",
+        ):
+            name = child.text.decode("utf-8", errors="replace")
+            if name and name not in seen:
+                seen.add(name)
+                names.append(name)
+    return names
+
+
+def _extract_class_parents(node, language: str) -> list[str]:
+    """Extract superclass/base/interface names from a class node."""
+    fields = ("bases", "superclass", "interfaces", "extended_types",
+              "implemented_types", "base_class", "inheritance", "supertypes")
+    names: list[str] = []
+    for field in fields:
+        base_node = node.child_by_field_name(field)
+        if base_node is not None:
+            names.extend(_extract_identifier_names(base_node))
+    # Deduplicate while preserving order.
+    result: list[str] = []
+    seen: set[str] = set()
+    for name in names:
+        if name not in seen:
+            seen.add(name)
+            result.append(name)
+    return result
+
+
+def _attach_parent_class_and_methods(items: list[dict]) -> list[dict]:
+    """For function items inside class ranges, set parent_class and fill class methods."""
+    class_ranges = [
+        (i["start_line"], i["end_line"], i["name"])
+        for i in items if i["type"] == "class"
+    ]
+    for item in items:
+        if item["type"] != "function":
+            continue
+        for start, end, class_name in class_ranges:
+            if start <= item["start_line"] and item["end_line"] <= end:
+                item["parent_class"] = class_name
+                break
+        else:
+            item["parent_class"] = None
+
+    class_methods: dict[str, list[str]] = {}
+    for item in items:
+        if item["type"] == "function" and item.get("parent_class"):
+            class_methods.setdefault(item["parent_class"], []).append(item["name"])
+    for item in items:
+        if item["type"] == "class":
+            item.setdefault("methods", class_methods.get(item["name"], []))
+    return items
+
+
 def parse_file(file_path: str, language: str) -> list[dict]:
     """Parse ANY supported language file → list of functions and classes."""
+    # Python AST path is more accurate and already extracts decorators/bases/methods.
+    if language == "python":
+        from src.codewalk.analysis.python_parser import parse_python_file
+        items = parse_python_file(file_path)
+        return _attach_parent_class_and_methods(items)
+
     # Step 1: Get a parser for this language
     parser = get_parser_for_language(language)
     if not parser:
@@ -242,14 +321,14 @@ def parse_file(file_path: str, language: str) -> list[dict]:
     node_types = NODE_TYPES.get(language)
     if not node_types:
         return []
-    
+
     # Step 3: Read the file as bytes (tree-sitter works with bytes, not str)
     try:
         with open(file_path, "rb") as file:
             source = file.read()
     except (FileNotFoundError, IOError, PermissionError):
         return []
-    
+
     # Step 4: Parse → get the syntax tree
     tree = parser.parse(source)
 
@@ -260,32 +339,32 @@ def parse_file(file_path: str, language: str) -> list[dict]:
     class_types = set(node_types["class"])
     all_target_types = function_types | class_types
 
-    items = []
+    items: list[dict] = []
 
     # Step 6: Walk the tree, collect matching nodes
     for node in walk_tree(tree.root_node, all_target_types, function_types):
-        if node.type in function_types:
-            item_type = "function"
-        else:
-            item_type = "class"
-
+        is_function = node.type in function_types
         start_line = node.start_point[0] + 1
         end_line = node.end_point[0] + 1
-
         name = extract_name(node, node_types["name_field"])
         code = "\n".join(lines[start_line - 1 : end_line])
+        decorators = _extract_decorators(node)
 
-        item = {
-            "type": item_type,
+        item: dict = {
+            "type": "function" if is_function else "class",
             "name": name,
             "start_line": start_line,
             "end_line": end_line,
             "code": code,
+            "decorators": decorators,
         }
 
-        if item_type == "function":
+        if is_function:
             item["args"] = extract_params(node, node_types["params_field"])
+        else:
+            item["bases"] = _extract_class_parents(node, language)
+            item["methods"] = []
 
         items.append(item)
-    
-    return items
+
+    return _attach_parent_class_and_methods(items)

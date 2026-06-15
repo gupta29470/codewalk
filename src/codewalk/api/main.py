@@ -19,11 +19,14 @@ from src.codewalk.api.models import (
     ModuleResponse, OverviewResponse,
     BlastRadiusResponse,
     ReviewRequest, ReviewFileRequest, ReviewResponse, ReviewFileResponse,
-    GuidelinesRequest, 
+    GuidelinesRequest,
     DocsIndexRequest, DocsAskRequest, DocsSearchRequest, ApproveRequest,
-    ResearchRequest, ApplyFixesRequest, ApplyFixesResponse, AppliedFix
+    ResearchRequest, ApplyFixesRequest, ApplyFixesResponse, AppliedFix,
+    SemanticSearchRequest, SemanticSearchResponse, SemanticSearchResult,
 )
 from src.codewalk.api import state
+from langchain_core.messages import AIMessage, ToolMessage
+from src.codewalk.agent.graph import proposed_write_action
 from src.codewalk.ingestion.scanner import scan_directory
 from src.codewalk.ingestion.tech_detect import detect_tech_stack
 from src.codewalk.generation.diagram_generator import generate_module_diagram
@@ -42,6 +45,14 @@ from src.codewalk.errors import classify_error
 
 
 logger = logging.getLogger("codewalk")
+
+
+def _require_repo_path(repo_path: str | None) -> str:
+    """Validate that the frontend provided an explicit repo path."""
+    path = (repo_path or "").strip()
+    if not path:
+        raise HTTPException(status_code=400, detail="repo_path is required")
+    return path
 
 
 # ─── Lifespan handler (replaces deprecated @app.on_event) ─────────────
@@ -172,7 +183,7 @@ def analyze(request: AnalyzeRequest):
     try:
         from src.codewalk.team_config import load_codewalk_yaml
 
-        request.repo_path = request.repo_path or settings.repo_path
+        request.repo_path = _require_repo_path(request.repo_path)
         state.set_repo_path(request.repo_path)
         if not request.collection_name:
             request.collection_name = state.get_collection_name()
@@ -240,12 +251,15 @@ def analyze(request: AnalyzeRequest):
             chunks_created=index_result.get("chunks_embedded", index_result.get("chunks_created", 0)),
             modules=list(state._modules_result["modules"].keys()),
         )
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
-    
+
 @app.post("/analyze/stream")
 def analyze_stream(request: AnalyzeRequest):
     """Stream analysis progress via Server-Sent Events."""
+    request.repo_path = _require_repo_path(request.repo_path)
 
     async def event_stream():
         """Async generator that yields SSE events at each pipeline step.
@@ -253,7 +267,7 @@ def analyze_stream(request: AnalyzeRequest):
         try:
             from src.codewalk.team_config import load_codewalk_yaml
 
-            request.repo_path = request.repo_path or settings.repo_path
+            request.repo_path = _require_repo_path(request.repo_path)
             state.set_repo_path(request.repo_path)
             if not request.collection_name:
                 request.collection_name = state.get_collection_name()
@@ -362,6 +376,35 @@ def analyze_stream(request: AnalyzeRequest):
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
     
+def _run_chat_stream(agent, message: str, config: dict) -> list[dict]:
+    """Run the agent synchronously and collect SSE event payloads.
+
+    Uses stream_mode='messages' so the sync SqliteSaver checkpointer works.
+    Token events contain full assistant messages (not per-token deltas).
+    """
+    events: list[dict] = []
+    for msg, _metadata in agent.stream(
+        {"messages": [("human", message)]},
+        config=config,
+        stream_mode="messages",
+    ):
+        if isinstance(msg, ToolMessage):
+            name = msg.name or "tool"
+            events.append({"type": "tool_start", "name": name})
+            events.append({"type": "tool_end", "name": name})
+        elif isinstance(msg, AIMessage) and msg.content and not msg.tool_calls:
+            events.append({"type": "token", "content": msg.content})
+
+    graph_state = agent.get_state(config)
+    if graph_state.next:
+        events.append({
+            "type": "interrupted",
+            "proposed_action": proposed_write_action(graph_state.values["messages"]).replace("\n", "; "),
+        })
+    else:
+        events.append({"type": "done"})
+    return events
+
 # ─── POST /chat ──────────────────────────────────────────────────────
 @app.post("/chat", response_model=ChatResponse)
 def chat(request: ChatRequest):
@@ -378,18 +421,12 @@ def chat(request: ChatRequest):
             config=config
         )
 
-        # Check if graph was interrupted (HITL — waiting for tool approval)
+        # Check if graph was interrupted (HITL — waiting for apply_fix approval)
         graph_state = agent.get_state(config)
         if graph_state.next:
-            last_msg = result["messages"][-1]
-            proposed = ""
-            if hasattr(last_msg, "tool_calls") and last_msg.tool_calls:
-                proposed = "\n".join([
-                    f"• {tc.get('name', '?')}: {tc.get('args', {})}"
-                    for tc in last_msg.tool_calls
-                ])
+            proposed = proposed_write_action(graph_state.values["messages"])
             return ChatResponse(
-                answer="The agent wants to take an action. Approve or reject it via POST /chat/approve.",
+                answer="The agent wants to apply a code fix. Approve or reject it via POST /chat/approve.",
                 thread_id=request.thread_id,
                 interrupted=True,
                 proposed_action=proposed,
@@ -405,12 +442,13 @@ def chat(request: ChatRequest):
 # ─── POST /chat/stream ───────────────────────────────────────────────
 @app.post("/chat/stream")
 def chat_stream(request: ChatRequest):
-    """Stream the agent's response token-by-token using Server-Sent Events.
+    """Stream the agent's response using Server-Sent Events.
 
     Each SSE message is a JSON object with a `type` field:
-      {"type": "token",      "content": "..."}  one LLM token
+      {"type": "token",      "content": "..."}  assistant message (full text)
       {"type": "tool_start", "name": "..."}     tool call began
       {"type": "tool_end",   "name": "..."}     tool call finished
+      {"type": "interrupted", "proposed_action": "..."}  HITL pause for apply_fix
       {"type": "done"}                           stream complete
       {"type": "error",      "message": "..."}  something went wrong
     """
@@ -425,33 +463,11 @@ def chat_stream(request: ChatRequest):
                 }
             }
 
-            async for event in agent.astream_events({
-                    "messages": [("human", request.message)],
-                }, config=config, version="v2"):
-                event_type = event["event"]
-
-                if event_type == "on_chat_model_stream":
-                    token = event["data"]["chunk"].content
-                    if token:
-                        yield f"data: {json.dumps({'type': 'token', 'content': token})}\n\n"
-                elif event_type == "on_tool_start":
-                    yield f"data: {json.dumps({'type': 'tool_start', 'name': event['name']})}\n\n"
-                elif event_type == "on_tool_end":
-                    yield f"data: {json.dumps({'type': 'tool_end', 'name': event['name']})}\n\n"
-
-            # Check if graph was interrupted (HITL — waiting for tool approval)
-            graph_state = agent.get_state(config)
-            if graph_state.next:
-                last_msg = graph_state.values["messages"][-1]
-                proposed = ""
-                if hasattr(last_msg, "tool_calls") and last_msg.tool_calls:
-                    proposed = "; ".join([
-                        f"{tc.get('name', '?')}({tc.get('args', {})})"
-                        for tc in last_msg.tool_calls
-                    ])
-                yield f"data: {json.dumps({'type': 'interrupted', 'proposed_action': proposed})}\n\n"
-            else:
-                yield f"data: {json.dumps({'type': 'done'})}\n\n"
+            events = await asyncio.to_thread(
+                _run_chat_stream, agent, request.message, config
+            )
+            for event in events:
+                yield f"data: {json.dumps(event)}\n\n"
 
         except RuntimeError as e:
             yield f"data: {json.dumps({'type': 'error', 'message': str(e)})}\n\n"
@@ -479,7 +495,7 @@ def overview():
 
         # Detect tech stack
         analyze_result = state.get_analyze_result()
-        tech = detect_tech_stack(analyze_result.get("repo_path", settings.repo_path))
+        tech = detect_tech_stack(analyze_result.get("repo_path") or state.get_repo_path())
 
         # Generate overview (calls LLM)
         overview_text = generate_overview(tech, modules_result, diagram)
@@ -647,7 +663,7 @@ def get_execution_flow():
     try: 
         state.require_index()
         analyze_result = state.get_analyze_result()
-        repo_path = analyze_result.get("repo_path", settings.repo_path)
+        repo_path = analyze_result.get("repo_path") or state.get_repo_path()
         files = state.get_files()
         deps = state.get_deps()
         runtime = state._graph_runtime or deps["graph"]
@@ -1241,6 +1257,34 @@ def get_staleness():
     from src.codewalk.staleness import staleness_status
 
     return staleness_status()
+
+
+# ─── Semantic search over codebase embeddings ─────────────────────────
+
+@app.post("/semantic-search", response_model=SemanticSearchResponse)
+def semantic_search(request: SemanticSearchRequest):
+    """Search the vector index for chunks semantically similar to the query."""
+    persist_dir = os.path.join(request.repo_path, ".codewalk", "chroma")
+    if not os.path.isdir(persist_dir):
+        return SemanticSearchResponse(results=[])
+
+    try:
+        store = VectorStore(persist_dir=persist_dir)
+        store.create_collection("codebase")
+        raw_results = store.search(request.query, n_results=request.n_results)
+        results = [
+            SemanticSearchResult(
+                id=r.get("id", ""),
+                text=r.get("text", ""),
+                metadata=r.get("metadata", {}),
+                distance=r.get("distance"),
+            )
+            for r in raw_results
+        ]
+        return SemanticSearchResponse(results=results)
+    except Exception as e:
+        _log(f"[semantic-search] error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 # ─── Health check ───────────────────────────────────────────────────

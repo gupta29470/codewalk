@@ -254,7 +254,7 @@ Watchdog (every 10 min)
 
 ### 6.2 Download & manifest (MCP / laptop)
 
-**MCP tools (preferred):** `codewalk_pull_index`, `codewalk_connect_repo`, or first `codewalk_analyze_codebase` when no local index — all **delete `REPO_PATH/.codewalk/` and extract fresh** (full replace, not merge). Index pull does not require MCP restart; **Codewalk code updates** (`git pull` on codewalk repo) require MCP restart in Cursor.
+**MCP tools (preferred):** `codewalk_pull_index`, `codewalk_connect_repo`, or first `codewalk_analyze_codebase` when no local index — all **delete `{workspaceFolder}/.codewalk/` and extract fresh** (full replace, not merge). Index pull does not require MCP restart; **Codewalk code updates** (`git pull` on codewalk repo) require MCP restart in Cursor.
 
 **Force re-download** when `pull_index` says “Already up to date” but index is wrong:
 

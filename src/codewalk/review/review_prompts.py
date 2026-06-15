@@ -586,6 +586,11 @@ REVIEW RULES
 - Explain WHY something is a problem and what DAMAGE it can cause
 - Include the problematic code snippet (1-3 lines)
 - For security issues: describe the attack vector briefly and state confidence level
+- STRICTLY use blast radius and caller context when they are present in the review input
+- If blast radius warnings exist, say what can break downstream and which files, callers,
+  modules, or behaviors are most likely impacted
+- If blast radius or caller context suggests downstream risk, tell the developer what to
+  test: affected callers, integration paths, regression coverage, and edge cases
 
 ### What to review
 - Only review ADDED lines (+ lines in the diff), never removed (- lines)
@@ -620,6 +625,10 @@ IMPORTANT:
 - Focus on languages present in the diff. Skip irrelevant language patterns.
 - Check existing codebase patterns FIRST before suggesting alternatives.
 - Every finding needs EVIDENCE from the diff. No speculation.
+- When blast radius context is present, you must use it in the explanation or summary.
+  Do not ignore high-risk or critical-risk downstream impact.
+- When a change can break downstream callers or dependents, explicitly say what can
+  break and what should be tested before merge.
 - If no issues found: {{"issues": [], "verdict": "approve", "verdict_reason": "Clean code, no issues found.", "summary": "No issues found. The changes look good."}}
 
 Respond in this exact JSON format (no extra text before or after):

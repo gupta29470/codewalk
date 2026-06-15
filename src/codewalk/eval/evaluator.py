@@ -19,6 +19,11 @@ from src.codewalk.rag.prompts import SYSTEM_PROMPT, QUESTION_PROMPT
 from src.codewalk.eval.dataset import EvalSample, load_dataset
 from src.codewalk.eval.metrics import save_run
 
+try:
+    from ragas import evaluate
+except Exception:  # pragma: no cover
+    evaluate = None
+
 logger = logging.getLogger("codewalk.eval")
 
 @dataclass
@@ -341,8 +346,16 @@ def run_ragas_evaluation(
 
     Returns:
         Dict with RAGAS scores + per-question breakdown.
+
+    Raises:
+        ImportError: If RAGAS is not installed.
     """
-    from ragas import evaluate
+    if evaluate is None:
+        raise ImportError(
+            "RAGAS is required for run_ragas_evaluation(). "
+            "Install it with: pip install ragas"
+        )
+
     from ragas.metrics import (
         context_precision, # Are the retrieved docs relevant to the question?
         context_recall, # Do the retrieved docs contain the needed info?
@@ -525,9 +538,9 @@ def format_report(merged: list[MergedResult]) -> str:
 
     return "\n".join(lines)
 
-def run_full_evaluation(store: VectorStore, graph_store: GraphStore | None = None, 
-    samples: list[EvalSample] | None = None, mode: str = "retrieval", 
-     n_results: int = 5, skip_ragas: bool = False,) -> dict:
+def run_full_evaluation(store: VectorStore, graph_store: GraphStore | None = None,
+    samples: list[EvalSample] | None = None, mode: str = "retrieval",
+     n_results: int = 5, skip_ragas: bool = False, repo_path: str = ".") -> dict:
     """Run complete evaluation: dataset → pipeline replay → RAGAS → report.
 
     Args:
@@ -576,9 +589,9 @@ def run_full_evaluation(store: VectorStore, graph_store: GraphStore | None = Non
             "mode": mode,
             "summary": _build_summary(eval_results, None, mode),
         }
-        save_run(result)
+        save_run(result, repo_path=repo_path)
         return result
-    
+
     # Step 2: Feed to RAGAS (mode controls which metrics)
     ragas_scores = run_ragas_evaluation(eval_results, mode=mode)
 
@@ -599,7 +612,7 @@ def run_full_evaluation(store: VectorStore, graph_store: GraphStore | None = Non
         "mode": mode,
         "summary": _build_summary(eval_results, ragas_scores, mode),
     }
-    save_run(result)
+    save_run(result, repo_path=repo_path)
     return result
     
 def _build_summary(eval_results: list[EvalResult], ragas_scores: dict | None, mode: str,):

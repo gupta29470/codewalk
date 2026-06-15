@@ -123,6 +123,23 @@ def _format_file_list(files: list[dict]) -> str:
     return "\n".join(lines)
 
 
+def _extract_json(text: str) -> str:
+    """Strip markdown fences and surrounding whitespace from LLM JSON output."""
+    text = text.strip()
+    if not text.startswith("```"):
+        return text
+
+    lines = text.split("\n")
+    # Drop the opening fence line (may include a language tag)
+    lines = lines[1:]
+    # Drop everything from the first closing fence onward
+    for i, line in enumerate(lines):
+        if line.strip() == "```":
+            lines = lines[:i]
+            break
+    return "\n".join(lines).strip()
+
+
 def _filter_batch(batch: list[dict]) -> dict:
     """Send one batch of files to the LLM and return yes/no decisions."""
     prompt = ChatPromptTemplate.from_messages([
@@ -145,10 +162,7 @@ def _filter_batch(batch: list[dict]) -> dict:
         ) from e
 
     # Parse JSON response
-    text = result.strip()
-    if text.startswith("```"):
-        lines = text.split("\n")
-        text = "\n".join(lines[1:-1])
+    text = _extract_json(result)
 
     try:
         return json.loads(text)

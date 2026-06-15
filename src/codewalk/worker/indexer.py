@@ -5,6 +5,15 @@ import threading
 import time
 import logging
 
+import psycopg2
+import psycopg2.extras
+
+from src.codewalk.worker.github_app import get_installation_token
+from src.codewalk.worker.atomic_store import atomic_swap
+from src.codewalk.team_config import load_codewalk_yaml, team_scan_directory
+from src.codewalk.pipeline import full_index_parallel, build_full_analysis, write_manifest
+from src.codewalk.api.state import _PgHelper
+
 logger = logging.getLogger("codewalk.worker")
 
 def build_index(
@@ -19,10 +28,7 @@ def build_index(
     private_key_pem: str,
 ):
     """Clone → filter → chunk → embed → graph → atomic swap. Full re-index."""
-    from src.codewalk.worker.github_app import get_installation_token
-    from src.codewalk.worker.atomic_store import atomic_swap
-    from src.codewalk.team_config import load_codewalk_yaml, team_scan_directory
-    from src.codewalk.pipeline import full_index_parallel, build_full_analysis, write_manifest
+
 
     token = get_installation_token(app_id, private_key_pem, installation_id)
     clone_url = github_url.replace("https://", f"https://x-access-token:{token}@")
@@ -83,10 +89,6 @@ def worker_loop(db_url: str, app_id: str, private_key_pem: str, storage_path: st
     
     Creates its own DB connection — psycopg2 connections are NOT thread-safe.
     """
-    from src.codewalk.api.state import _PgHelper
-    import psycopg2
-    import psycopg2.extras
-
     conn = psycopg2.connect(db_url, cursor_factory=psycopg2.extras.RealDictCursor)
     conn.autocommit = True
     db = _PgHelper(conn)

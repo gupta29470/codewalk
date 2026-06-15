@@ -8,16 +8,36 @@ from src.codewalk.query import (
     overview_text, blast_radius_map_text, reading_order_text,
     execution_flow_text,
 )
-from src.codewalk.rag.chain import ask_corrective
+from src.codewalk.rag.chain import ask_corrective, format_context as _format_context
+from src.codewalk.rag.chain import retrieve_corrective as _retrieve_corrective
 from src.codewalk.review.reviewer import review_diff as _review_diff
+from src.codewalk.review.reviewer import _get_caller_context, _get_security_context_for_file
+from src.codewalk.review.models import DiffFile, DiffHunk, ChangedLine
 from src.codewalk.review.guidelines_loader import get_guidelines_store, search_guidelines
 from src.codewalk.config import settings
 from src.codewalk.review.fix_applier import apply_fix_to_file
 
-def create_tools(store: VectorStore, modules_result: dict,
-                 files: list[dict] = None, deps: dict = None,
-                 graph_runtime: GraphRuntime | None = None,
-                 graph_store: GraphStore | None = None) -> list:
+# Tools that mutate the repo — API HITL interrupts only before these run.
+WRITE_TOOL_NAMES = frozenset({"apply_fix"})
+
+
+def format_write_tool_calls(tool_calls: list) -> str:
+    """Format pending write tool calls for HITL approval UI."""
+    writes = [tc for tc in tool_calls if tc.get("name") in WRITE_TOOL_NAMES]
+    return "\n".join(
+        f"• {tc.get('name', '?')}: {tc.get('args', {})}"
+        for tc in writes
+    )
+
+def create_tools(
+    store: VectorStore,
+    modules_result: dict,
+    files: list[dict] | None = None,
+    deps: dict | None = None,
+    graph_runtime: GraphRuntime | None = None,
+    graph_store: GraphStore | None = None,
+    repo_path: str | None = None,
+) -> list:
     """Build agent tools with access to the indexed codebase data.
 
     Args:
@@ -27,6 +47,7 @@ def create_tools(store: VectorStore, modules_result: dict,
         files: scan_directory() result (for reading order).
         deps: build_dependency_graph() result (for blast radius).
         graph_runtime: Optional GraphRuntime for igraph fast path.
+        repo_path: Root of the repository the tools operate on.
 
     Returns:
         List of tool functions the agent can call.
@@ -52,13 +73,15 @@ def create_tools(store: VectorStore, modules_result: dict,
             query: Natural language question, e.g. "how does authentication work"
         """
         result = ask_corrective(query, store, graph_store=graph_store)
+        confidence = result.get("retrieval_confidence")
+        confidence_text = f"{confidence:.2f}" if confidence is not None else "N/A"
         meta = (
-            f"\n\n---\n_Confident: {result['confident']} | "
-            f"Retries: {result['retries']} | "
-            f"Chunks: {result['relevant_chunks']} | "
-            f"Confidence: {result['retrieval_confidence']:.2f}_"
+            f"\n\n---\n_Confident: {result.get('confident')} | "
+            f"Retries: {result.get('retries')} | "
+            f"Chunks: {result.get('relevant_chunks')} | "
+            f"Confidence: {confidence_text}_"
         )
-        return result["answer"] + meta
+        return result.get("answer", "") + meta
 
     # ─── TOOL 2: get_module_info ─────────────────────────────────
     @tool
@@ -99,7 +122,9 @@ def create_tools(store: VectorStore, modules_result: dict,
         """
         if deps is None:
             return "Error: No analysis data available."
-        return overview_text(settings.repo_path, modules_result, deps, graph_runtime)
+        if not repo_path:
+            return "Error: No repo path available."
+        return overview_text(repo_path, modules_result, deps, graph_runtime)
 
     # ─── TOOL 5: get_blast_radius_map ────────────────────────────
     @tool
@@ -161,6 +186,8 @@ def create_tools(store: VectorStore, modules_result: dict,
             staged: If True, review only staged changes. Default: unstaged.
             target_branch: Diff against a branch (e.g. "main") for full PR review.
         """
+        if not repo_path:
+            return "Error: No repo path available."
         result = _review_diff(
             staged=staged,
             target_branch=target_branch or None,
@@ -168,7 +195,7 @@ def create_tools(store: VectorStore, modules_result: dict,
             store=store,
             deps=deps,
             graph_store=graph_store,
-            repo_path=settings.repo_path,
+            repo_path=repo_path,
         )
 
         if not result.issues:
@@ -210,21 +237,25 @@ def create_tools(store: VectorStore, modules_result: dict,
             file_path: Path to the file to review (relative to repo root).
         """
         import os
-        from src.codewalk.review.reviewer import (
-            _get_caller_context, _get_security_context_for_file,
-        )
-        from src.codewalk.review.models import DiffFile, DiffHunk, ChangedLine
-        from src.codewalk.review.guidelines_loader import get_guidelines_store, search_guidelines
-        from src.codewalk.rag.chain import format_context as _format_context
 
-        repo_path = settings.repo_path
+        if not repo_path:
+            return "Error: No repo path available."
         full_path = os.path.join(repo_path, file_path) if not os.path.isabs(file_path) else file_path
+        real_repo = os.path.realpath(repo_path)
+        real_full = os.path.realpath(full_path)
 
-        if not os.path.exists(full_path):
+        # Path traversal guard: file must be inside the repo
+        if real_full != real_repo and not real_full.startswith(real_repo + os.sep):
+            return f"Error: '{file_path}' is outside the repository."
+
+        if not os.path.exists(real_full):
             return f"File '{file_path}' not found."
+        if not os.path.isfile(real_full):
+            return f"Error: '{file_path}' is not a file."
 
         try:
-            content = open(full_path, "r", errors="replace").read()
+            with open(real_full, "r", errors="replace") as f:
+                content = f.read()
         except OSError as e:
             return f"Cannot read file: {e}"
 
@@ -249,7 +280,6 @@ def create_tools(store: VectorStore, modules_result: dict,
             sec_ctx = _get_security_context_for_file(synthetic_diff, store)
             if sec_ctx:
                 output_parts.append(sec_ctx)
-            from src.codewalk.rag.chain import retrieve_corrective as _retrieve_corrective
             result = _retrieve_corrective(
                 f"code in {file_path}", store,
                 graph_store=graph_store,
@@ -295,7 +325,7 @@ def create_tools(store: VectorStore, modules_result: dict,
         if not os.path.isdir(path):
             return f"Directory not found: {path}"
 
-        gl_store = get_guidelines_store()
+        gl_store = get_guidelines_store(guidelines_path=path)
         if not gl_store:
             return f"No guideline files found in {path}"
 
@@ -314,40 +344,52 @@ def create_tools(store: VectorStore, modules_result: dict,
         """
         if graph_runtime is None:
             return "Error: No graph data available."
-        
+
         stats = graph_runtime.get_graph_stats()
+        file_stats = stats.get("file_graph", {})
         centrality = graph_runtime.centrality(top_n=5)
         cycles = graph_runtime.detect_cycles()
 
         parts = [
-            f"Files: {stats['file_graph']['vertices']}, "
-            f"Edges: {stats['file_graph']['edges']}, "
-            f"DAG: {'Yes' if stats['file_graph']['is_dag'] else 'No'}",
+            f"Files: {file_stats.get('vertices', 0)}, "
+            f"Edges: {file_stats.get('edges', 0)}, "
+            f"DAG: {'Yes' if file_stats.get('is_dag') else 'No'}",
         ]
 
-        if centrality["betweenness"]:
-            top = [f"{item['file'].rsplit('/', 1)[-1]} ({item['score']})"
-                   for item in centrality["betweenness"] if item["score"] > 0]
+        betweenness = centrality.get("betweenness", [])
+        if betweenness:
+            top = [
+                f"{item.get('file', '').rsplit('/', 1)[-1]} ({item.get('score', 0)})"
+                for item in betweenness
+                if item.get("score", 0) > 0
+            ]
             if top:
                 parts.append(f"Bottlenecks: {', '.join(top[:5])}")
-        
-        if centrality["pagerank"]:
-            top_pr = [f"{item['file'].rsplit('/', 1)[-1]}"
-                      for item in centrality["pagerank"][:5]]
+
+        pagerank = centrality.get("pagerank", [])
+        if pagerank:
+            top_pr = [
+                f"{item.get('file', '').rsplit('/', 1)[-1]}"
+                for item in pagerank[:5]
+            ]
             parts.append(f"Key files (PageRank): {', '.join(top_pr)}")
 
-        if cycles["has_cycles"]:
-            parts.append(f"Cycles: {len(cycles['cycle_groups'])} groups found")
-            for i, group in enumerate(cycles["cycle_groups"], 1):
+        if cycles.get("has_cycles"):
+            cycle_groups = cycles.get("cycle_groups", [])
+            parts.append(f"Cycles: {len(cycle_groups)} groups found")
+            for i, group in enumerate(cycle_groups, 1):
                 names = [f.rsplit('/', 1)[-1] for f in group]
                 parts.append(f"  Cycle {i}: {' ↔ '.join(names)}")
-            if cycles["edges_to_break"]:
+            edges_to_break = cycles.get("edges_to_break", [])
+            if edges_to_break:
                 parts.append("Fix — remove these imports:")
-                for s, t in cycles["edges_to_break"]:
-                    parts.append(f"  - {s.rsplit('/', 1)[-1]} → {t.rsplit('/', 1)[-1]}")
+                for edge in edges_to_break:
+                    if len(edge) >= 2:
+                        s, t = edge[0], edge[1]
+                        parts.append(f"  - {s.rsplit('/', 1)[-1]} → {t.rsplit('/', 1)[-1]}")
         else:
             parts.append("Cycles: None (clean DAG)")
-    
+
         return "\n".join(parts)
 
     # ─── TOOL 12: apply_fix ──────────────────────────────────────
@@ -363,7 +405,9 @@ def create_tools(store: VectorStore, modules_result: dict,
             old_code:  The EXACT code to search for (must match precisely)
             new_code:  The replacement code
         """
-        result = apply_fix_to_file(settings.repo_path, file_path, old_code, new_code)
+        if not repo_path:
+            return "Error: No repo path available."
+        result = apply_fix_to_file(repo_path, file_path, old_code, new_code)
         if result["ok"]:
             return result["message"]
         return f"Error: {result['error']}"
@@ -372,8 +416,4 @@ def create_tools(store: VectorStore, modules_result: dict,
             get_overview, get_blast_radius_map, get_reading_order,
             get_execution_flow, review_diff, review_file, load_guidelines,
             get_architecture_health, apply_fix]
-
-
-
-
 

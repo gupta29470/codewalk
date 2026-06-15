@@ -18,7 +18,6 @@ services:
       - /var/codewalk:/var/codewalk
       - /root/.cache/huggingface:/root/.cache/huggingface
     environment:
-      - REPO_PATH=/var/codewalk/repos
       - LLM_PROVIDER=${LLM_PROVIDER:-groq}
       - LLM_MODEL=${LLM_MODEL:-llama-3.1-70b-versatile}
       - EMBEDDING_MODEL=${EMBEDDING_MODEL:-jinaai/jina-code-embeddings-1.5b}

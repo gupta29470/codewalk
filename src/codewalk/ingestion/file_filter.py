@@ -306,7 +306,7 @@ def should_skip_dir(dir_name: str) -> bool:
     return False
 
 
-def should_skip(file_path: str) -> bool:
+def should_skip(file_path: str, repo_path: str | None = None) -> bool:
     """Return True if this file should be skipped."""
 
     path = Path(file_path)
@@ -315,7 +315,7 @@ def should_skip(file_path: str) -> bool:
     for part in path.parts[:-1]:
         if part.startswith(".") and part not in KEEP_DOT_DIRS:
             return True
-    
+
     # Skip hidden files (starting with .)
     if path.name.startswith("."):
         return True
@@ -324,22 +324,21 @@ def should_skip(file_path: str) -> bool:
     for part in path.parts:
         if part in SKIP_DIRS:
             return True
-        
-    
+
     # Skip binary/media extensions
     if path.suffix in SKIP_EXTENSIONS:
         return True
-    
+
     # Skip specific filenames
     if path.name in SKIP_FILES:
         return True
-    
+
     # Skip generated file patterns (e.g. foo.g.dart, bar.pb.go, baz.designer.cs)
     if any(path.name.endswith(suffix) for suffix in SKIP_SUFFIXES):
         return True
-    
+
     # Check .codewalkignore patterns
-    if _codewalkignore_matches(file_path):
+    if _codewalkignore_matches(file_path, repo_path=repo_path):
         return True
 
     # Check EXCLUDE_PATHS env var (comma-separated dirs/patterns)
@@ -351,19 +350,20 @@ def should_skip(file_path: str) -> bool:
 
 # ─── .codewalkignore support ─────────────────────────────────────────
 
-_codewalkignore_patterns: list[str] | None = None
+_codewalkignore_patterns: dict[str, list[str]] = {}
 
-def _load_codewalkignore() -> list[str]:
+def _load_codewalkignore(repo_path: str | None = None) -> list[str]:
     """Load patterns from .codewalkignore in the repo root (gitignore syntax)."""
     global _codewalkignore_patterns
-    if _codewalkignore_patterns is not None:
-        return _codewalkignore_patterns
 
-    from src.codewalk.config import settings
-    ignore_path = Path(settings.repo_path) / ".codewalkignore"
+    root = (repo_path or ".").strip()
+    if root in _codewalkignore_patterns:
+        return _codewalkignore_patterns[root]
+
+    ignore_path = Path(root) / ".codewalkignore"
     if not ignore_path.exists():
-        _codewalkignore_patterns = []
-        return _codewalkignore_patterns
+        _codewalkignore_patterns[root] = []
+        return []
 
     patterns = []
     for line in ignore_path.read_text().splitlines():
@@ -371,13 +371,13 @@ def _load_codewalkignore() -> list[str]:
         if not line or line.startswith("#"):
             continue
         patterns.append(line)
-    _codewalkignore_patterns = patterns
-    return _codewalkignore_patterns
+    _codewalkignore_patterns[root] = patterns
+    return patterns
 
 
-def _codewalkignore_matches(file_path: str) -> bool:
+def _codewalkignore_matches(file_path: str, repo_path: str | None = None) -> bool:
     """Check if a file path matches any .codewalkignore pattern."""
-    patterns = _load_codewalkignore()
+    patterns = _load_codewalkignore(repo_path)
     if not patterns:
         return False
 
@@ -402,7 +402,7 @@ def _codewalkignore_matches(file_path: str) -> bool:
 def reset_codewalkignore():
     """Reset cached patterns (call when repo_path changes)."""
     global _codewalkignore_patterns
-    _codewalkignore_patterns = None
+    _codewalkignore_patterns = {}
 
 
 # ─── EXCLUDE_PATHS env var support ───────────────────────────────────

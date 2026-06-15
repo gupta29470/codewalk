@@ -13,6 +13,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+import igraph as ig
+
 from src.codewalk.log import log as _log
 
 KNOWLEDGE_GRAPH_VERSION = "1.0.0"
@@ -61,6 +63,31 @@ def _edge(source: str, target: str, edge_type: str, weight: float = 0.8, **extra
     return row
 
 
+def _file_centrality_metrics(store) -> dict[str, dict[str, float | int]]:
+    """Compute PageRank, betweenness, and degree for each file from import edges."""
+    edges = store.get_import_edges()
+    if not edges:
+        return {}
+    try:
+        graph = ig.Graph.TupleList(edges, directed=True)
+    except Exception:
+        return {}
+    names = graph.vs["name"]
+    pagerank = graph.pagerank()
+    betweenness = graph.betweenness()
+    indegree = graph.indegree()
+    outdegree = graph.outdegree()
+    return {
+        name: {
+            "pageRank": round(float(pagerank[i]), 6),
+            "betweenness": round(float(betweenness[i]), 4),
+            "inDegree": int(indegree[i]),
+            "outDegree": int(outdegree[i]),
+        }
+        for i, name in enumerate(names)
+    }
+
+
 def _related_edges_for_file(symbol_ids: list[str]) -> list[dict]:
     """Same-file symbol pairs — UA-style layout hints (weight 0.6)."""
     if len(symbol_ids) < 2:
@@ -73,6 +100,126 @@ def _related_edges_for_file(symbol_ids: list[str]) -> list[dict]:
                 limited[i], limited[j], "related", weight=_RELATED_EDGE_WEIGHT,
             ))
     return edges
+
+
+def _generate_heuristic_tour(graph: dict) -> list[dict]:
+    """Generate a guided tour from the knowledge graph topology.
+
+    Mirrors the heuristic in the Understand-Anything dashboard's
+    `generateHeuristicTour`: topological walk, grouped by layers when present.
+    """
+    nodes = graph.get("nodes", [])
+    edges = graph.get("edges", [])
+    layers = graph.get("layers", [])
+
+    node_map = {n["id"]: n for n in nodes if "id" in n}
+    concept_nodes = [n for n in nodes if n.get("type") == "concept"]
+    code_nodes = [n for n in nodes if n.get("type") != "concept"]
+    code_node_ids = {n["id"] for n in code_nodes}
+
+    in_degree: dict[str, int] = {nid: 0 for nid in code_node_ids}
+    adjacency: dict[str, list[str]] = {nid: [] for nid in code_node_ids}
+
+    for edge in edges:
+        src = edge.get("source")
+        tgt = edge.get("target")
+        if src in code_node_ids and tgt in code_node_ids:
+            in_degree[tgt] = in_degree.get(tgt, 0) + 1
+            adjacency[src].append(tgt)
+
+    # Kahn's algorithm for a topological ordering of code nodes.
+    queue = [nid for nid, deg in in_degree.items() if deg == 0]
+    topo_order: list[str] = []
+    while queue:
+        current = queue.pop(0)
+        topo_order.append(current)
+        for neighbor in adjacency.get(current, []):
+            new_degree = in_degree.get(neighbor, 1) - 1
+            in_degree[neighbor] = new_degree
+            if new_degree == 0:
+                queue.append(neighbor)
+
+    # Append any nodes missed due to cycles or isolation.
+    reached = set(topo_order)
+    for node in code_nodes:
+        if node["id"] not in reached:
+            topo_order.append(node["id"])
+
+    steps: list[dict] = []
+
+    if layers:
+        node_to_layer: dict[str, str] = {}
+        for layer in layers:
+            for nid in layer.get("nodeIds", []):
+                node_to_layer[nid] = layer["id"]
+
+        layer_order: list[str] = []
+        layer_nodes: dict[str, list[str]] = {}
+        for nid in topo_order:
+            layer_id = node_to_layer.get(nid)
+            if layer_id:
+                if layer_id not in layer_nodes:
+                    layer_nodes[layer_id] = []
+                    layer_order.append(layer_id)
+                layer_nodes[layer_id].append(nid)
+
+        layer_map = {layer["id"]: layer for layer in layers if "id" in layer}
+        for layer_id in layer_order:
+            layer = layer_map.get(layer_id)
+            node_ids = layer_nodes.get(layer_id, [])
+            if not layer or not node_ids:
+                continue
+            names = [node_map[nid]["name"] for nid in node_ids if nid in node_map]
+            steps.append({
+                "order": 0,
+                "title": layer.get("name", layer_id),
+                "description": (
+                    f"{layer.get('description', '')}. Key files: {', '.join(names)}."
+                ),
+                "nodeIds": node_ids,
+            })
+
+        layered_node_ids = {nid for layer in layers for nid in layer.get("nodeIds", [])}
+        unlayered = [nid for nid in topo_order if nid not in layered_node_ids]
+        if unlayered:
+            names = [node_map[nid]["name"] for nid in unlayered if nid in node_map]
+            steps.append({
+                "order": 0,
+                "title": "Supporting Components",
+                "description": f"Additional supporting files: {', '.join(names)}.",
+                "nodeIds": unlayered,
+            })
+    else:
+        for i in range(0, len(topo_order), 3):
+            batch = topo_order[i : i + 3]
+            summaries = [
+                f"{node_map[nid].get('name', nid)} ({node_map[nid].get('summary', '')})"
+                for nid in batch
+                if nid in node_map
+            ]
+            step_number = i // 3 + 1
+            steps.append({
+                "order": 0,
+                "title": f"Step {step_number}: Code Walkthrough",
+                "description": f"Exploring: {'; '.join(summaries)}.",
+                "nodeIds": batch,
+            })
+
+    if concept_nodes:
+        concept_summaries = [
+            f"{n.get('name', '')} ({n.get('summary', '')})" for n in concept_nodes
+        ]
+        steps.append({
+            "order": 0,
+            "title": "Key Concepts",
+            "description": f"Important architectural concepts: {'; '.join(concept_summaries)}.",
+            "nodeIds": [n["id"] for n in concept_nodes],
+        })
+
+    for i, step in enumerate(steps):
+        step["order"] = i + 1
+
+    return steps
 
 
 def build_knowledge_graph(
@@ -101,6 +248,9 @@ def build_knowledge_graph(
     edges: list[dict] = []
     node_ids: set[str] = set()
 
+    # Centrality metrics from the file-level import graph.
+    file_centrality = _file_centrality_metrics(store)
+
     # ── File nodes ────────────────────────────────────────────────────
     for row in store.conn.execute(
         "SELECT path, module, language FROM files ORDER BY path"
@@ -111,6 +261,7 @@ def build_knowledge_graph(
         size = int(meta.get("size_bytes") or 0)
         importer_count = len(store.get_importers(path))
         import_count = len(store.get_imports(path))
+        centrality = file_centrality.get(path, {})
         nodes.append({
             "id": nid,
             "type": "file",
@@ -125,6 +276,7 @@ def build_knowledge_graph(
                 "sizeBytes": size,
                 "importCount": import_count,
                 "importerCount": importer_count,
+                **centrality,
             },
         })
         node_ids.add(nid)
@@ -132,17 +284,46 @@ def build_knowledge_graph(
     # ── Symbol nodes (functions / classes / methods) ──────────────────
     symbol_rows = store.conn.execute(
         "SELECT s.symbol_id, s.name, s.qualified_name, s.symbol_type, "
-        "s.start_line, s.end_line, f.path "
+        "s.start_line, s.end_line, s.parent_class, f.path, "
+        "sm.kind, sm.http_method, sm.http_path, sm.event_name, sm.cli_command "
         "FROM symbols s JOIN files f ON s.file_id = f.file_id "
-        "ORDER BY f.path, s.start_line"
+        "LEFT JOIN symbol_metadata sm ON s.symbol_id = sm.symbol_id "
+        "ORDER BY f.path, s.start_line, s.symbol_id"
     ).fetchall()
 
     symbols_by_file: dict[str, list[str]] = {}
+    symbol_id_to_nid: dict[str, str] = {}
 
-    for sid, name, qname, sym_type, start_line, end_line, fpath in symbol_rows:
+    def _symbol_summary_from_meta(kind, http_method, http_path, event_name, cli_command) -> str:
+        if http_method and http_path:
+            return f"{http_method} {http_path}"
+        if http_path:
+            return f"route {http_path}"
+        if cli_command:
+            return f"CLI: {cli_command}"
+        if event_name:
+            return f"Event: {event_name}"
+        if kind:
+            return kind.replace("_", " ").title()
+        return ""
+
+    for (
+        sid, name, qname, sym_type, start_line, end_line, parent_class, fpath,
+        kind, http_method, http_path, event_name, cli_command
+    ) in symbol_rows:
         node_type = sym_type if sym_type in ("class", "method") else "function"
-        nid = _node_id_symbol(qname, node_type)
+        # Use the DB symbol_id as the node id suffix to avoid collisions when
+        # the same qualified name appears multiple times (e.g. overloaded
+        # methods or minified JS with identical names on the same line).
+        nid = f"{node_type}:{sid}"
+        symbol_id_to_nid[sid] = nid
         line_len = max(0, (end_line or start_line) - start_line)
+        tags = [sym_type] if sym_type else []
+        if kind:
+            tags.append(kind)
+        if parent_class:
+            tags.append(f"in:{parent_class}")
+        summary = _symbol_summary_from_meta(kind, http_method, http_path, event_name, cli_command)
         nodes.append({
             "id": nid,
             "type": node_type,
@@ -150,8 +331,8 @@ def build_knowledge_graph(
             "filePath": fpath,
             "qualifiedName": qname,
             "lineRange": [start_line, end_line],
-            "summary": "",
-            "tags": [sym_type] if sym_type else [],
+            "summary": summary,
+            "tags": sorted(set(tags)),
             "complexity": _complexity_from_bytes(line_len * 40),
             "metrics": {
                 "startLine": start_line,
@@ -163,6 +344,24 @@ def build_knowledge_graph(
         file_nid = _node_id_file(fpath)
         if file_nid in node_ids:
             edges.append(_edge(file_nid, nid, "exports", weight=0.9))
+
+    # ── Class hierarchy edges (class → parent class) ──────────────────
+    for class_sid, parent_sid in store.conn.execute(
+        "SELECT class_symbol_id, parent_symbol_id FROM class_hierarchy"
+    ).fetchall():
+        src = symbol_id_to_nid.get(class_sid)
+        tgt = symbol_id_to_nid.get(parent_sid)
+        if src and tgt and src in node_ids and tgt in node_ids:
+            edges.append(_edge(src, tgt, "extends", weight=0.8))
+
+    # ── Class member edges (class → method/function) ──────────────────
+    for class_sid, member_sid in store.conn.execute(
+        "SELECT class_symbol_id, member_symbol_id FROM class_members"
+    ).fetchall():
+        src = symbol_id_to_nid.get(class_sid)
+        tgt = symbol_id_to_nid.get(member_sid)
+        if src and tgt and src in node_ids and tgt in node_ids:
+            edges.append(_edge(src, tgt, "contains", weight=0.85))
 
     # ── Related edges (same-file symbols — UA layout) ─────────────────
     for fpath, sids in symbols_by_file.items():
@@ -205,21 +404,15 @@ def build_knowledge_graph(
     # ── Call edges (symbol → symbol) ──────────────────────────────────
     call_rows = store.conn.execute(
         """
-        SELECT cs.qualified_name, ct.qualified_name, sc.line
+        SELECT sc.caller_symbol_id, sc.callee_symbol_id, sc.line
         FROM symbol_calls sc
-        JOIN symbols cs ON sc.caller_symbol_id = cs.symbol_id
-        JOIN symbols ct ON sc.callee_symbol_id = ct.symbol_id
         """
     ).fetchall()
-    symbol_type_by_qname = {
-        row[2]: (row[3] if row[3] in ("class", "method") else "function")
-        for row in symbol_rows
-    }
 
-    for caller_q, callee_q, line in call_rows:
-        src = _node_id_symbol(caller_q, symbol_type_by_qname.get(caller_q, "function"))
-        tgt = _node_id_symbol(callee_q, symbol_type_by_qname.get(callee_q, "function"))
-        if src in node_ids and tgt in node_ids:
+    for caller_sid, callee_sid, line in call_rows:
+        src = symbol_id_to_nid.get(caller_sid)
+        tgt = symbol_id_to_nid.get(callee_sid)
+        if src and tgt and src in node_ids and tgt in node_ids:
             edges.append(_edge(src, tgt, "calls", weight=0.8, line=line))
 
     # ── Module dependency edges ───────────────────────────────────────
@@ -249,7 +442,7 @@ def build_knowledge_graph(
         "SELECT source, target FROM module_deps"
     ).fetchall()
 
-    return {
+    graph = {
         "version": KNOWLEDGE_GRAPH_VERSION,
         "project": {
             "name": repo_name or (Path(repo_path).name if repo_path else ""),
@@ -272,6 +465,8 @@ def build_knowledge_graph(
             "moduleDepCount": len(graph_stats),
         },
     }
+    graph["tour"] = _generate_heuristic_tour(graph)
+    return graph
 
 
 def validate_knowledge_graph(graph: dict) -> list[str]:

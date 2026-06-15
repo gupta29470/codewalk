@@ -11,6 +11,9 @@ def atomic_swap(incoming: str, latest: str):
     lat = _P(latest)
     old = _P(str(latest) + "_old")
 
+    if not inc.is_dir():
+        raise ValueError(f"incoming must be a directory: {incoming}")
+
     # Step 1: Backup current
     if lat.exists():
         lat.rename(old)

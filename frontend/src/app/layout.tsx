@@ -2,6 +2,7 @@ import type { Metadata } from "next";
 import localFont from "next/font/local";
 import "./globals.css";
 import { Sidebar } from "@/components/Sidebar";
+import { AnalysisLoader } from "@/components/AnalysisLoader";
 import { AnalyzeProvider } from "@/lib/analyze-context";
 
 const geistSans = localFont({
@@ -35,6 +36,7 @@ export default function RootLayout({
             <Sidebar />
             <main className="flex-1 p-6 overflow-auto">{children}</main>
           </div>
+          <AnalysisLoader />
         </AnalyzeProvider>
       </body>
     </html>

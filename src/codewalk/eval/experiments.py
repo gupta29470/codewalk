@@ -84,10 +84,11 @@ def _restore(param_name: str, original_value: Any) -> None:
     logger.info(f"[experiment] Restored {info['attr']} → {original_value}")
 
 
-def run_experiment(store: VectorStore, graph_store: GraphStore | None = None, 
-    overrides: dict[str, Any] | None = None, mode: str = "retrieval", 
-    samples: list[EvalSample] | None = None, n_results: int = 5, 
-    skip_ragas: bool = False, label: str | None = None,) -> dict:
+def run_experiment(store: VectorStore, graph_store: GraphStore | None = None,
+    overrides: dict[str, Any] | None = None, mode: str = "retrieval",
+    samples: list[EvalSample] | None = None, n_results: int = 5,
+    skip_ragas: bool = False, label: str | None = None,
+    repo_path: str = ".") -> dict:
     """Run a single evaluation with temporary parameter overrides.
 
     Patches parameters → runs eval → restores originals → saves result.
@@ -103,6 +104,7 @@ def run_experiment(store: VectorStore, graph_store: GraphStore | None = None,
         n_results: Chunks per retrieval.
         skip_ragas: Skip RAGAS scoring (internal metrics only).
         label: Label for the saved run. Auto-generated if None.
+        repo_path: Repo root for eval output directory.
 
     Returns:
         The result dict from run_full_evaluation().
@@ -128,6 +130,7 @@ def run_experiment(store: VectorStore, graph_store: GraphStore | None = None,
             mode=mode,
             n_results=n_results,
             skip_ragas=skip_ragas,
+            repo_path=repo_path,
         )
     finally:
         # ALWAYS restore, even if eval crashes
@@ -135,15 +138,15 @@ def run_experiment(store: VectorStore, graph_store: GraphStore | None = None,
             _restore(param_name, original_value)
 
     if label:
-        save_run(result, label=label)
+        save_run(result, label=label, repo_path=repo_path)
 
     logger.info(f"[experiment] Done: {label or 'no label'}")
     return result
 
 
-def sweep_experiment(param_name: str, values: list[Any], store: VectorStore, graph_store: GraphStore | None = None, 
-    mode: str = "retrieval", samples: list[EvalSample] | None = None, 
-    n_results: int = 5,  skip_ragas: bool = False,) -> str:
+def sweep_experiment(param_name: str, values: list[Any], store: VectorStore, graph_store: GraphStore | None = None,
+    mode: str = "retrieval", samples: list[EvalSample] | None = None,
+    n_results: int = 5,  skip_ragas: bool = False, repo_path: str = ".") -> str:
     """Sweep a single parameter across multiple values.
 
     For each value: patches → runs eval → restores → saves.
@@ -152,7 +155,7 @@ def sweep_experiment(param_name: str, values: list[Any], store: VectorStore, gra
     Args:
         param_name: Key from PATCHABLE_PARAMS (e.g. "soft_cutoff").
         values: List of values to try (e.g. [0.30, 0.35, 0.40, 0.45, 0.50]).
-        store, graph_store, mode, samples, n_results, skip_ragas:
+        store, graph_store, mode, samples, n_results, skip_ragas, repo_path:
             Same as run_experiment().
 
     Returns:
@@ -189,6 +192,7 @@ def sweep_experiment(param_name: str, values: list[Any], store: VectorStore, gra
             n_results=n_results,
             skip_ragas=skip_ragas,
             label=label,
+            repo_path=repo_path,
         )
 
         results.append({
@@ -276,7 +280,8 @@ def toggle_experiment(name: str,
     mode: str = "retrieval",
     samples: list[EvalSample] | None = None,
     n_results: int = 5,
-    skip_ragas: bool = False,) -> str:
+    skip_ragas: bool = False,
+    repo_path: str = ".") -> str:
     """Run a predefined toggle experiment (A/B comparison).
 
     Available experiments:
@@ -286,7 +291,7 @@ def toggle_experiment(name: str,
 
     Args:
         name: Experiment name (see above).
-        store, graph_store, mode, samples, n_results, skip_ragas:
+        store, graph_store, mode, samples, n_results, skip_ragas, repo_path:
             Same as run_experiment().
 
     Returns:
@@ -297,11 +302,11 @@ def toggle_experiment(name: str,
 
     if name == "graph_expansion":
         return _toggle_graph_expansion(
-            store, graph_store, mode, samples, n_results, skip_ragas
+            store, graph_store, mode, samples, n_results, skip_ragas, repo_path
         )
     elif name == "grader_comparison":
         return _toggle_grader(
-            store, graph_store, samples, n_results, skip_ragas
+            store, graph_store, samples, n_results, skip_ragas, repo_path
         )
     elif name == "n_results":
         results = []
@@ -316,6 +321,7 @@ def toggle_experiment(name: str,
                 n_results=n,   # ← passed directly
                 skip_ragas=skip_ragas,
                 label=label,
+                repo_path=repo_path,
             )
             results.append({
                 "value": n,
@@ -336,7 +342,8 @@ def _toggle_graph_expansion(store: VectorStore,
     mode: str,
     samples: list[EvalSample],
     n_results: int,
-    skip_ragas: bool,) -> str:
+    skip_ragas: bool,
+    repo_path: str = ".") -> str:
     """Compare eval with graph expansion ON vs OFF.
 
     ON:  pass graph_store to evaluator (expansion can trigger).
@@ -352,6 +359,7 @@ def _toggle_graph_expansion(store: VectorStore,
         n_results=n_results,
         skip_ragas=skip_ragas,
         label="exp_expansion_ON",
+        repo_path=repo_path,
     )
 
     # Run B: expansion OFF
@@ -364,6 +372,7 @@ def _toggle_graph_expansion(store: VectorStore,
         n_results=n_results,
         skip_ragas=skip_ragas,
         label="exp_expansion_OFF",
+        repo_path=repo_path,
     )
 
     return _format_ab_comparison(
@@ -377,6 +386,7 @@ def _toggle_grader(
     samples: list[EvalSample],
     n_results: int,
     skip_ragas: bool,
+    repo_path: str = ".",
 ) -> str:
     """Compare free grader (MCP path) vs LLM grader (API path).
 
@@ -394,6 +404,7 @@ def _toggle_grader(
         n_results=n_results,
         skip_ragas=skip_ragas,
         label="exp_grader_free",
+        repo_path=repo_path,
     )
 
     # Run B: LLM grader (full mode)
@@ -406,6 +417,7 @@ def _toggle_grader(
         n_results=n_results,
         skip_ragas=skip_ragas,
         label="exp_grader_llm",
+        repo_path=repo_path,
     )
 
     return _format_ab_comparison(

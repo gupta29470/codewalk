@@ -232,7 +232,7 @@ export default function ChatPage() {
                                         <AlertTriangle className="h-5 w-5 text-amber-600 dark:text-amber-400 flex-shrink-0 mt-0.5" />
                                         <div>
                                             <p className="text-sm font-medium text-amber-800 dark:text-amber-200">
-                                                The agent wants to take an action
+                                                The agent wants to apply a code fix
                                             </p>
                                             <p className="text-xs text-amber-700 dark:text-amber-300 mt-1 font-mono">
                                                 {hitlAction}

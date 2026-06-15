@@ -109,9 +109,10 @@ def _cloud_configured() -> tuple[str, str, str] | None:
 def _repo_root() -> Path:
     from src.codewalk.api import state
 
-    # Prefer the live REPO_PATH env var so dynamic tool/MCP changes (and tests)
-    # are respected over settings cached at import time.
-    raw = os.getenv("REPO_PATH") or state.get_repo_path() or "."
+    # For MCP the workspace cwd is the repo root; for the local API the repo
+    # path is set per-request by the middleware. Fall back to cwd so staleness
+    # checks never crash when no explicit repo path is in scope.
+    raw = state._repo_path or os.getcwd()
     return Path(raw).resolve()
 
 

@@ -4,7 +4,7 @@ from pydantic import BaseModel
 
 class AnalyzeRequest(BaseModel):
     """POST /analyze — request body."""
-    repo_path: str = ""
+    repo_path: str
     collection_name: str = ""
     index_mode: str = "auto"  # "auto" | "reindex" | "full"
 
@@ -104,6 +104,23 @@ class DocsSearchRequest(BaseModel):
 class DocsAskRequest(BaseModel):
     question: str
     n_results: int = 5
+
+class SemanticSearchRequest(BaseModel):
+    """POST /semantic-search — request body."""
+    query: str
+    repo_path: str
+    n_results: int = 5
+
+class SemanticSearchResult(BaseModel):
+    """One semantic search hit."""
+    id: str
+    text: str
+    metadata: dict
+    distance: float | None = None
+
+class SemanticSearchResponse(BaseModel):
+    """POST /semantic-search — response body."""
+    results: list[SemanticSearchResult]
 
 class ApproveRequest(BaseModel):
     thread_id: str         

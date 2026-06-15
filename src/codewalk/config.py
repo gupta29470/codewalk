@@ -22,11 +22,6 @@ class Settings(BaseSettings):
     openrouter_api_key: str = os.getenv("OPENROUTER_API_KEY", "")
     deepseek_api_key: str = os.getenv("DEEPSEEK_API_KEY", "")
 
-    # Relative path for self-analysis: "src/codewalk"
-    # Absolute path for external repos: "/Users/you/Development/django-app/src"
-    # Override via .env: REPO_PATH=/path/to/any/repo/source
-    repo_path: str = os.getenv("REPO_PATH", ".")
-
     # Comma-separated paths to exclude from scanning/indexing
     # e.g. "tests,docs,scripts/legacy,*.generated.*"
     exclude_paths: str = os.getenv("EXCLUDE_PATHS", "")

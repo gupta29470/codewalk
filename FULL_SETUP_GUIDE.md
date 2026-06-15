@@ -492,9 +492,8 @@ Copy template: `cp mcp.json.example .vscode/mcp.json` (in target project or code
     "codewalk": {
       "command": "/path/to/codewalk/.codewalk-env/bin/python",
       "args": ["-m", "src.codewalk.mcp.server"],
-      "cwd": "/path/to/codewalk",
+      "cwd": "${workspaceFolder}",
       "env": {
-        "REPO_PATH": "${workspaceFolder}",
         "CODEWALK_SERVER_URL": "https://api.codewalk.xyz",
         "CODEWALK_REPO_NAME": "gupta29470/codewalk",
         "CODEWALK_REPO_TOKEN": "cw_repo_xxxxxxxx"
@@ -513,7 +512,7 @@ GET https://api.codewalk.xyz/indexes/{owner}/{repo}/manifest
 GET https://api.codewalk.xyz/indexes/{owner}/{repo}
 ```
 
-Index extracts to `REPO_PATH/.codewalk/` (full **replace** — MCP deletes any existing `.codewalk/` before extract). No MCP restart; query tools auto-load from disk.
+Index extracts to `{cwd}/.codewalk/` (full **replace** — MCP deletes any existing `.codewalk/` before extract). No MCP restart; query tools auto-load from disk.
 
 ### Step 10.5 — Test manifest from laptop
 

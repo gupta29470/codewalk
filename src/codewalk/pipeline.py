@@ -15,7 +15,6 @@ from src.codewalk.ingestion.tech_detect import detect_tech_stack
 from src.codewalk.embeddings.chunker import chunk_file
 from src.codewalk.embeddings.embedder import embed_chunks
 from src.codewalk.embeddings.vector_store import VectorStore
-from src.codewalk.config import settings
 from src.codewalk.log import log as _log
 from src.codewalk import __version__ as CODEWALK_VERSION
 
@@ -107,7 +106,8 @@ def full_index_parallel(repo_path: str = "", collection_name: str = "codebase",
         team_config: If provided, uses team_scan_directory (exclude-only).
                      If None, uses scan_directory (file_filter defaults).
     """
-    repo_path = repo_path or settings.repo_path
+    if not repo_path:
+        raise ValueError("repo_path is required")
     _log(f"[parallel] Starting: {repo_path}")
     pipeline_start = time.time()
 
@@ -152,8 +152,9 @@ def index_from_paths_parallel(paths: list[str], repo_path: str = "",
     matches all files under it (e.g. "src" matches "src/app/main.py").
     Uses producer-consumer for parallel chunk+embed.
     """
+    if not repo_path:
+        raise ValueError("repo_path is required")
     pipeline_start = time.time()
-    repo_path = repo_path or settings.repo_path
 
     # Step 1: Match files — avoid full repo scan when possible
     t0 = time.time()
@@ -177,17 +178,25 @@ def index_from_paths_parallel(paths: list[str], repo_path: str = "",
             dirs_to_scan.append(path)
 
     # Only scan repo if we have directory paths or non-existent files
+    all_files: list[dict] = []
+    seen_paths = {f["file_path"] for f in files}
     if dirs_to_scan:
         all_files = scan_directory(repo_path)
         for file in all_files:
             file_path = file["file_path"]
+            if file_path in seen_paths:
+                continue
             if file_path in path_set:
                 files.append(file)
+                seen_paths.add(file_path)
                 continue
             for path in path_set:
                 if file_path.startswith(path.rstrip("/") + "/"):
                     files.append(file)
+                    seen_paths.add(file_path)
                     break
+    else:
+        all_files = files
 
     match_time = time.time() - t0
     _log(f"[parallel-paths] Matched {len(files)} files ({match_time:.1f}s)")
@@ -236,7 +245,8 @@ def reindex(repo_path: str = "", collection_name: str = "codebase",
 
     Thin wrapper around incremental_reindex() that processes ALL indexed files.
     """
-    repo_path = repo_path or settings.repo_path
+    if not repo_path:
+        raise ValueError("repo_path is required")
 
     store = VectorStore(persist_dir=persist_dir)
     store.create_collection(collection_name)
@@ -282,7 +292,7 @@ def incremental_reindex(
 
     Args:
         paths: File or directory paths to consider for reindexing.
-        repo_path: Root of the repository (defaults to settings.repo_path).
+        repo_path: Root of the repository (required).
         collection_name: ChromaDB collection name (default "codebase").
         persist_dir: ChromaDB directory.
         team_config: If provided, uses team_scan_directory instead of scan_directory.
@@ -291,8 +301,9 @@ def incremental_reindex(
         dict with keys: repo_path, files_on_disk, files_skipped,
         files_reindexed, files_deleted, chunks_embedded, total_time.
     """
+    if not repo_path:
+        raise ValueError("repo_path is required")
     pipeline_start = time.time()
-    repo_path = repo_path or settings.repo_path
 
     # Step 1: Scan disk → match against selected paths
     if team_config:

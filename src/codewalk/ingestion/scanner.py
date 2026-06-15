@@ -68,7 +68,7 @@ def scan_directory(directory: str) -> list[dict]:
         for fname in filenames:
             relative = _os.path.join(rel_dir, fname) if rel_dir != "." else fname
 
-            if should_skip(relative):
+            if should_skip(relative, repo_path=root_str):
                 continue
 
             full_path = _os.path.join(dirpath, fname)

@@ -2,12 +2,13 @@ import argparse
 import json
 import sys
 import httpx
+import re
 
+from src.codewalk.config import get_llm
 from src.codewalk.voice.stt import record_audio, transcribe
 from src.codewalk.voice.tts import speak
 from src.codewalk.voice.router import route
 from src.codewalk.voice.backends import execute_direct, execute_mcp_sync
-import re
 
 
 def _clean_for_speech(text: str) -> str:
@@ -43,8 +44,6 @@ def format_voice_response(raw_result: str) -> dict:
 
     The raw result is displayed as-is in Copilot. The speech is a narrative overlay for TTS.
     """
-    from src.codewalk.config import get_llm
-
     # Short results don't need LLM processing
     if len(raw_result) <= 300:
         return {"technical": raw_result, "speech": _clean_for_speech(raw_result)}

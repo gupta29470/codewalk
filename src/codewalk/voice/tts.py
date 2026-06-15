@@ -4,6 +4,9 @@ import os
 import sys
 import tempfile
 import subprocess
+import select
+import termios
+import tty
 import edge_tts
 
 DEFAULT_VOICE = "en-US-AriaNeural"
@@ -65,10 +68,6 @@ def speak(text: str, voice: str = DEFAULT_VOICE):
     _current_playback = subprocess.Popen(["afplay", tmp_path])
 
     # Wait for playback to finish, checking for stop signal
-    import select
-    import termios
-    import tty
-
     try:
         fd = sys.stdin.fileno()
         old_settings = termios.tcgetattr(fd)

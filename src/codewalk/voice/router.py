@@ -1,5 +1,7 @@
 import json
-from src.codewalk.config import settings
+from src.codewalk.config import settings, get_llm
+from langchain_core.prompts import ChatPromptTemplate
+from langchain_core.output_parsers import StrOutputParser
 
 # ── Tool registry: all 16 Codewalk tools with schemas ──
 
@@ -206,13 +208,11 @@ def route(transcript: str) -> dict:
     Returns:
         {"tool": "tool_name", "arguments": {...}} or {"tool": None}
     """
-    from src.codewalk.config import get_llm
-    from langchain_core.prompts import ChatPromptTemplate
-    from langchain_core.output_parsers import StrOutputParser
-
     system_prompt = ROUTER_SYSTEM_PROMPT.format(
         tools_description=_build_tools_description()
     )
+    # Escape braces so ChatPromptTemplate treats JSON examples as literal text.
+    system_prompt = system_prompt.replace("{", "{{").replace("}", "}}")
 
     llm = get_llm(temperature=0)
     prompt = ChatPromptTemplate.from_messages([
@@ -224,7 +224,7 @@ def route(transcript: str) -> dict:
 
     try:
         result = json.loads(content)
-        if result.get("tool") and result["tool"] not in TOOL_REGISTRY:
+        if "tool" not in result or (result.get("tool") and result["tool"] not in TOOL_REGISTRY):
             return {"tool": None, "arguments": {}}
         return result
     except (json.JSONDecodeError, KeyError):

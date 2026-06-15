@@ -11,7 +11,7 @@ logger = logging.getLogger("codewalk")
 
 def _stable_id(*parts: str) -> str:
     """Deterministic hash ID from input parts. No DB lookup needed."""
-    return hashlib.sha256("|".join(parts).encode()).hexdigest()[:16]
+    return hashlib.sha256("|".join(parts).encode()).hexdigest()
 
 
 class GraphStore:
@@ -102,7 +102,28 @@ class GraphStore:
         raise last_error  # shouldn't reach here, but safety net
 
     def _create_tables(self):
-        """Create all 7 graph tables. IF NOT EXISTS = safe to call every startup."""
+        """Create all graph tables. Migrates old schemas by dropping tables
+        when the symbols table is missing newer columns."""
+
+        # Schema migration: if symbols exists without parent_class, drop all
+        # dependent tables so the new CREATE statements rebuild everything.
+        existing = {
+            row[0] for row in self.conn.execute("SELECT table_name FROM information_schema.tables WHERE table_schema = 'main'").fetchall()
+        }
+        if "symbols" in existing:
+            cols = {
+                row[0] for row in self.conn.execute(
+                    "SELECT column_name FROM information_schema.columns WHERE table_name = 'symbols'"
+                ).fetchall()
+            }
+            if "parent_class" not in cols:
+                logger.warning("[GraphStore] Old schema detected; dropping tables to migrate.")
+                for tbl in [
+                    "symbol_calls", "chunks", "class_members", "class_hierarchy",
+                    "symbol_metadata", "symbols", "imports", "files",
+                    "module_deps", "modules",
+                ]:
+                    self.conn.execute(f"DROP TABLE IF EXISTS {tbl}")
 
         self.conn.execute("""
             CREATE TABLE IF NOT EXISTS files (
@@ -125,7 +146,29 @@ class GraphStore:
                 file_id VARCHAR REFERENCES files(file_id),
                 symbol_type VARCHAR,
                 start_line INTEGER,
-                end_line INTEGER
+                end_line INTEGER,
+                parent_class VARCHAR
+            );
+
+            CREATE TABLE IF NOT EXISTS symbol_metadata (
+                symbol_id VARCHAR PRIMARY KEY REFERENCES symbols(symbol_id),
+                kind VARCHAR,
+                http_method VARCHAR,
+                http_path VARCHAR,
+                event_name VARCHAR,
+                cli_command VARCHAR
+            );
+
+            CREATE TABLE IF NOT EXISTS class_hierarchy (
+                class_symbol_id VARCHAR REFERENCES symbols(symbol_id),
+                parent_symbol_id VARCHAR REFERENCES symbols(symbol_id),
+                PRIMARY KEY (class_symbol_id, parent_symbol_id)
+            );
+
+            CREATE TABLE IF NOT EXISTS class_members (
+                class_symbol_id VARCHAR REFERENCES symbols(symbol_id),
+                member_symbol_id VARCHAR REFERENCES symbols(symbol_id),
+                PRIMARY KEY (class_symbol_id, member_symbol_id)
             );
                           
             CREATE TABLE IF NOT EXISTS symbol_calls (
@@ -182,6 +225,9 @@ class GraphStore:
             # before files table is cleared below.
             self.conn.execute("DELETE FROM chunks")
         self.conn.execute("DELETE FROM symbol_calls")
+        self.conn.execute("DELETE FROM class_members")
+        self.conn.execute("DELETE FROM class_hierarchy")
+        self.conn.execute("DELETE FROM symbol_metadata")
         self.conn.execute("DELETE FROM symbols")
         self.conn.execute("DELETE FROM imports")
         self.conn.execute("DELETE FROM module_deps")
@@ -190,7 +236,10 @@ class GraphStore:
 
         self._populate_files(files, module_results)
         self._populate_imports(deps)
-        self._populate_symbols(files)
+        metadata_rows, hierarchy_rows, member_rows = self._populate_symbols(files)
+        self._populate_symbol_metadata(metadata_rows)
+        self._populate_class_hierarchy(hierarchy_rows)
+        self._populate_class_members(member_rows)
         self._populate_symbol_calls(files)
         self._populate_modules(module_results)
         if embedded_chunks:
@@ -252,16 +301,88 @@ class GraphStore:
                 rows
             )
 
+    @staticmethod
+    def _infer_symbol_metadata(item: dict, language: str) -> dict:
+        """Infer entry-point metadata from decorators, name, and inheritance."""
+        decorators = item.get("decorators", [])
+        name = item.get("name", "")
+        symbol_type = item.get("type", "")
+        bases = item.get("bases", [])
+        dec_text = " ".join(decorators).lower()
+
+        meta: dict = {"kind": None, "http_method": None, "http_path": None,
+                      "event_name": None, "cli_command": None}
+
+        # HTTP routes
+        route_indicators = ["route", "get", "post", "put", "patch", "delete",
+                            "head", "options", "api_view", "requestmapping",
+                            "getmapping", "postmapping", "putmapping", "deletemapping",
+                            "patchmapping"]
+        if any(ind in dec_text for ind in route_indicators):
+            meta["kind"] = "route"
+            # Try to extract method and path from the first decorator that looks like a route.
+            for dec in decorators:
+                dlower = dec.lower()
+                method = None
+                for m in ("get", "post", "put", "patch", "delete", "head", "options"):
+                    if m in dlower:
+                        method = m.upper()
+                        break
+                path_match = re.search(r"['\"]([^'\"]+)['\"]", dec)
+                path = path_match.group(1) if path_match else None
+                if path is not None:
+                    meta["http_method"] = method
+                    meta["http_path"] = path
+                    break
+
+        # CLI commands
+        elif "cli.command" in dec_text or "click.command" in dec_text or "add_parser" in dec_text:
+            meta["kind"] = "cli"
+            m = re.search(r"['\"]([^'\"]+)['\"]", dec_text)
+            if m:
+                meta["cli_command"] = m.group(1)
+            else:
+                meta["cli_command"] = name
+
+        # Event handlers
+        elif any(ind in dec_text for ind in ["on_event", "event_handler", "subscribe", "listener", "on_"]):
+            meta["kind"] = "event"
+            m = re.search(r"['\"]([^'\"]+)['\"]", dec_text)
+            if m:
+                meta["event_name"] = m.group(1)
+
+        # Cron / scheduled
+        elif any(ind in dec_text for ind in ["cron", "schedule", "scheduled", "crontab", "interval"]):
+            meta["kind"] = "cron"
+
+        # Service / model / entrypoint by name or inheritance
+        if meta["kind"] is None:
+            if name.lower() == "main":
+                meta["kind"] = "entrypoint"
+            elif symbol_type == "class":
+                if any(n.endswith(("Service", "Manager", "Handler", "Controller")) for n in [name] + bases):
+                    meta["kind"] = "service"
+                elif any(n.endswith(("Model", "Entity", "Schema")) or n in ("Base", "Model") for n in [name] + bases):
+                    meta["kind"] = "model"
+
+        return meta
+
     def _populate_symbols(self, files: list[dict]):
         """Insert symbol records (functions, classes, methods) from tree-sitter.
 
         Re-parses each file with code_parser.parse_file().
         Only stores metadata — not code. Code lives in ChromaDB chunks.
+        Returns (metadata_rows, hierarchy_rows, member_rows) for downstream tables.
         """
 
         from src.codewalk.analysis.code_parser import parse_file, GRAMMAR_MAP
 
         rows = []
+        metadata_rows = []
+        hierarchy_rows = []
+        member_rows = []
+        # class_name -> symbol_id within the same file, for same-file hierarchy.
+        class_ids_by_file: dict[str, dict[str, str]] = {}
 
         for file in files:
             if file["language"] not in GRAMMAR_MAP:
@@ -270,22 +391,37 @@ class GraphStore:
             read_path = file.get("absolute_path", file["file_path"])
             try:
                 parsed_file = parse_file(read_path, file["language"])
-                for item in parsed_file:
+                file_class_ids: dict[str, str] = {}
+                for idx, item in enumerate(parsed_file):
                     qualified_name = f"{file['file_path']}:{item['name']}"
                     symbol_id = _stable_id(
                         qualified_name,
                         file["file_path"],
-                        str(item["start_line"])
+                        str(item["start_line"]),
+                        str(idx),
                     )
                     rows.append((
                         symbol_id,
                         item["name"],
                         qualified_name,
                         file_id,
-                        item["type"],        # "function", "class"
+                        item["type"],
                         item["start_line"],
                         item["end_line"],
+                        item.get("parent_class"),
                     ))
+                    if item["type"] == "class":
+                        file_class_ids[item["name"]] = symbol_id
+                    meta = self._infer_symbol_metadata(item, file["language"])
+                    metadata_rows.append((
+                        symbol_id,
+                        meta.get("kind"),
+                        meta.get("http_method"),
+                        meta.get("http_path"),
+                        meta.get("event_name"),
+                        meta.get("cli_command"),
+                    ))
+                class_ids_by_file[file_id] = file_class_ids
             except Exception as e:
                 logger.warning(f"Failed to parse {file['file_path']}: {e}")
                 continue
@@ -293,10 +429,70 @@ class GraphStore:
         if rows:
             self.conn.executemany(
                 "INSERT INTO symbols "
-                "(symbol_id, name, qualified_name, file_id, symbol_type, start_line, end_line) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                "(symbol_id, name, qualified_name, file_id, symbol_type, start_line, end_line, parent_class) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                 rows
             )
+
+        # Build class hierarchy and class member rows now that symbol ids are deterministic.
+        for file in files:
+            if file["language"] not in GRAMMAR_MAP:
+                continue
+            file_id = _stable_id(file["file_path"])
+            read_path = file.get("absolute_path", file["file_path"])
+            file_class_ids = class_ids_by_file.get(file_id, {})
+            try:
+                parsed_file = parse_file(read_path, file["language"])
+                for idx, item in enumerate(parsed_file):
+                    qualified_name = f"{file['file_path']}:{item['name']}"
+                    symbol_id = _stable_id(
+                        qualified_name,
+                        file["file_path"],
+                        str(item["start_line"]),
+                        str(idx),
+                    )
+                    if item["type"] == "class":
+                        for base_name in item.get("bases", []):
+                            parent_id = file_class_ids.get(base_name)
+                            if parent_id:
+                                hierarchy_rows.append((symbol_id, parent_id))
+                    elif item["type"] == "function" and item.get("parent_class"):
+                        class_id = file_class_ids.get(item["parent_class"])
+                        if class_id:
+                            member_rows.append((class_id, symbol_id))
+            except Exception:
+                continue
+
+        return metadata_rows, hierarchy_rows, member_rows
+
+    def _populate_symbol_metadata(self, rows: list[tuple]):
+        """Insert symbol metadata (kind, route info, etc.)."""
+        if not rows:
+            return
+        self.conn.executemany(
+            "INSERT INTO symbol_metadata "
+            "(symbol_id, kind, http_method, http_path, event_name, cli_command) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            rows,
+        )
+
+    def _populate_class_hierarchy(self, rows: list[tuple]):
+        """Insert class inheritance edges."""
+        if not rows:
+            return
+        self.conn.executemany(
+            "INSERT OR IGNORE INTO class_hierarchy (class_symbol_id, parent_symbol_id) VALUES (?, ?)",
+            rows,
+        )
+
+    def _populate_class_members(self, rows: list[tuple]):
+        """Insert class-to-method containment edges."""
+        if not rows:
+            return
+        self.conn.executemany(
+            "INSERT OR IGNORE INTO class_members (class_symbol_id, member_symbol_id) VALUES (?, ?)",
+            rows,
+        )
 
     def _populate_symbol_calls(self, files: list[dict]):
         """Resolve call_extractor results against the symbols table."""

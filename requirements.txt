@@ -14,7 +14,6 @@ langchain-ollama
 sentence-transformers
 langgraph-checkpoint-sqlite
 
-
 # Vector store (local)
 chromadb
 
@@ -42,7 +41,7 @@ tree-sitter-php
 tree-sitter-yaml
 tree-sitter-kotlin
 tree-sitter-swift
- pymupdf
+PyMuPDF
 
 # Utilities
 pydantic
@@ -54,7 +53,7 @@ packaging
 # MCP
 mcp
 
-# Voice 
+# Voice
 faster-whisper
 edge-tts
 sounddevice
@@ -79,4 +78,4 @@ PyJWT
 PyGithub
 psycopg2-binary
 python-multipart
-pyyaml     
+pyyaml

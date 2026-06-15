@@ -9,9 +9,9 @@ from src.codewalk.config import settings
 
 logger = logging.getLogger("codewalk.eval")
 
-def _eval_dir() -> Path:
+def _eval_dir(repo_path: str = ".") -> Path:
     """Return .codewalk/eval/ for the current repo, creating if needed."""
-    base = Path(settings.repo_path) / ".codewalk" / "eval" / "runs"
+    base = Path(repo_path) / ".codewalk" / "eval" / "runs"
     base.mkdir(parents=True, exist_ok=True)
     return base.parent   # returns .codewalk/eval/
 
@@ -36,18 +36,19 @@ def _run_filename(mode: str, label: str | None = None) -> str:
     safe_label = label.replace("/", "-").replace(" ", "_")
     return f"{timestamp}_{mode}_{safe_label}.json"
 
-def save_run(eval_result: dict, label: str | None = None,) -> Path:
+def save_run(eval_result: dict, label: str | None = None, repo_path: str = ".") -> Path:
     """Save an evaluation run to .codewalk/eval/runs/.
 
     Args:
         eval_result: The dict returned by run_full_evaluation().
             Must have: "summary", "mode", "report", "eval_results".
         label: Optional label for the filename.
+        repo_path: Repo root for eval output directory.
 
     Returns:
         Path to the saved JSON file.
     """
-    eval_dir = _eval_dir()
+    eval_dir = _eval_dir(repo_path)
     mode = eval_result["mode"]
     filename = _run_filename(mode, label)
     filepath = eval_dir / "runs" / filename
@@ -87,16 +88,17 @@ def save_run(eval_result: dict, label: str | None = None,) -> Path:
     logger.info(f"[eval] Saved run to {filepath}")
     
     # Update history index
-    _append_to_history(eval_dir, filename, run_data["summary"])
+    _append_to_history(eval_dir, filename, run_data["label"], run_data["summary"])
 
     return filepath
 
-def _append_to_history(eval_dir: Path, filename: str, summary: dict) -> None:
+def _append_to_history(eval_dir: Path, filename: str, label: str, summary: dict) -> None:
     """Append a run entry to history.json.
 
     Args:
         eval_dir: .codewalk/eval/
         filename: Just the filename (not full path).
+        label: Run label used in the filename.
         summary: The summary dict from _build_summary().
     """
     history_path = eval_dir / "history.json"
@@ -110,18 +112,20 @@ def _append_to_history(eval_dir: Path, filename: str, summary: dict) -> None:
     # Append this run
     history.append({
         "filename": filename,
+        "label": label,
         "timestamp": datetime.now().isoformat(),
         **summary,
     })
 
     history_path.write_text(json.dumps(history, indent=2))
 
-def load_run(filename: str) -> dict:
+def load_run(filename: str, repo_path: str = ".") -> dict:
     """Load a saved evaluation run.
 
     Args:
         filename: Just the filename (e.g. "2026-06-03_142530_retrieval_mcp.json")
                   or a full path.
+        repo_path: Repo root for eval output directory.
 
     Returns:
         The saved run dict (same structure as save_run wrote).
@@ -131,38 +135,42 @@ def load_run(filename: str) -> dict:
     """
     path = Path(filename)
     if not path.is_absolute():
-        path = _eval_dir() / "runs" / filename
+        path = _eval_dir(repo_path) / "runs" / filename
 
     if not path.exists():
         raise FileNotFoundError(f"Run file not found: {path}")
-    
+
     return json.loads(path.read_text())
 
-def list_runs() -> list[dict]:
+def list_runs(repo_path: str = ".") -> list[dict]:
     """List all saved runs from history.json.
+
+    Args:
+        repo_path: Repo root for eval output directory.
 
     Returns:
         List of summary dicts, newest first.
     """
-    history_path = _eval_dir() / "history.json"
+    history_path = _eval_dir(repo_path) / "history.json"
     if not history_path.exists():
         return []
-    
+
     history = json.loads(history_path.read_text())
     return list(reversed(history))  # newest first
 
-def compare_runs(filename_a: str, filename_b: str,) -> str:
+def compare_runs(filename_a: str, filename_b: str, repo_path: str = ".") -> str:
     """Compare two saved runs and return a formatted delta report.
 
     Args:
         filename_a: Baseline run filename.
         filename_b: New run filename (compared against baseline).
+        repo_path: Repo root for eval output directory.
 
     Returns:
         Formatted comparison string.
     """
-    run_a = load_run(filename_a)
-    run_b = load_run(filename_b)
+    run_a = load_run(filename_a, repo_path=repo_path)
+    run_b = load_run(filename_b, repo_path=repo_path)
 
     summary_a = run_a["summary"]
     summary_b = run_b["summary"]
@@ -223,17 +231,18 @@ def compare_runs(filename_a: str, filename_b: str,) -> str:
     
     return "\n".join(lines)
 
-def trend(metric_key: str, mode: str | None = None,) -> str:
+def trend(metric_key: str, mode: str | None = None, repo_path: str = ".") -> str:
     """Show a metric's value across all saved runs.
 
     Args:
         metric_key: Key from summary dict (e.g. "avg_context_precision").
         mode: Filter runs by mode ("retrieval" or "full"). None = all.
+        repo_path: Repo root for eval output directory.
 
     Returns:
         Formatted trend string.
     """
-    runs = list_runs()  # newest first
+    runs = list_runs(repo_path)  # newest first
     runs.reverse()      # chronological for display
 
     if mode:

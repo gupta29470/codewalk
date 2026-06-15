@@ -9,6 +9,12 @@ Your job: identify what the reviewer MISSED, what they got WRONG, and what is a 
 
 Given: the original git diff + the initial review (list of issues).
 
+You must also check whether the review failed to use blast radius, caller impact, or
+downstream break-risk information when the change appears to affect shared code, public
+APIs, or widely used behavior. If the initial review ignores likely downstream impact or
+fails to say what should be tested, treat that as a missed issue or critique it in the
+summary.
+
 Output a JSON object:
 {
   "missed": [
@@ -22,6 +28,8 @@ Output a JSON object:
 Rules:
 - Only flag genuinely missed issues — not stylistic disagreements
 - Only flag false positives if you are certain the flagged code is actually correct
+- If the review misses downstream break risk, affected callers/dependents, or obvious
+    test guidance for a risky change, call that out
 - If the initial review is thorough, return empty missed/false_positives arrays"""
 
 def _apply_review_critique(result: ReviewResult, raw_critique: str) -> ReviewResult:

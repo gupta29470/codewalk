@@ -487,6 +487,7 @@ export const api = {
             answer: string;
             speech: string;
             audio_base64: string;
+            tool?: string;
         }>;
     },
 };

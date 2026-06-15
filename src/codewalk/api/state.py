@@ -38,6 +38,14 @@ _db = None  # Postgres connection wrapper — cloud mode only
 pending_update: str | None = None  # Set by MCP ensure_local_index when remote is newer
 
 
+def _resolve_repo_path(repo_path: str | None = None) -> str:
+    """Return the explicitly provided repo path or the current session state."""
+    path = (repo_path or _repo_path or "").strip()
+    if not path:
+        raise RuntimeError("repo_path is required but was not provided")
+    return path
+
+
 class _PgHelper:
     """Thin wrapper around psycopg2 connection for cloud.py/worker convenience.
     Provides fetchone/fetchall/execute with positional $1/$2 params."""
@@ -223,7 +231,7 @@ def initialize(store: VectorStore, agent, modules_result: dict, analyze_result: 
 
         # Build DuckDB + deps + modules + docs + guidelines via shared function
         if files:
-            repo = _repo_path or settings.repo_path
+            repo = _resolve_repo_path()
             db_path = f"{repo.rstrip('/')}/.codewalk/graph.duckdb"
             if _graph_store is not None:
                 _graph_store.close()
@@ -242,7 +250,11 @@ def initialize(store: VectorStore, agent, modules_result: dict, analyze_result: 
             # Reopen for runtime queries + recreate agent
             _graph_store = GraphStore(db_path)
             _graph_runtime = GraphRuntime(_graph_store)
-            _agent = create_agent(_store, _modules_result, files=_files, deps=_deps, graph_runtime=_graph_runtime, graph_store=_graph_store)
+            _agent = create_agent(
+                _store, _modules_result, files=_files, deps=_deps,
+                graph_runtime=_graph_runtime, graph_store=_graph_store,
+                repo_path=repo,
+            )
 
 
 def refresh(files: list[dict], deps: dict, modules_result: dict):
@@ -251,7 +263,7 @@ def refresh(files: list[dict], deps: dict, modules_result: dict):
     from src.codewalk.pipeline import build_full_analysis
 
     with _state_lock:
-        repo = _repo_path or settings.repo_path
+        repo = _resolve_repo_path()
         db_path = f"{repo.rstrip('/')}/.codewalk/graph.duckdb"
         if _graph_store is not None:
             _graph_store.close()
@@ -273,14 +285,14 @@ INDEX_REQUIRED_MCP = "No index found. Call codewalk_analyze_codebase first."
 
 
 def set_repo_path(repo_path: str) -> None:
-    """Set active repo path for index lookups (MCP REPO_PATH / API request)."""
+    """Set active repo path for index lookups (MCP workspace / API request)."""
     global _repo_path
     _repo_path = repo_path
 
 
 def get_repo_path() -> str:
-    """Return the current repo path (from state or settings fallback)."""
-    return _repo_path or settings.repo_path
+    """Return the current repo path from session state."""
+    return _resolve_repo_path()
 
 
 def get_collection_name() -> str:
@@ -290,13 +302,13 @@ def get_collection_name() -> str:
 
 def chroma_path() -> str:
     """ChromaDB directory stored inside the target repo: {repo_path}/.codewalk/chroma/"""
-    repo = (_repo_path or settings.repo_path).rstrip("/")
+    repo = _resolve_repo_path().rstrip("/")
     return f"{repo}/.codewalk/chroma"
 
 
 def scan_repo_files(repo_path: str | None = None) -> list[dict]:
     """Scan repo respecting codewalk.yaml indexing.exclude (same as cloud indexer)."""
-    path = (repo_path or _repo_path or settings.repo_path).rstrip("/")
+    path = _resolve_repo_path(repo_path).rstrip("/")
     config = load_codewalk_yaml(path)
     if config.exclude:
         files = team_scan_directory(path, config)
@@ -309,7 +321,7 @@ def scan_repo_files(repo_path: str | None = None) -> list[dict]:
 def _rebuild_memory_caches():
     """Re-scan files and rebuild in-memory caches only. Does NOT touch DuckDB."""
     global _files, _deps, _modules_result, _repo_path
-    repo_path = _repo_path or settings.repo_path
+    repo_path = _resolve_repo_path()
     _repo_path = repo_path
     _files = scan_repo_files(repo_path)
     _deps = build_dependency_graph(_files)
@@ -338,7 +350,7 @@ def _collection_name_for_path(repo_path: str) -> str:
 
 def index_on_disk(repo_path: str | None = None) -> bool:
     """True if .codewalk has chroma + duckdb and at least one embedded chunk."""
-    path = (repo_path or _repo_path or settings.repo_path).rstrip("/")
+    path = _resolve_repo_path(repo_path).rstrip("/")
     chroma = f"{path}/.codewalk/chroma"
     duckdb = f"{path}/.codewalk/graph.duckdb"
     if not os.path.isdir(chroma) or not os.path.isfile(duckdb):
@@ -353,15 +365,17 @@ def _wire_query_state():
     global _store, _agent, _analyze_result
     from src.codewalk.agent.graph import create_agent
 
+    repo = get_repo_path()
     _store = VectorStore(persist_dir=chroma_path())
     _store.create_collection(get_collection_name())
     if _graph_store:
         _graph_store.populate_chunks_from_chromadb(_store)
-    _analyze_result = {"repo_path": get_repo_path(), "skipped": True}
+    _analyze_result = {"repo_path": repo, "skipped": True}
     if _store is not None and _modules_result is not None:
         _agent = create_agent(
             _store, _modules_result, files=_files, deps=_deps,
             graph_runtime=_graph_runtime, graph_store=_graph_store,
+            repo_path=repo,
         )
 
 
@@ -369,7 +383,7 @@ def load_scoped_analysis():
     """Load team-scoped caches + existing DuckDB/Chroma from disk. Does not re-embed."""
     global _files, _deps, _modules_result, _repo_path, _graph_store, _graph_runtime
 
-    repo_path = _repo_path or settings.repo_path
+    repo_path = _resolve_repo_path()
     _repo_path = repo_path
     _files = scan_repo_files(repo_path)
     _deps = build_dependency_graph(_files)
@@ -398,7 +412,7 @@ def rebuild_analysis_cache(embedded_chunks: list[dict] | None = None,
     from src.codewalk.pipeline import build_full_analysis
 
     with _state_lock:
-        repo_path = _repo_path or settings.repo_path
+        repo_path = _resolve_repo_path()
         _repo_path = repo_path
         db_path = f"{repo_path.rstrip('/')}/.codewalk/graph.duckdb"
 

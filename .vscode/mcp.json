@@ -6,9 +6,8 @@
                 "-m",
                 "src.codewalk.mcp.server"
             ],
-            "cwd": "/Users/amadhavl/Development/codewalk",
+            "cwd": "${workspaceFolder}",
             "env": {
-                "REPO_PATH": "${workspaceFolder}",
                 "EXCLUDE_PATHS": "test,docs",
                 "REVIEW_GUIDELINES_PATH": "",
                 "CODE_DOCS_PATH": "",

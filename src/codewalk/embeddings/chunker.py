@@ -36,7 +36,7 @@ def read_file_content(file_path: str) -> str:
     """Read a file's content. Return empty string if it can't be read."""
     try:
         return Path(file_path).read_text(encoding="utf-8")
-    except (UnicodeDecodeError, PermissionError):
+    except (UnicodeDecodeError, PermissionError, FileNotFoundError, OSError):
         return ""
     
 def get_splitter(language: str, chunk_size: int = 1000, chunk_overlap: int = 200):
