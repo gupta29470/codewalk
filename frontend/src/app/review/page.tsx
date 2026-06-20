@@ -92,7 +92,27 @@ export default function ReviewPage() {
         setFileReview("");
         try {
             const res = await api.reviewFile(filePath.trim());
-            setFileReview(res.review);
+            const issueLines = res.issues.length
+                ? res.issues
+                      .map(
+                          (issue) =>
+                              `- **[${issue.severity}]** ${issue.file_path}${issue.line_number !== null ? `:${issue.line_number}` : ""} — ${issue.title}\n  ${issue.explanation}`
+                      )
+                      .join("\n")
+                : "✅ No issues found";
+            const md = [
+                `## File Review: ${res.file_path}`,
+                `**Verdict:** ${res.verdict}`,
+                "",
+                res.verdict_reason,
+                "",
+                "### Summary",
+                res.summary,
+                "",
+                "### Issues",
+                issueLines,
+            ].join("\n");
+            setFileReview(md);
         } catch (err) {
             setFileError(err instanceof Error ? err.message : "Review failed");
         } finally {
@@ -143,9 +163,17 @@ export default function ReviewPage() {
 
         try {
             const res = await api.applyFixes(payload);
-            setApplyResult(`Applied ${res.applied.length}/${res.total} fixes successfully.`);
-            if (res.applied.length === res.total) {
-                setFixes([]);
+            if (res.failed && res.failed.length > 0) {
+                const first = res.failed[0];
+                setApplyError(
+                    `Fix ${first.index + 1} failed: ${first.error}` +
+                    (res.failed.length > 1 ? ` (${res.failed.length} total failures)` : "")
+                );
+            } else {
+                setApplyResult(`Applied ${res.applied.length}/${res.total} fixes successfully.`);
+                if (res.applied.length === res.total) {
+                    setFixes([]);
+                }
             }
         } catch (err) {
             setApplyError(err instanceof Error ? err.message : "Apply fixes failed");
@@ -357,8 +385,8 @@ export default function ReviewPage() {
                     </CardHeader>
                     <CardContent className="space-y-4">
                         <p className="text-sm text-muted-foreground">
-                            Load your team&apos;s coding standards (.md, .txt, .rst) so reviews check against them.
-                            Leave empty to use the configured REVIEW_GUIDELINES_PATH.
+                            Load your team&apos;s coding standards (.md, .txt, .rst, .pdf) so reviews check against them.
+                            Reviews automatically use guidelines configured in codewalk.yaml; use this only to load an explicit directory.
                         </p>
                         <div className="flex gap-2">
                             <Input

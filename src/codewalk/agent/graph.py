@@ -113,6 +113,7 @@ def create_agent(
     graph_runtime: GraphRuntime | None = None,
     graph_store: GraphStore | None = None,
     repo_path: str | None = None,
+    checkpoint_path: str | None = None,
 ):
     """Build and compile a LangGraph agent with tools and memory.
 
@@ -123,6 +124,7 @@ def create_agent(
         deps: build_dependency_graph() result (for blast radius).
         graph_runtime: Optional GraphRuntime for igraph fast path.
         repo_path: Root of the repository the agent operates on.
+        checkpoint_path: Optional SQLite checkpoint path (defaults to `.codewalk/checkpoints.sqlite`).
 
     Returns:
         Compiled StateGraph — call it with .invoke() or .stream().
@@ -218,4 +220,4 @@ def create_agent(
 
     # ── Step 6: Compile with memory ──────────────────────────────
     from src.codewalk.core.hitl import compile_with_hitl
-    return compile_with_hitl(graph, interrupt_nodes=["write_tools"])
+    return compile_with_hitl(graph, interrupt_nodes=["write_tools"], checkpoint_path=checkpoint_path)

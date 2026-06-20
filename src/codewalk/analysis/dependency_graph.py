@@ -2,8 +2,6 @@ import logging
 from pathlib import Path
 from platform import node
 
-from tree_sitter_cpp import language
-
 from src.codewalk.log import log as _log
 
 logger = logging.getLogger("codewalk")
@@ -58,10 +56,10 @@ def extract_imports(file_path: str, language: str) -> list[str]:
     imports = []
 
     for node in _walk_for_imports(root, target_types):
-        raw_import = _extract_raw_import(node, language)
-        if raw_import:
-            imports.append(raw_import)
-    
+        raw_imports = _extract_raw_import(node, language)
+        if raw_imports:
+            imports.extend(raw_imports)
+
     return imports
 
 def _walk_for_imports(node, target_types):
@@ -91,30 +89,66 @@ def _extract_dart_import(node) -> str:
                                     return uri_node.text.decode("utf-8").strip("'\"")
     return ""
 
-def _extract_raw_import(node, language) -> str:
-    """Given an import AST node, extract the module/path being imported.
+def _extract_raw_import(node, language) -> list[str]:
+    """Given an import AST node, extract the module/path(s) being imported.
 
     Different languages have different import structures in the AST.
+    Returns a list because Python ``import os, sys`` declares two imports.
     """
-    if language == "python":
-        for child in node.children:
-            if child.type == "dotted_name":
-                return child.text.decode("utf-8")
-            if child.type == "relative_import":
-                dotted = child.child_by_field_name("dotted_name")
-                if dotted:
-                    return dotted.text.decode("utf-8")
 
-        return ""
-    
+    def _single(text: str) -> list[str]:
+        return [text] if text else []
+
+    if language == "python":
+        imports: list[str] = []
+
+        if node.type == "import_statement":
+            # import a, b.c, d
+            for child in node.children:
+                if child.type == "dotted_name":
+                    imports.append(child.text.decode("utf-8"))
+            return imports
+
+        if node.type == "import_from_statement":
+            # from <module> import names...
+            # Module is either a relative_import (e.g. ".", ".pkg") or a dotted_name.
+            module_node = None
+            for child in node.children:
+                if child.type == "relative_import":
+                    module_node = child
+                    break
+                if child.type == "dotted_name":
+                    # First dotted_name after 'from' is the module.
+                    module_node = child
+                    break
+
+            if module_node is None:
+                return imports
+
+            module_text = module_node.text.decode("utf-8")
+
+            # Relative imports like "from . import a, b" need each imported name
+            # to be treated as a submodule. "from .pkg import a" resolves to .pkg.
+            if module_node.type == "relative_import" and module_text.rstrip(".") == "":
+                dots = module_text
+                for child in node.children:
+                    if child.type == "dotted_name" and child is not module_node:
+                        imports.append(f"{dots}{child.text.decode('utf-8')}")
+                return imports
+
+            imports.append(module_text)
+            return imports
+
+        return imports
+
     if language in ("javascript", "typescript"):
         # ES module: import_statement → string child
         if node.type == "import_statement":
             for child in node.children:
                 if child.type == "string":
-                    return child.text.decode("utf-8").strip("'\"")
-            return ""
-        
+                    return _single(child.text.decode("utf-8").strip("'\""))
+            return []
+
         # CommonJS: require('./path') — call_expression with "require" function
         if node.type == "call_expression":
             func = node.child_by_field_name("function")
@@ -123,57 +157,57 @@ def _extract_raw_import(node, language) -> str:
                 if args:
                     for arg in args.children:
                         if arg.type == "string":
-                            return arg.text.decode("utf-8").strip("'\"")
-            return ""
-        
-        return ""
-    
+                            return _single(arg.text.decode("utf-8").strip("'\""))
+            return []
+
+        return []
+
     if language == "dart":
-        return _extract_dart_import(node)
-    
+        return _single(_extract_dart_import(node))
+
     if language == "java":
         for child in node.children:
             if child.type == "scoped_identifier":
-                return child.text.decode("utf-8")
-        
-        return ""
-    
+                return _single(child.text.decode("utf-8"))
+
+        return []
+
     if language == "go":
         for child in node.children:
             if child.type == "interpreted_string_literal":
-                return child.text.decode("utf-8").strip('"')
-            
-        return ""
-    
+                return _single(child.text.decode("utf-8").strip('"'))
+
+        return []
+
     if language in ("c", "cpp"):
         for child in node.children:
             if child.type in ("string_literal", "system_lib_string"):
-                return child.text.decode("utf-8").strip('"<>')
-        
-        return ""
-    
+                return _single(child.text.decode("utf-8").strip('"<>'))
+
+        return []
+
     if language == "rust":
         for child in node.children:
             if child.type in ("scoped_identifier", "identifier", "use_wildcard"):
-                return child.text.decode("utf-8")
-            
-        return ""
-    
+                return _single(child.text.decode("utf-8"))
+
+        return []
+
     if language == "csharp":
         for child in node.children:
             if child.type in ("qualified_name", "identifier"):
-                return child.text.decode("utf-8")
-            
-        return ""
-    
+                return _single(child.text.decode("utf-8"))
+
+        return []
+
     if language == "php":
         for child in node.children:
             if child.type == "namespace_use_clause":
                 for c in child.children:
                     if c.type == "qualified_name":
-                        return c.text.decode("utf-8")
-        return ""
-    
+                        return _single(c.text.decode("utf-8"))
+        return []
+
     if language == "ruby":
         if node.type == "call":
             text = node.text.decode("utf-8")
@@ -182,23 +216,23 @@ def _extract_raw_import(node, language) -> str:
                     if child.type == "argument_list":
                         for arg in child.children:
                             if arg.type == "string":
-                                return arg.text.decode("utf-8").strip("'\"")
-                            
-        return ""
-    
+                                return _single(arg.text.decode("utf-8").strip("'\""))
+
+        return []
+
     if language == "kotlin":
-      for child in node.children:
-          if child.type == "qualified_identifier":
-              return child.text.decode("utf-8")
-      return ""
+        for child in node.children:
+            if child.type == "qualified_identifier":
+                return _single(child.text.decode("utf-8"))
+        return []
 
     if language == "swift":
-      for child in node.children:
-          if child.type == "identifier":
-              return child.text.decode("utf-8")
-      return ""
-    
-    return ""
+        for child in node.children:
+            if child.type == "identifier":
+                return _single(child.text.decode("utf-8"))
+        return []
+
+    return []
 
 def _resolve_java(raw_import: str, all_files: list[str]) -> str:
     """Resolve Java import by finding source root directories."""
@@ -252,7 +286,36 @@ def resolve_import_to_file(raw_import: str,language: str, all_files: list[str], 
                      (needed for relative import resolution).
     """
     if language == "python":
-        as_path = raw_import.replace(".", "/")
+        import posixpath
+
+        if raw_import.startswith("."):
+            if not source_file:
+                return raw_import
+
+            source_dir = posixpath.dirname(source_file)
+            # Count leading dots to determine how many package levels to walk up.
+            level = 0
+            for ch in raw_import:
+                if ch == ".":
+                    level += 1
+                else:
+                    break
+            remainder = raw_import[level:].replace(".", "/")
+
+            parts = source_dir.split("/")
+            # level=1 (same package) keeps source_dir; level=2 goes up one, etc.
+            if len(parts) < level - 1:
+                return raw_import
+            base_parts = parts[: len(parts) - (level - 1)] if level > 1 else parts
+            base = "/".join(base_parts)
+
+            if remainder:
+                as_path = f"{base}/{remainder}" if base else remainder
+            else:
+                as_path = base
+        else:
+            as_path = raw_import.replace(".", "/")
+
         candidates = [f"{as_path}.py", f"{as_path}/__init__.py"]
         for candidate in candidates:
             if candidate in all_files:
@@ -260,7 +323,7 @@ def resolve_import_to_file(raw_import: str,language: str, all_files: list[str], 
         match = _suffix_match(as_path, [".py", "/__init__.py"], all_files)
         if match:
             return match
-            
+
     elif language in ("javascript", "typescript"):
         if raw_import.startswith("."):
             import posixpath
@@ -314,12 +377,31 @@ def resolve_import_to_file(raw_import: str,language: str, all_files: list[str], 
         return _resolve_java(raw_import, all_files)
             
     elif language == "go":
+        import posixpath
         parts = raw_import.strip("/").split("/")
         last_part = parts[-1] if parts else ""
+        # Try to match the import path suffix against the file's parent directory
+        # suffix. e.g. "github.com/user/repo/pkg/util" should resolve to a file
+        # inside a "pkg/util" directory, not any path that happens to contain
+        # the word "util".
+        best_match: str | None = None
+        best_depth = 0
         for file in all_files:
-            if file.endswith(".go") and f"/{last_part}/" in f"/{file}":
-                return file
-            
+            if not file.endswith(".go"):
+                continue
+            file_parts = file.split("/")
+            parent_parts = file_parts[:-1]
+            if last_part not in parent_parts:
+                continue
+            for i in range(len(parent_parts)):
+                suffix = parent_parts[i:]
+                if len(suffix) > best_depth and parts[-len(suffix):] == suffix:
+                    best_match = file
+                    best_depth = len(suffix)
+                    break
+        if best_match:
+            return best_match
+
     elif language == "rust":
         if raw_import.startswith("crate"):
             import posixpath

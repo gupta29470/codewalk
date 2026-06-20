@@ -25,7 +25,13 @@ _CHUNK_GRADER_PROMPT = ChatPromptTemplate.from_messages([
      "that directly helps answer the question.\n"
      "A chunk is irrelevant if it's from the right file but wrong function, "
      "or from a completely unrelated part of the codebase.\n\n"
-     "Return a grade for every chunk — do not skip any."),
+     "Examples:\n"
+     "- Question: 'How does scan_directory work?' → chunk containing the "
+     "  `scan_directory` function definition is RELEVANT.\n"
+     "- Question: 'How does authentication work?' → chunk containing a "
+     "  logging helper from auth.py is IRRELEVANT (wrong function).\n\n"
+     "Return a grade for every chunk — do not skip any. If a chunk is missing "
+     "from your output, it will be treated as irrelevant."),
     ("human",
      "Question: {question}\n\n"
      "Retrieved chunks:\n{chunks}\n\n"
@@ -81,7 +87,15 @@ def grade_chunks(question: str, results: list[dict]) -> list[dict]:
     })
 
     # Filter to only relevant chunks
+    graded_indices = {g.index for g in grade_result.grades}
     relevant_indices = {g.index for g in grade_result.grades if g.relevant}
+
+    # Safety: if the LLM omitted any indices, keep those chunks rather than dropping them.
+    missing_indices = set(range(len(results))) - graded_indices
+    if missing_indices:
+        _log(f"[chunk_grader] {len(missing_indices)} chunk(s) missing grades; keeping them")
+        relevant_indices |= missing_indices
+
     filtered = [r for i, r in enumerate(results) if i in relevant_indices]
 
     _log(f"[chunk_grader] {len(filtered)}/{len(results)} chunks graded relevant")

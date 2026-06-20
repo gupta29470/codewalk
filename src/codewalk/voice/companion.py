@@ -11,6 +11,33 @@ from src.codewalk.voice.router import route
 from src.codewalk.voice.backends import execute_direct, execute_mcp_sync
 
 
+VOICE_NARRATIVE_PROMPT = """You receive raw output from a codebase analysis tool.
+Your job: produce ONLY a spoken narrative that will be read aloud by a TTS engine.
+
+You are giving a live demo to a new team member. Explain what this code DOES,
+how the pieces connect, and what pattern or architecture it follows.
+
+STRICT RULES:
+- ONLY plain words and numbers. Nothing else.
+- FORBIDDEN characters: * _ ` # ~ [ ] ( ) { } | / \\ > < @ ! $ % ^ & = + ;
+- NO markdown, NO emoji, NO code, NO URLs, NO file paths.
+- NEVER name files directly. Say 'the events layer', 'the state handler',
+  'the service', 'the entry point'.
+- Lead with the PATTERN or ARCHITECTURE: 'This follows the BLoC pattern',
+  'This is a repository layer', 'This uses pub-sub'.
+- Then explain the FLOW with cause-and-effect: 'when a user does X,
+  that fires an event, which triggers the handler to update state,
+  and the UI rebuilds automatically'.
+- Use connectors: 'first, then, this means, so when, because of that,
+  which in turn'.
+- 3-6 sentences. Tell a story, not a list.
+- Sound like a senior dev walking someone through a whiteboard.
+- Include enough technical substance that the listener learns something —
+  mention class roles, design decisions, data flow direction.
+- NEVER start with 'here is' or 'the output shows' or 'based on the analysis'.
+"""
+
+
 def _clean_for_speech(text: str) -> str:
     """Strip markdown, file paths, and code artifacts so TTS sounds natural."""
     # Remove code blocks
@@ -51,30 +78,7 @@ def format_voice_response(raw_result: str) -> dict:
     try:
         llm = get_llm(temperature=0.3)
         response = llm.invoke([
-            {"role": "system", "content": (
-                "You receive raw output from a codebase analysis tool. "
-                "Your job: produce ONLY a spoken narrative that will be read aloud by a TTS engine.\n\n"
-                "You are giving a live demo to a new team member. Explain what this code DOES, "
-                "how the pieces connect, and what pattern/architecture it follows.\n\n"
-                "STRICT RULES:\n"
-                "- ONLY plain words and numbers. Nothing else.\n"
-                "- FORBIDDEN characters: * _ ` # ~ [ ] ( ) { } | / \\ > < @ ! $ % ^ & = + ;\n"
-                "- NO markdown, NO emoji, NO code, NO URLs, NO file paths.\n"
-                "- NEVER name files directly. Say 'the events layer', 'the state handler', "
-                "'the service', 'the entry point'.\n"
-                "- Lead with the PATTERN or ARCHITECTURE: 'This follows the BLoC pattern', "
-                "'This is a repository layer', 'This uses pub-sub'.\n"
-                "- Then explain the FLOW with cause-and-effect: 'when a user does X, "
-                "that fires an event, which triggers the handler to update state, "
-                "and the UI rebuilds automatically'.\n"
-                "- Use connectors: 'first, then, this means, so when, because of that, "
-                "which in turn'.\n"
-                "- 3-6 sentences. Tell a story, not a list.\n"
-                "- Sound like a senior dev walking someone through a whiteboard.\n"
-                "- Include enough technical substance that the listener learns something — "
-                "mention class roles, design decisions, data flow direction.\n"
-                "- NEVER start with 'here is' or 'the output shows' or 'based on the analysis'."
-            )},
+            {"role": "system", "content": VOICE_NARRATIVE_PROMPT},
             {"role": "user", "content": raw_result[:4000]},
         ])
 

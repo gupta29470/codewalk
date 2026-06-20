@@ -215,15 +215,11 @@ class GraphStore:
             module_results: From detect_modules() — {"modules": {...}, "module_graph": {...}}
         """
         # Clear in reverse FK order: children before parents.
-        if embedded_chunks:
-            # Incremental: delete only chunks for files being re-embedded.
-            changed_files = {_stable_id(c["file_path"]) for c in embedded_chunks}
-            for fid in changed_files:
-                self.conn.execute("DELETE FROM chunks WHERE file_id = ?", [fid])
-        else:
-            # Full rebuild (no new chunks): delete ALL chunks to satisfy FK constraint
-            # before files table is cleared below.
-            self.conn.execute("DELETE FROM chunks")
+        # Always delete ALL chunks first. During incremental reindex, files removed
+        # from disk are no longer in embedded_chunks, but their old chunks in
+        # DuckDB would still reference files.file_id and break the FK constraint
+        # when we clear the files table below.
+        self.conn.execute("DELETE FROM chunks")
         self.conn.execute("DELETE FROM symbol_calls")
         self.conn.execute("DELETE FROM class_members")
         self.conn.execute("DELETE FROM class_hierarchy")
@@ -752,7 +748,7 @@ class GraphStore:
     We map each chunk to:
         - file_id: _stable_id(file_path) — matches files table
         - symbol_id: looked up from symbols table by name + file
-        - embedding_id: the ChromaDB ID format "file_path::chunkN"
+        - embedding_id: the ChromaDB ID format "file_path::chunk_type::chunk_index"
         - content_hash: for incremental reindex (skip unchanged)
     """
         symbol_lookup = {}
@@ -768,6 +764,7 @@ class GraphStore:
         for chunk in embedded_chunks:
             file_path = chunk["file_path"]
             chunk_index = chunk.get("chunk_index", 0)
+            chunk_type = chunk.get("chunk_type", "leftover")
             symbol_name = chunk.get("symbol_name")
 
             file_id = _stable_id(file_path)
@@ -776,9 +773,9 @@ class GraphStore:
             if symbol_name:
                 symbol_id = symbol_lookup.get((file_path, symbol_name))
 
-            embedding_id = f"{file_path}::chunk{chunk_index}"
+            embedding_id = f"{file_path}::{chunk_type}::{chunk_index}"
 
-            chunk_id = _stable_id(file_path, str(chunk_index))
+            chunk_id = _stable_id(file_path, chunk_type, str(chunk_index))
 
             rows.append((
                 chunk_id,
@@ -832,6 +829,7 @@ class GraphStore:
         for meta in result["metadatas"]:
             file_path = meta.get("file_path", "")
             chunk_index = meta.get("chunk_index", 0)
+            chunk_type = meta.get("chunk_type", "leftover")
             symbol_name = meta.get("symbol_name", "")
 
             file_id = _stable_id(file_path)
@@ -840,8 +838,8 @@ class GraphStore:
             if symbol_name:
                 symbol_id = symbol_lookup.get((file_path, symbol_name))
 
-            embedding_id = f"{file_path}::chunk{chunk_index}"
-            chunk_id = _stable_id(file_path, str(chunk_index))
+            embedding_id = f"{file_path}::{chunk_type}::{chunk_index}"
+            chunk_id = _stable_id(file_path, chunk_type, str(chunk_index))
 
             rows.append((
                 chunk_id,

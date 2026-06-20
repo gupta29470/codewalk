@@ -13,7 +13,12 @@ If the chunks don't answer the question, say so clearly.
 Sub-question: {sub_question}
 
 Code chunks:
-{chunks}"""
+{chunks}
+
+Return your answer as structured markdown with this format:
+- **Finding**: one-sentence summary
+- **Evidence**: bullet points with `file/path.py:line` citations and brief code snippets
+- **Confidence**: high / medium / low — based on how directly the chunks answer the question"""
 
 @dataclass
 class SubFindings:

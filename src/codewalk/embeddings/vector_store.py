@@ -72,6 +72,27 @@ class VectorStore:
                     file_paths.add(meta["file_path"])
             offset += BATCH_SIZE
         return file_paths
+
+    def get_all_chunks(self) -> list[dict]:
+        """Return all parent chunk metadata from ChromaDB.
+
+        Used to fully rebuild DuckDB + knowledge graph after an incremental
+        reindex, so the graph store contains every chunk (not just changed ones).
+        """
+        BATCH_SIZE = 5000
+        offset = 0
+        chunks: list[dict] = []
+        while True:
+            batch = self.parents_collection.get(
+                include=["metadatas"],
+                limit=BATCH_SIZE,
+                offset=offset,
+            )
+            if not batch["ids"]:
+                break
+            chunks.extend(batch["metadatas"])
+            offset += BATCH_SIZE
+        return chunks
     
     def delete_by_file(self, file_path: str):
         """Delete ALL chunks for a specific file from all collections."""

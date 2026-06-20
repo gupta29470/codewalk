@@ -11,10 +11,127 @@ from src.codewalk.rag.answer_grader import grade_answer
 from src.codewalk.rag.query_rewriter import rewrite_query
 from src.codewalk.rag.chunk_grader import grade_chunks
 from src.codewalk.rag.graph_expansion import expand_via_graph
+from src.codewalk.rag.query_expander import expand_query
+from src.codewalk.rag.symbol_lookup import lookup_symbol
+from src.codewalk.rag.reranker import rerank_chunks
 
 logger = logging.getLogger("codewalk")
 
 MAX_RETRIES = 5
+
+
+def _dynamic_n_results(question: str, base: int = 5) -> int:
+    """Choose retrieval depth based on query complexity."""
+    lowered = question.lower()
+    overview_indicators = ["overview", "summary", "architecture", "how does", "explain", "flow"]
+    if any(ind in lowered for ind in overview_indicators):
+        return max(base, 12)
+    return base
+
+
+def _deduplicate_chunks(chunks: list[dict]) -> list[dict]:
+    """Deduplicate chunks by a stable key built from file + symbol + line range."""
+    seen = set()
+    unique = []
+    for chunk in chunks:
+        meta = chunk.get("metadata", {})
+        key = (
+            meta.get("file_path", ""),
+            meta.get("symbol_name", ""),
+            meta.get("start_line", 0),
+            meta.get("end_line", 0),
+        )
+        if key in seen:
+            continue
+        seen.add(key)
+        unique.append(chunk)
+    return unique
+
+
+def _retrieve_with_fallbacks(
+    question: str,
+    store,
+    graph_store=None,
+    n_results: int = 5,
+    use_expansion: bool = True,
+    use_reranker: bool = False,
+) -> tuple[list[dict], float, bool]:
+    """Retrieve chunks with symbol lookup, expansion, and reranking.
+
+    Returns:
+        (chunks, confidence, retrieval_good)
+    """
+    from src.codewalk.rag.chunk_grader import grade_chunks_free
+
+    n_results = _dynamic_n_results(question, n_results)
+    all_chunks: list[dict] = []
+
+    # ── Layer 0: Deterministic symbol lookup ──
+    symbol_chunks = lookup_symbol(graph_store, store, question)
+    if symbol_chunks:
+        all_chunks.extend(symbol_chunks)
+        _log(f"[retrieve] symbol lookup added {len(symbol_chunks)} chunks")
+
+    # ── Layer 1: Semantic search ──
+    semantic_results = store.search(question, n_results=n_results)
+    if semantic_results:
+        all_chunks.extend(semantic_results)
+
+    if not all_chunks:
+        return [], 0.0, False
+
+    all_chunks = _deduplicate_chunks(all_chunks)
+    total_retrieved = len(all_chunks)
+    filtered, confidence = filter_by_distance(all_chunks)
+
+    # ── Layer 2: Retrieval quality check ──
+    retrieval_good = is_retreival_good(confidence, len(filtered))
+
+    # ── Layer 2a: Query expansion + multi-query retrieval ──
+    if use_expansion and not retrieval_good:
+        try:
+            expanded = expand_query(question)
+            extra_queries = expanded.queries[1:] if len(getattr(expanded, "queries", [])) > 1 else []
+            for q in extra_queries:  # skip original; already searched
+                extra = store.search(q, n_results=n_results)
+                filtered.extend(extra)
+            filtered = _deduplicate_chunks(filtered)
+            if expanded.symbol_hint:
+                hint_chunks = lookup_symbol(
+                    graph_store, store, expanded.symbol_hint, include_callers=False
+                )
+                if hint_chunks:
+                    filtered = _deduplicate_chunks(hint_chunks + filtered)
+            # Recompute distance filter after expansion
+            filtered, confidence = filter_by_distance(filtered)
+            retrieval_good = is_retreival_good(confidence, len(filtered))
+            _log(f"[retrieve] query expansion → {len(filtered)} chunks")
+        except Exception as e:
+            _log(f"[retrieve] query expansion failed: {e}")
+
+    # ── Layer 2b: Graph expansion fallback ──
+    if not retrieval_good and graph_store and filtered:
+        expanded = expand_via_graph(filtered, store, question, graph_store)
+        if len(expanded) > len(filtered):
+            filtered = expanded
+            confidence = max(confidence, 0.3)
+            retrieval_good = is_retreival_good(confidence, len(filtered))
+            _log(f"[retrieve] graph expansion recovered {len(expanded)} chunks")
+
+    if not filtered:
+        filtered = all_chunks
+
+    # ── Layer 3: Keyword-based chunk grading ──
+    graded = grade_chunks_free(question, filtered)
+    if graded:
+        filtered = graded
+
+    # ── Layer 4: Optional LLM reranker ──
+    if use_reranker:
+        filtered = rerank_chunks(question, filtered, top_k=n_results)
+
+    return filtered, confidence, retrieval_good
+
 
 def format_context(results: list[dict]) -> str:
     """Turn search results into a rich context string for the prompt.
@@ -44,11 +161,14 @@ def format_context(results: list[dict]) -> str:
 
     return "\n\n".join(parts)
 
+
 def ask(question: str, store: VectorStore, n_results: int = 5) -> str:
     _log(f"[rag] Question: {question[:80]}...")
     """Full RAG pipeline: question → retrieve → prompt → LLM → answer."""
     # 1. Retrieve relevant chunks from ChromaDB
-    results = store.search(question, n_results=n_results)
+    results, _, _ = _retrieve_with_fallbacks(
+        question, store, n_results=n_results, use_expansion=False, use_reranker=False
+    )
 
     # 2. Format chunks into context string
     context = format_context(results)
@@ -76,15 +196,9 @@ def ask(question: str, store: VectorStore, n_results: int = 5) -> str:
 
 def retrieve_corrective(question: str, store, n_results: int = 5,
                         graph_store=None) -> dict:
-    """Corrective retrieval: distance filter → graph expansion → free chunk grade.
+    """Corrective retrieval with symbol lookup, expansion, and keyword grading.
 
-    Same L1→L2→L2b→L3 flow as ask_corrective, but with zero LLM calls.
     Returns raw chunks for the MCP host (Copilot) to generate the answer.
-
-    Layer 1 (FREE):  filter_by_distance() drops noise chunks
-    Layer 2 (FREE):  is_retrieval_good() checks retrieval quality
-    Layer 2b(FREE):  expand_via_graph() adds neighbor file chunks
-    Layer 3 (FREE):  grade_chunks_free() keyword overlap filter
 
     Returns:
         {
@@ -95,75 +209,33 @@ def retrieve_corrective(question: str, store, n_results: int = 5,
             "total_after_filter": int,     — chunks after all filtering
         }
     """
-    from src.codewalk.rag.chunk_grader import grade_chunks_free
-
     _log(f"[retrieve_corrective] Query: '{question[:60]}'")
 
-    # ── Layer 1 (FREE): Retrieve + distance filter ──
-    results = store.search(question, n_results=n_results)
-    if not results:
-        return {
-            "chunks": [],
-            "confidence": 0.0,
-            "retrieval_good": False,
-            "total_retrieved": 0,
-            "total_after_filter": 0,
-        }
-
-    total_retrieved = len(results)
-    filtered, confidence = filter_by_distance(results)
-
-    # ── Layer 2 (FREE): Check if retrieval is good enough ──
-    retrieval_good = is_retreival_good(confidence, len(filtered))
-
-    if not retrieval_good:
-        _log(f"[retrieve_corrective] Retrieval weak (confidence={confidence:.2f})")
-
-        # ── Layer 2b (FREE): Graph expansion fallback ──
-        if graph_store and filtered:
-            expanded = expand_via_graph(filtered, store, question, graph_store)
-            if len(expanded) > len(filtered):
-                filtered = expanded
-                confidence = max(confidence, 0.3)
-                retrieval_good = is_retreival_good(confidence, len(filtered))
-                _log(f"[retrieve_corrective] Graph expansion recovered {len(expanded)} chunks")
-
-        if not filtered:
-            filtered = results
-
-    # ── Layer 3 (FREE): Keyword-based chunk grading ──
-    graded = grade_chunks_free(question, filtered)
-    if graded:
-        filtered = graded
-
-    _log(f"[retrieve_corrective] Returning {len(filtered)} chunks (confidence={confidence:.2f})")
+    results, confidence, retrieval_good = _retrieve_with_fallbacks(
+        question, store, graph_store=graph_store, n_results=n_results,
+        use_expansion=True, use_reranker=False,
+    )
 
     return {
-        "chunks": filtered,
+        "chunks": results,
         "confidence": confidence,
         "retrieval_good": retrieval_good,
-        "total_retrieved": total_retrieved,
-        "total_after_filter": len(filtered),
+        "total_retrieved": len(results),  # after dedup but before free grading
+        "total_after_filter": len(results),
     }
 
 
 def ask_corrective(question: str, store, n_results: int = 5,
                    graph_store=None) -> dict:
-    """Corrective RAG: distance filter → chunk grade → generate → grade answer → retry.
-
-    Layer 1 (FREE):  filter_by_distance() drops noise chunks
-    Layer 2 (FREE):  retrieval_is_good() decides if we need to rewrite
-    Layer 2b(FREE):  expand_via_graph() adds neighbor file chunks when retrieval is weak
-    Layer 3 (1 LLM): grade_chunks() keeps only relevant chunks
-    Layer 4 (1 LLM): grade_answer() checks faithfulness + relevance
+    """Corrective RAG with enhanced retrieval and answer grading.
 
     Returns:
         {
-            "answer": str,            — the final answer text
-            "confident": bool,        — True if all quality checks passed
-            "retries": int,           — how many retries were needed (0 = first try worked)
-            "retrieval_confidence": float, — 0.0-1.0 from distance scoring
-            "relevant_chunks": int,   — how many chunks survived filtering
+            "answer": str,
+            "confident": bool,
+            "retries": int,
+            "retrieval_confidence": float,
+            "relevant_chunks": int,
         }
     """
     from langchain_core.output_parsers import StrOutputParser
@@ -184,42 +256,27 @@ def ask_corrective(question: str, store, n_results: int = 5,
     for attempt in range(MAX_RETRIES):
         _log(f"[corrective] Attempt {attempt + 1}/{MAX_RETRIES}: '{current_question[:60]}'")
 
-        # ── Layer 1 (FREE): Retrieve + distance filter ──
-        results = store.search(current_question, n_results=n_results)
-        if not results:
+        # ── Enhanced retrieval ──
+        filtered, confidence, retrieval_good = _retrieve_with_fallbacks(
+            current_question, store, graph_store=graph_store, n_results=n_results,
+            use_expansion=True, use_reranker=(attempt >= 1),  # rerank on retries
+        )
+
+        if not filtered:
             if attempt < MAX_RETRIES - 1:
                 current_question = rewrite_query(current_question)
                 continue
             break
 
-        filtered, confidence = filter_by_distance(results)
-
-        # ── Layer 2 (FREE): Check if retrieval is good enough ──
-        if not is_retreival_good(confidence, len(filtered)):
-            _log(f"[corrective] Retrieval too weak (confidence={confidence:.2f})")
-
-            # ── Layer 2b (FREE): Graph expansion fallback ──
-            if graph_store and filtered:
-                expanded = expand_via_graph(filtered, store, current_question, graph_store)
-                if len(expanded) > len(filtered):
-                    filtered = expanded
-                    confidence = max(confidence, 0.3)  # bump since we found neighbors
-                    _log(f"[corrective] Graph expansion recovered {len(expanded)} chunks")
-
-            if not is_retreival_good(confidence, len(filtered)):
-                if attempt < MAX_RETRIES - 1:
-                    current_question = rewrite_query(current_question)
-                    continue
-                # Last attempt — use whatever we have
-                if not filtered:
-                    filtered = results
+        if not retrieval_good and attempt < MAX_RETRIES - 1:
+            current_question = rewrite_query(current_question)
+            continue
 
         # ── Layer 3 (1 LLM call): Grade individual chunks ──
         graded = grade_chunks(question, filtered)
         if graded:
             filtered = graded
-        # If chunk grader returned nothing, keep distance-filtered set
-            
+
         # ── Generate answer ──
         context = format_context(filtered)
         answer = gen_chain.invoke({
@@ -239,7 +296,7 @@ def ask_corrective(question: str, store, n_results: int = 5,
                 "retrieval_confidence": confidence,
                 "relevant_chunks": len(filtered),
             }
-        
+
         # Answer graded bad — save best effort, rewrite and retry
         best_answer = answer
         best_confidence = confidence
@@ -258,4 +315,3 @@ def ask_corrective(question: str, store, n_results: int = 5,
         "retrieval_confidence": best_confidence,
         "relevant_chunks": 0,
     }
-

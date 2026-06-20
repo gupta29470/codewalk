@@ -22,8 +22,18 @@ def get_diff(
     cmd = ["git", "diff", "--unified=5"]
 
     if commit:
-        # Show what this specific commit changed (parent → commit)
-        cmd = ["git", "diff", "--unified=5", f"{commit}~1", commit]
+        # Show what this specific commit changed (parent → commit).
+        # Fall back to git show for root commits that have no parent.
+        has_parent = subprocess.run(
+            ["git", "rev-parse", "--verify", f"{commit}~1"],
+            cwd=repo_path,
+            capture_output=True,
+            timeout=10,
+        ).returncode == 0
+        if has_parent:
+            cmd = ["git", "diff", "--unified=5", f"{commit}~1", commit]
+        else:
+            cmd = ["git", "show", "--format=", "-p", commit]
     elif staged:
         cmd.append("--staged")
     elif target_branch:

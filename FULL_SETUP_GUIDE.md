@@ -42,6 +42,7 @@
 │ HETZNER (api.codewalk.xyz)                                           │
 │  Caddy :443 ──► codewalk-api :8000 ──► Postgres                     │
 │  /var/codewalk/indexes/{owner}/{repo}/  ← index artifacts            │
+│    (Chroma + DuckDB + knowledge-graph.json + manifest.json)         │
 │  /var/codewalk/repos/{owner}/{repo}/    ← cloned source              │
 └─────────────────────────────────────────────────────────────────────┘
                                     │
@@ -59,7 +60,7 @@
 | **Cloud server** | Indexing only (webhooks, embeddings, storage) |
 | **GitHub Actions** | Build Docker image + deploy server |
 | **GitHub App** | Send `push` webhooks → trigger indexing |
-| **Local MCP** | Download index, query code locally |
+| **Local MCP** | Download index, query code locally with DuckDB + igraph |
 
 ### What triggers repo registration & indexing?
 
@@ -210,6 +211,8 @@ GITHUB_WEBHOOK_SECRET=your-64-char-hex-secret
 ADMIN_API_KEY=your-64-char-hex-admin-key
 ```
 
+> Default embedding model: `jinaai/jina-code-embeddings-1.5b` produces **768-dimensional** vectors via Ollama/MPS.
+
 Generate secrets:
 
 ```bash
@@ -262,7 +265,7 @@ cd /opt/codewalk && docker compose up -d
 
 ```bash
 curl https://api.codewalk.xyz/health
-# {"status":"ok"}
+# {"status":"ok","codewalk_version":"1.1.0"}
 
 docker compose ps
 # postgres, codewalk-api, caddy all Up
@@ -289,7 +292,11 @@ curl -s -o /dev/null -w "%{http_code}\n" -X POST https://api.codewalk.xyz/webhoo
 # 404 = cloud routes not mounted — fix PEM / GITHUB_APP_ID / recreate container
 ```
 
-### Step 4.5 — If you changed `POSTGRES_PASSWORD` after first start
+### Step 4.5 — Cloud Admin UI
+
+The shipped Next.js frontend includes a Cloud Admin page at `/admin` (configure the production API base via `NEXT_PUBLIC_API_URL`). From there you can register repos, list repos, trigger a re-index, copy per-repo `repo_token`s, and check server health/version. It is optional — the same operations are available via the admin API below.
+
+### Step 4.6 — If you changed `POSTGRES_PASSWORD` after first start
 
 ```bash
 docker compose exec postgres psql -U codewalk -d postgres \
@@ -400,6 +407,10 @@ Expected progression: `index_status: "indexing"` → `"ready"`, `job_status: "do
 
 While indexing: `index_status: indexing` + `job_status: running` (or briefly `queued`) is normal.
 
+You can also use the Cloud Admin UI at `/admin` (register, list, trigger index, copy tokens, health/version).
+
+**Frontend note:** The local Codewalk frontend sidebar locks index-dependent tabs until `GET /index-status` reports `indexed: true`; it accepts an optional `?repo_path=` query parameter.
+
 **Push during indexing:** Older jobs are marked `failed` (superseded); only the newest commit is published.
 
 **After deploy:** API reconciles orphaned jobs and catch-up re-indexes stale repos automatically (~15s). Verify:
@@ -410,6 +421,8 @@ curl -s https://api.codewalk.xyz/version | python3 -m json.tool
 ```
 
 Indexes are built in `indexes/{owner}/{repo}.incoming.{sha}/` and promoted via atomic swap to `indexes/{owner}/{repo}/` — a failed mid-write run does not corrupt the active index.
+
+**Incremental reindex** (subsequent pushes or `POST /admin/index`) updates only changed files in Chroma, then fully rebuilds DuckDB and `knowledge-graph.json` from all Chroma chunks, and re-indexes docs/guidelines. The local `.codewalk/manifest.json` is updated each write with an incremented `index_version` and total `chunk_count`.
 
 First index takes **5–15+ minutes** (model download + full scan).
 
@@ -442,11 +455,16 @@ indexing:
     - release/**
     - release-*
   exclude:
+    # Repo-specific dirs/files (the core safety net already skips
+    # node_modules, build artifacts, binaries, secrets, lock files, etc.)
     - frontend/**
     - assets/**
     - docs/**
     - tests/**
     - env.example.txt
+  include:
+    # Override an exclusion for a specific path
+    - docs/architecture/**
 
 guidelines_path: docs/standards   # optional
 docs_path: docs                   # optional
@@ -459,7 +477,7 @@ docs_path: docs                   # optional
 | `**/*.g.dart` | Glob |
 | `release/**` | Branch `release/v2.0`, etc. |
 
-Built-in `file_filter.py` already skips `node_modules`, `.next`, `__pycache__`, `.git`, lock files, binaries.
+The core `file_filter.py` safety net already skips `.git`, `node_modules`, dependency/build/cache dirs, binaries, media, secrets, lock files, and generated suffixes, so you do not need to duplicate those in `codewalk.yaml`. Repo/framework-specific exclusions (e.g., `tools/`, `scripts/`, `cdk/`, `migrations/`, story files) live in `codewalk.yaml` and can be generated with `python -m src.codewalk.cli generate-config`.
 
 **Branch filter:** Pushes to `feature/foo` are ignored if not in `indexing.branches`. One index per repo — last allowed-branch push wins. Push an allowed branch first so `codewalk.yaml` exists on the server clone (until then, only `master` is allowed by default).
 
@@ -525,13 +543,20 @@ curl -s https://api.codewalk.xyz/indexes/gupta29470/codewalk/manifest \
 
 Codewalk does not ship its own approve/reject UI. You talk to your **IDE agent** (Cursor, Copilot, Claude Code, etc.); the agent calls **Codewalk MCP tools**. Each host shows its own approval experience (Cursor approval cards, chat yes/no, etc.).
 
+The MCP server exposes **33 tools**. Every tool is wrapped with a workspace-change guard that re-discovers the cwd and resets state when you switch workspaces. Cloud-specific tools include `codewalk_pull_index`, `codewalk_connect_repo`, `codewalk_index_status`, `codewalk_check_version`, and `codewalk_show_knowledge_graph`. Recently added local tools include `codewalk_lookup_symbol`, `codewalk_find_circular_dependencies`, `codewalk_run_static_analysis`, `codewalk_run_tests`, and `codewalk_generate_config`.
+
+**Canonical review flow:**
+
 1. Ask the agent to review — e.g. `@codewalk review my changes`
-2. Agent: `codewalk_review_diff` → `codewalk_reflect_review`
+2. Agent: `codewalk_review_diff`
 3. Per fix: `codewalk_approve_action` → you approve or reject in **your host's UI**
 4. On approve only: `codewalk_apply_fix(..., approval_token=<token>)` — enforced in MCP server code
-5. After edits: `codewalk_incremental_reindex`
+5. Verify: `codewalk_verify_fix`
+6. After edits: `codewalk_incremental_reindex`
 
-Canonical agent rules: `src/codewalk/mcp/server.py` FastMCP `instructions` (sent when MCP connects). See also README § “Review & approve fixes”.
+**Local-ahead safety:** `codewalk_pull_index` and `codewalk_connect_repo` warn and require `force=True` when the local `.codewalk/manifest.json` `index_version` is ahead of the cloud Postgres row.
+
+Canonical agent rules: `src/codewalk/mcp/server.py` FastMCP `instructions` (sent when MCP connects). See also README § "Review & approve fixes".
 
 ---
 

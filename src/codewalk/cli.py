@@ -1,21 +1,33 @@
 import typer
 import os
+from pathlib import Path
+from typing import Optional
 
 from src.codewalk.pipeline import full_index_parallel, incremental_reindex, build_full_analysis
 from src.codewalk.team_config import team_scan_directory, load_codewalk_yaml
 from src.codewalk.ingestion.tech_detect import detect_tech_stack
+from src.codewalk.ingestion.config_generator import generate_codewalk_yaml
 from src.codewalk.embeddings.vector_store import VectorStore
+from src.codewalk.repo_discovery import ensure_codewalk_yaml
 
 app_cli = typer.Typer(help="Codewalk — AI codebase intelligence")
 
+
+def _resolve_repo(repo: Optional[str]) -> str:
+    """Resolve repository root, auto-creating codewalk.yaml if missing."""
+    if repo:
+        return str(ensure_codewalk_yaml(repo, create=True))
+    return str(ensure_codewalk_yaml(create=True))
+
 @app_cli.command()
 def analyze(
-    repo: str = typer.Option(".", help="Path to repository root"),
+    repo: Optional[str] = typer.Option(None, help="Path to repository root (default: discover from cwd)"),
     collection: str = typer.Option("codebase", help="ChromaDB collection name"),
 ):
     """Full local index: scan → tech detect → chunk → embed → dep graph → modules → DuckDB.
     Produces .codewalk/ in the repo root — identical output to codewalk_analyze_codebase."""
 
+    repo = _resolve_repo(repo)
     typer.echo(f"Analyzing {repo} ...")
 
     # 1. Load team's codewalk.yaml (exclude patterns)
@@ -62,12 +74,13 @@ def analyze(
 
 @app_cli.command()
 def reindex(
-    repo: str = typer.Option(".", help="Path to repository root"),
+    repo: Optional[str] = typer.Option(None, help="Path to repository root (default: discover from cwd)"),
     collection: str = typer.Option("codebase", help="ChromaDB collection name"),
 ):
     """Incremental reindex — only re-embeds files whose content hash changed.
     Skips unchanged files, deletes chunks for removed files, rebuilds DuckDB."""
 
+    repo = _resolve_repo(repo)
     chroma_dir = os.path.join(repo.rstrip("/"), ".codewalk", "chroma")
 
     # 1. Check existing index exists
@@ -120,11 +133,12 @@ def reindex(
 
 @app_cli.command()
 def refresh(
-    repo: str = typer.Option(".", help="Path to repository root"),
+    repo: Optional[str] = typer.Option(None, help="Path to repository root (default: discover from cwd)"),
 ):
     """Refresh analysis (dep graph, modules, DuckDB) WITHOUT re-embedding.
     Use after code changes when you only need updated blast radius / modules."""
 
+    repo = _resolve_repo(repo)
     config = load_codewalk_yaml(repo)
     typer.echo(f"Refreshing analysis: {repo}")
 
@@ -139,6 +153,32 @@ def refresh(
         f"  Modules: {', '.join(module_names) or 'none'}"
     )
     typer.echo("Done. (no re-embedding)")
+
+
+@app_cli.command("generate-config")
+def generate_config(
+    repo: Optional[str] = typer.Option(None, help="Path to repository root (default: cwd)"),
+    force: bool = typer.Option(False, help="Overwrite an existing codewalk.yaml"),
+):
+    """Generate a starter codewalk.yaml with stack-specific exclusions."""
+    target = Path(repo or os.getcwd()).resolve()
+    if not target.is_dir():
+        typer.echo(f"❌ Not a directory: {target}", err=True)
+        raise typer.Exit(1)
+
+    existing = target / "codewalk.yaml"
+    if existing.exists() and not force:
+        typer.echo(
+            f"⚠️  codewalk.yaml already exists at {existing}.\n"
+            "Run with --force to overwrite, or edit the file directly."
+        )
+        raise typer.Exit(1)
+
+    path = generate_codewalk_yaml(target, force=force)
+    if path:
+        typer.echo(f"✅ Wrote {path}")
+    else:
+        typer.echo(f"⚠️  codewalk.yaml already exists at {existing}.")
 
 
 def main():

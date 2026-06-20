@@ -16,7 +16,7 @@ services:
       - "8000:8000"
     volumes:
       - /var/codewalk:/var/codewalk
-      - /root/.cache/huggingface:/root/.cache/huggingface
+      - /var/codewalk/hf-cache:/home/codewalk/.cache/huggingface
     environment:
       - LLM_PROVIDER=${LLM_PROVIDER:-groq}
       - LLM_MODEL=${LLM_MODEL:-llama-3.1-70b-versatile}

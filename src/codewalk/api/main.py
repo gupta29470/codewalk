@@ -4,15 +4,20 @@ import sys
 import json
 import base64
 import asyncio
+from pathlib import Path
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Query
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from fastapi import UploadFile, File, Form
 from fastapi.responses import JSONResponse
 
-from src.codewalk.pipeline import full_index_parallel, reindex, chunk_and_embed_parallel, incremental_reindex, write_manifest
+from src.codewalk.pipeline import (
+    full_index_parallel, reindex, chunk_and_embed_parallel, incremental_reindex,
+    write_manifest, _next_index_version,
+)
 from src.codewalk.api.models import (
     AnalyzeRequest, AnalyzeResponse,
     ChatRequest, ChatResponse,
@@ -23,6 +28,11 @@ from src.codewalk.api.models import (
     DocsIndexRequest, DocsAskRequest, DocsSearchRequest, ApproveRequest,
     ResearchRequest, ApplyFixesRequest, ApplyFixesResponse, AppliedFix,
     SemanticSearchRequest, SemanticSearchResponse, SemanticSearchResult,
+    StaticAnalysisRequest, StaticAnalysisResponse, StaticAnalysisIssue,
+    TestRunRequest, TestRunResponse,
+    ExpandQueryRequest, ExpandQueryResponse,
+    RerankRequest, RerankResponse,
+    SymbolLookupRequest, SymbolLookupResponse,
 )
 from src.codewalk.api import state
 from langchain_core.messages import AIMessage, ToolMessage
@@ -47,12 +57,78 @@ from src.codewalk.errors import classify_error
 logger = logging.getLogger("codewalk")
 
 
-def _require_repo_path(repo_path: str | None) -> str:
-    """Validate that the frontend provided an explicit repo path."""
+def _resolve_repo_path(repo_path: str | None = None) -> str:
+    """Resolve repo root from explicit path, in-process state, or discovery.
+
+    Resolution order:
+      1. Explicit repo_path from the request.
+      2. In-process state fallback (set by a previous /analyze call).
+      3. codewalk.yaml discovery upward from cwd (auto-creating if missing).
+
+    Raises HTTPException(400) if no repo root can be determined.
+    """
+    from src.codewalk.repo_discovery import ensure_codewalk_yaml, RepoNotFoundError
+
     path = (repo_path or "").strip()
-    if not path:
-        raise HTTPException(status_code=400, detail="repo_path is required")
-    return path
+    if path:
+        if not os.path.isdir(path):
+            raise HTTPException(status_code=400, detail=f"repo_path is not a directory: {path}")
+
+        # If an index is already loaded for a different repo, refuse to silently
+        # use the wrong store/modules/graph. The caller must re-analyze first.
+        if state.ensure_initialized():
+            current_repo = state.get_repo_path()
+            if Path(path).resolve() != Path(current_repo).resolve():
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        f"Requested repo {path} does not match the currently "
+                        f"loaded index ({current_repo}). Call POST /analyze first."
+                    ),
+                )
+
+        try:
+            root = ensure_codewalk_yaml(path, create=True)
+        except RepoNotFoundError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+        root_str = str(root)
+        state.set_repo_path(root_str)
+        return root_str
+
+    try:
+        return state.get_repo_path()
+    except RuntimeError:
+        pass
+
+    try:
+        root = ensure_codewalk_yaml(create=True)
+    except RepoNotFoundError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    root_str = str(root)
+    state.set_repo_path(root_str)
+    return root_str
+
+
+# Backward-compatible aliases for existing call sites
+def _require_repo_path(repo_path: str | None) -> str:
+    """Resolve repo root (explicit path or codewalk.yaml discovery)."""
+    return _resolve_repo_path(repo_path)
+
+
+def _ensure_repo_path(repo_path: str | None = None) -> str:
+    """Resolve repo root (explicit path, discovery, or in-process state)."""
+    return _resolve_repo_path(repo_path)
+
+
+def _resolve_extras_paths(repo_path: str, team_config) -> tuple[str, str]:
+    """Resolve guidelines/docs paths from codewalk.yaml, relative to repo_path."""
+    guidelines_path = team_config.guidelines_path
+    docs_path = team_config.docs_path
+    if guidelines_path and not os.path.isabs(guidelines_path):
+        guidelines_path = os.path.join(repo_path, guidelines_path)
+    if docs_path and not os.path.isabs(docs_path):
+        docs_path = os.path.join(repo_path, docs_path)
+    return guidelines_path, docs_path
 
 
 # ─── Lifespan handler (replaces deprecated @app.on_event) ─────────────
@@ -96,21 +172,23 @@ from collections import defaultdict
 _RATE_LIMIT_REQUESTS = int(os.getenv("RATE_LIMIT_REQUESTS", "60"))
 _RATE_LIMIT_WINDOW = int(os.getenv("RATE_LIMIT_WINDOW", "60"))
 _rate_limit_store: dict[str, list[float]] = defaultdict(list)
+_rate_limit_lock = asyncio.Lock()
 
 @app.middleware("http")
 async def rate_limit_middleware(request, call_next):
     """Simple sliding-window rate limiter per client IP."""
     client_ip = request.client.host if request.client else "unknown"
     now = time.time()
-    window = _rate_limit_store[client_ip]
-    # Remove entries outside the window
-    window[:] = [t for t in window if now - t < _RATE_LIMIT_WINDOW]
-    if len(window) >= _RATE_LIMIT_REQUESTS:
-        return JSONResponse(
-            status_code=429,
-            content={"detail": "Rate limit exceeded. Please try again later."},
-        )
-    window.append(now)
+    async with _rate_limit_lock:
+        window = _rate_limit_store[client_ip]
+        # Remove entries outside the window
+        window[:] = [t for t in window if now - t < _RATE_LIMIT_WINDOW]
+        if len(window) >= _RATE_LIMIT_REQUESTS:
+            return JSONResponse(
+                status_code=429,
+                content={"detail": "Rate limit exceeded. Please try again later."},
+            )
+        window.append(now)
     return await call_next(request)
 
 # ─── Cloud mode middleware ────────────────────────────────────────────
@@ -162,7 +240,15 @@ async def staleness_middleware(request, call_next):
 
 @app.exception_handler(Exception)
 async def global_exception_handler(request, exc):
-    """Convert all unhandled exceptions to user-friendly messages."""
+    """Convert unhandled exceptions to user-friendly messages.
+
+    HTTPException and RequestValidationError are passed through unchanged so
+    clients receive the correct 4xx status codes.
+    """
+    if isinstance(exc, HTTPException):
+        return JSONResponse(status_code=exc.status_code, content={"detail": exc.detail})
+    if isinstance(exc, RequestValidationError):
+        return JSONResponse(status_code=422, content={"detail": exc.errors()})
     user_message = classify_error(exc)
     _log(f"[api] Error: {exc}")
     return JSONResponse(
@@ -188,19 +274,12 @@ def analyze(request: AnalyzeRequest):
         if not request.collection_name:
             request.collection_name = state.get_collection_name()
         persist_dir = f"{request.repo_path.rstrip('/')}/.codewalk/chroma"
-        guidelines_path = os.getenv("REVIEW_GUIDELINES_PATH", "")
-        docs_path = os.getenv("CODE_DOCS_PATH", "")
         team_config = load_codewalk_yaml(request.repo_path)
+        guidelines_path, docs_path = _resolve_extras_paths(request.repo_path, team_config)
 
         # ── Index on disk + auto mode → load only (no re-embed) ──
         if request.index_mode == "auto" and state.index_on_disk(request.repo_path):
             state.load_scoped_analysis()
-            if guidelines_path or docs_path:
-                state.rebuild_analysis_cache(
-                    files=state._files,
-                    guidelines_path=guidelines_path,
-                    docs_path=docs_path,
-                )
             _log(f"[api] Loaded existing index — {state._store.chunk_count()} chunks")
             return AnalyzeResponse(
                 status="complete",
@@ -239,10 +318,18 @@ def analyze(request: AnalyzeRequest):
         if files is None:
             files = state.scan_repo_files(request.repo_path)
 
+        # Refresh the VectorStore handle: full_index_parallel / reindex create their
+        # own store objects and may clear/recreate collections, so the handle created
+        # above would point to deleted Chroma collections.
+        store = VectorStore(persist_dir=persist_dir)
+        store.create_collection(request.collection_name)
+
+        force_extras = request.index_mode in ("full", "reindex")
         state.initialize(store, None, None, index_result,
                          files=files, deps=None, repo_path=request.repo_path,
                          embedded_chunks=index_result.get("embedded_chunks"),
-                         guidelines_path=guidelines_path, docs_path=docs_path)
+                         guidelines_path=guidelines_path, docs_path=docs_path,
+                         force_reindex_extras=force_extras)
 
         return AnalyzeResponse(
             status="complete",
@@ -272,8 +359,7 @@ def analyze_stream(request: AnalyzeRequest):
             if not request.collection_name:
                 request.collection_name = state.get_collection_name()
             team_config = load_codewalk_yaml(request.repo_path)
-            guidelines_path = os.getenv("REVIEW_GUIDELINES_PATH", "")
-            docs_path = os.getenv("CODE_DOCS_PATH", "")
+            guidelines_path, docs_path = _resolve_extras_paths(request.repo_path, team_config)
 
             # Step 1: Check existing data
             yield f"data: {json.dumps({'step': 'init', 'message': 'Checking existing index...'})}\n\n"
@@ -308,12 +394,14 @@ def analyze_stream(request: AnalyzeRequest):
                 yield f"data: {json.dumps({'step': 'store', 'message': 'Storing in vector database...'})}\n\n"
                 await asyncio.to_thread(store.clear_collection)
                 await asyncio.to_thread(store.add_parent_child_chunks, embedded)
+                index_dir = f"{request.repo_path.rstrip('/')}/.codewalk"
                 await asyncio.to_thread(
                     write_manifest,
-                    f"{request.repo_path.rstrip('/')}/.codewalk",
+                    index_dir,
                     file_count=len(files),
-                    chunk_count=len(embedded),
+                    chunk_count=store.chunk_count(),
                     collection_name=request.collection_name,
+                    index_version=_next_index_version(index_dir),
                 )
                 yield f"data: {json.dumps({'step': 'store', 'message': f'Stored {len(embedded)} chunks in ChromaDB'})}\n\n"
 
@@ -353,11 +441,19 @@ def analyze_stream(request: AnalyzeRequest):
 
             # Step 4: Save state — initialize does deps → modules → DuckDB → docs → guidelines → agent
             yield f"data: {json.dumps({'step': 'agent', 'message': 'Creating AI agent...'})}\n\n"
+
+            # Refresh the VectorStore handle after any operation that may have
+            # recreated the underlying Chroma collections (full/reindex paths).
+            store = VectorStore(persist_dir=persist_dir)
+            store.create_collection(request.collection_name)
+
+            force_extras = request.index_mode in ("full", "reindex")
             await asyncio.to_thread(
                 state.initialize, store, None, None, index_result,
                 files=files, deps=None, repo_path=request.repo_path,
                 embedded_chunks=index_result.get("embedded_chunks"),
-                guidelines_path=guidelines_path, docs_path=docs_path
+                guidelines_path=guidelines_path, docs_path=docs_path,
+                force_reindex_extras=force_extras
             )
 
             num_modules = len(state._modules_result['modules'])
@@ -367,6 +463,8 @@ def analyze_stream(request: AnalyzeRequest):
             chunks = index_result.get('chunks_embedded', index_result.get('chunks_created', 0))
             yield f"data: {json.dumps({'step': 'done', 'message': 'Analysis complete!', 'result': {'status': 'complete', 'repo_path': request.repo_path, 'files_scanned': index_result.get('files_scanned', 0), 'chunks_created': chunks, 'modules': list(state._modules_result['modules'].keys())}})}\n\n"
 
+        except HTTPException:
+            raise
         except Exception as e:
             yield f"data: {json.dumps({'step': 'error', 'message': str(e)})}\n\n"
 
@@ -436,6 +534,8 @@ def chat(request: ChatRequest):
         return ChatResponse(answer=answer, thread_id=request.thread_id)
     except RuntimeError as e:
         raise HTTPException(status_code=400, detail=str(e))
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -471,6 +571,8 @@ def chat_stream(request: ChatRequest):
 
         except RuntimeError as e:
             yield f"data: {json.dumps({'type': 'error', 'message': str(e)})}\n\n"
+        except HTTPException:
+            raise
         except Exception as e:
             yield f"data: {json.dumps({'type': 'error', 'message': str(e)})}\n\n"
 
@@ -518,6 +620,8 @@ def overview():
     
     except RuntimeError as e:
         raise HTTPException(status_code=400, detail=str(e))
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
     
@@ -567,6 +671,8 @@ def get_module(module_name: str):
         raise
     except RuntimeError as e:
         raise HTTPException(status_code=400, detail=str(e))
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -610,6 +716,8 @@ def get_blast_radius_for_module(module_name: str = ""):
         raise
     except RuntimeError as e:
         raise HTTPException(status_code=400, detail=str(e))
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -653,6 +761,8 @@ def get_reading_order():
        return order
     except RuntimeError as e:
         raise HTTPException(status_code=400, detail=str(e))
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
     
@@ -672,6 +782,8 @@ def get_execution_flow():
         return {"flow": flow}
     except RuntimeError as e:
         raise HTTPException(status_code=400, detail=str(e))
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
     
@@ -694,6 +806,8 @@ def refresh_analysis():
         }
     except RuntimeError as e:
         raise HTTPException(status_code=400, detail=str(e))
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -710,20 +824,25 @@ def incremental_reindex_endpoint():
         collection_name = state.get_collection_name()
         persist_dir = state.chroma_path()
         team_config = load_codewalk_yaml(repo_path)
-        indexed_files = list(store.get_all_indexed_files())
-        if not indexed_files:
+        if store.chunk_count() == 0:
             raise HTTPException(status_code=400, detail="No files indexed yet. Run /analyze first.")
 
+        # Pass the repo root so the scanner considers every file, not just the
+        # previously indexed ones. Deletions are still detected by comparing with
+        # the existing indexed file set inside incremental_reindex.
         result = incremental_reindex(
-            indexed_files, repo_path, collection_name,
+            [repo_path], repo_path, collection_name,
             persist_dir=persist_dir, team_config=team_config,
         )
 
-        # Refresh analysis cache + re-index docs/guidelines
-        guidelines_path = os.getenv("REVIEW_GUIDELINES_PATH", "")
-        docs_path = os.getenv("CODE_DOCS_PATH", "")
+        # Full rebuild of DuckDB + knowledge graph so they reflect every chunk
+        # currently in ChromaDB, not just the files that changed in this run.
+        all_chunks = store.get_all_chunks()
+
+        # Refresh analysis cache + re-index docs/guidelines from codewalk.yaml
+        guidelines_path, docs_path = _resolve_extras_paths(repo_path, team_config)
         state.rebuild_analysis_cache(
-            embedded_chunks=result.get("embedded_chunks"),
+            embedded_chunks=all_chunks,
             guidelines_path=guidelines_path,
             docs_path=docs_path,
             force_reindex_extras=True,
@@ -799,6 +918,8 @@ async def review_endpoint(request: ReviewRequest):
         )
     except RuntimeError as e:
         raise HTTPException(status_code=400, detail=str(e))
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -807,16 +928,13 @@ async def review_endpoint(request: ReviewRequest):
 async def review_file_endpoint(request: ReviewFileRequest):
     """Review a single file against codebase conventions."""
     try:
-        from src.codewalk.rag.chain import format_context, retrieve_corrective
-        from src.codewalk.config import get_llm
-        from src.codewalk.review.reviewer import _get_caller_context
-        from src.codewalk.review.models import DiffFile, DiffHunk, ChangedLine
-        from src.codewalk.review.guidelines_loader import get_guidelines_store, search_guidelines
         import os
 
+        from src.codewalk.review.reviewer import review_file
+
         state.require_index()
+        repo_path = _ensure_repo_path(request.repo_path)
         store = state.get_store()
-        repo_path = state.get_repo_path()
 
         full_path = (
             os.path.join(repo_path, request.file_path)
@@ -824,72 +942,54 @@ async def review_file_endpoint(request: ReviewFileRequest):
             else request.file_path
         )
 
-        with open(full_path, "r", errors="replace") as f:
-            content = f.read()
+        # Path traversal guard: the file must live inside the repo
+        try:
+            Path(full_path).resolve().relative_to(Path(repo_path).resolve())
+        except ValueError:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Invalid file path (outside repo): {request.file_path}",
+            )
 
-        lines = content.splitlines()
-
-        # Synthetic DiffFile so we can reuse context helpers
-        changed_lines = [
-            ChangedLine(line_number=i + 1, content=line, change_type="added")
-            for i, line in enumerate(lines)
-        ]
-        synthetic_diff = DiffFile(
+        result = await asyncio.to_thread(
+            review_file,
             file_path=request.file_path,
-            language="",
-            hunks=[DiffHunk(start_line=1, end_line=len(lines), lines=changed_lines)],
-            is_new_file=True,
-            added_lines=len(lines),
-            removed_lines=0,
-        )
-
-        # Corrective RAG for similar patterns (same pipeline as MCP)
-        result = retrieve_corrective(
-            f"code in {request.file_path}", store,
+            repo_path=repo_path,
+            store=store,
             graph_store=state.get_graph_store(),
-        )
-        patterns = format_context(result["chunks"]) if result["chunks"] else "No indexed context."
-
-        # Caller context (who imports this file)
-        caller_ctx = _get_caller_context(synthetic_diff, state._deps, state._graph_store)
-
-        # Guidelines
-        guidelines_ctx = ""
-        guidelines_store = get_guidelines_store()
-        if guidelines_store:
-            guidelines_ctx = search_guidelines(guidelines_store, [synthetic_diff], n_results=3)
-
-        context_parts = []
-        if caller_ctx:
-            context_parts.append(caller_ctx)
-        if guidelines_ctx:
-            context_parts.append(guidelines_ctx)
-        context_parts.append(f"## Similar patterns elsewhere:\n{patterns}")
-        context_sections = "\n\n".join(context_parts)
-
-        llm = get_llm(temperature=0)
-        response = await asyncio.to_thread(
-            llm.invoke,
-            [
-                {"role": "system", "content": (
-                    "You are a senior engineer reviewing a file against its codebase conventions. "
-                    "Compare to patterns elsewhere. Focus on: bugs, security (OWASP top 10), "
-                    "consistency, error handling, naming, race conditions, resource leaks. "
-                    "Be specific with line numbers. For each issue, provide the corrected code."
-                )},
-                {"role": "user", "content": (
-                    f"## File: {request.file_path} ({len(lines)} lines)\n"
-                    f"```\n{content[:15000]}\n```\n\n"
-                    f"{context_sections}"
-                )},
-            ]
+            deps=state._deps,
+            guidelines_path=request.guidelines_path,
         )
 
-        return {"review": response.content, "file_path": request.file_path}
+        issues = [
+            {
+                "severity": issue.severity.value,
+                "confidence": issue.confidence.value,
+                "category": issue.category.value,
+                "file_path": issue.file_path,
+                "line_number": issue.line_number,
+                "title": issue.title,
+                "explanation": issue.explanation,
+                "suggestion": issue.suggestion,
+                "fix_description": issue.fix_description,
+                "code_snippet": issue.code_snippet,
+            }
+            for issue in result.issues
+        ]
+
+        return {
+            "verdict": result.verdict.value,
+            "verdict_reason": result.verdict_reason,
+            "issues": issues,
+            "summary": result.summary,
+            "file_path": request.file_path,
+        }
     except FileNotFoundError:
         raise HTTPException(status_code=404, detail=f"File not found: {request.file_path}")
     except RuntimeError as e:
         raise HTTPException(status_code=400, detail=str(e))
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -901,16 +1001,21 @@ def load_guidelines_endpoint(request: GuidelinesRequest):
         from src.codewalk.review.guidelines_loader import get_guidelines_store
         import os
 
-        path = request.docs_path or settings.review_guidelines_path
+        repo_path = _ensure_repo_path(request.repo_path)
+
+        path = request.docs_path
         if not path:
             raise HTTPException(
                 status_code=400,
-                detail="No path provided. Pass docs_path or set REVIEW_GUIDELINES_PATH.",
+                detail="No path provided. Pass docs_path.",
             )
         if not os.path.isdir(path):
             raise HTTPException(status_code=404, detail=f"Directory not found: {path}")
 
-        store = get_guidelines_store()
+        store = get_guidelines_store(
+            guidelines_path=path,
+            persist_dir=state.chroma_path(),
+        )
         if not store:
             raise HTTPException(status_code=400, detail=f"No guideline files found in {path}")
 
@@ -976,6 +1081,8 @@ async def voice_ask_endpoint(
             config=config,
         )
         answer = result["messages"][-1].content
+    except HTTPException:
+        raise
     except Exception as e:
         answer = f"Sorry, I couldn't process that: {e}"
 
@@ -1015,13 +1122,20 @@ def get_architecture():
 # ─── POST /docs/index ────────────────────────────────────────────────
 @app.post("/docs/index")
 def docs_index(req: DocsIndexRequest):
+    _ensure_repo_path(req.repo_path)
     store = state.get_doc_store()
     result = store.index_docs(req.docs_path)
-    return result
+    # Map the store's internal keys to the API contract expected by the frontend.
+    return {
+        "status": "indexed",
+        "files_indexed": result.get("docs_found", 0),
+        "chunks_created": result.get("chunks_stored", 0),
+    }
 
 # ─── POST /docs/search ──────────────────────────────────────────────
 @app.post("/docs/search")
 def docs_search(req: DocsSearchRequest):
+    _ensure_repo_path(req.repo_path)
     store = state.get_doc_store()
 
     if store.chunk_count() == 0:
@@ -1048,11 +1162,12 @@ async def docs_ask(req: DocsAskRequest):
     from src.codewalk.config import get_llm
     from src.codewalk.doc_knowledge.prompts import DOC_ASK_PROMPT
 
+    _ensure_repo_path(req.repo_path)
     store = state.get_doc_store()
 
     if store.chunk_count() == 0:
         raise HTTPException(status_code=400, detail="No documents indexed yet.")
-    
+
     results = store.search(req.question, n_results=req.n_results)
 
     if not results:
@@ -1152,9 +1267,13 @@ def chat_approve(request: ApproveRequest):
         
         return {"status": "completed", "result": str(result)}
     
+    except HTTPException:
+        raise
+    except RuntimeError as e:
+        raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
-    
+
 
 @app.post("/research")
 async def research_endpoint(request: ResearchRequest):
@@ -1173,6 +1292,8 @@ async def research_endpoint(request: ResearchRequest):
         return {"question": report.question, "report": report.markdown, "sources": report.sources}
     except RuntimeError as e:
         raise HTTPException(status_code=400, detail=str(e))
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -1189,16 +1310,17 @@ def apply_fixes_endpoint(request: ApplyFixesRequest):
 
     Each fix is validated before application:
       - File must exist inside the repo
-      - old_code must be found exactly once
+      - old_code must be found uniquely (exact, normalized, or context-line)
       - Write is atomic (temp file + rename)
+      - Python files are syntax-checked after applying
+      - Optional formatter is run if configured
 
     This endpoint REQUIRES the user to have already reviewed the fixes.
     It does NOT ask for approval — the caller (frontend/CLI) is responsible
     for showing fixes and getting user consent before calling this endpoint.
 
-    Returns:
-      - 200 with list of applied fixes
-      - 400 if any fix fails (stops at first failure, returns what succeeded)
+    Returns 200 with all applied fixes and any failures. Partial failures are
+    reported in the ``failed`` array so the frontend can show per-fix errors.
     """
     try:
         from src.codewalk.review.fix_applier import apply_fixes_batch
@@ -1206,20 +1328,14 @@ def apply_fixes_endpoint(request: ApplyFixesRequest):
         repo_path = state.get_repo_path()
         fixes = [fix.model_dump() for fix in request.fixes]
 
-        result = apply_fixes_batch(repo_path, fixes)
+        result = apply_fixes_batch(
+            repo_path,
+            fixes,
+            continue_on_error=request.continue_on_error,
+            validate_only=request.validate_only,
+            run_formatter=request.run_formatter,
+        )
 
-        if result["failed"]:
-            # Partial success: some applied, one failed
-            raise HTTPException(
-                status_code=400,
-                detail={
-                    "message": f"Fix {result['failed']['index']} failed",
-                    "error": result["failed"]["error"],
-                    "applied_count": len(result["applied"]),
-                    "failed_index": result["failed"]["index"],
-                },
-            )
-        
         return ApplyFixesResponse(
             applied=[
                 AppliedFix(
@@ -1230,13 +1346,62 @@ def apply_fixes_endpoint(request: ApplyFixesRequest):
                 )
                 for a in result["applied"]
             ],
-            failed=None,
+            failed=result["failed"],
             total=result["total"],
         )
     except HTTPException:
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+# ─── POST /tools/static-analysis ─────────────────────────────────────
+@app.post("/tools/static-analysis", response_model=StaticAnalysisResponse)
+def run_static_analysis_endpoint(request: StaticAnalysisRequest):
+    """Run language-aware static analyzers on the given files."""
+    from src.codewalk.tools.static_analysis import run_static_analysis
+
+    repo_path = state.get_repo_path()
+    issues = run_static_analysis(repo_path, request.file_paths, request.language_hint)
+    return StaticAnalysisResponse(
+        issues=[
+            StaticAnalysisIssue(
+                file_path=i.file_path,
+                line=i.line,
+                column=i.column,
+                severity=i.severity,
+                rule=i.rule,
+                message=i.message,
+                category=i.category,
+                tool=i.tool,
+            )
+            for i in issues
+        ],
+        total=len(issues),
+    )
+
+
+# ─── POST /tools/run-tests ───────────────────────────────────────────
+@app.post("/tools/run-tests", response_model=TestRunResponse)
+def run_tests_endpoint(request: TestRunRequest):
+    """Run the project's test suite with language-aware auto-detection."""
+    from src.codewalk.tools.test_runner import run_tests
+
+    repo_path = state.get_repo_path()
+    result = run_tests(
+        repo_path,
+        file_paths=request.file_paths or [],
+        language_hint=request.language_hint,
+        command=request.command,
+    )
+    return TestRunResponse(
+        command=" ".join(result.command) if result.command else "",
+        ok=result.ok,
+        returncode=result.returncode,
+        stdout=result.stdout,
+        stderr=result.stderr,
+        error=result.error,
+    )
 
 
 # ─── Version & staleness (shared with MCP) ───────────────────────────
@@ -1259,18 +1424,41 @@ def get_staleness():
     return staleness_status()
 
 
+@app.get("/index-status")
+def index_status(repo_path: str | None = Query(None, description="Optional repo path to check. Falls back to the current Codewalk state / cwd discovery.")):
+    """Return whether a Codewalk index exists for the discovered repo.
+
+    Used by the frontend to lock/unlock navigation tabs until the repo has been
+    analyzed at least once.
+    """
+    try:
+        resolved = _resolve_repo_path(repo_path)
+    except HTTPException:
+        return {"indexed": False, "repo_path": repo_path}
+
+    manifest_path = os.path.join(resolved, ".codewalk", "manifest.json")
+    return {
+        "indexed": os.path.isfile(manifest_path),
+        "repo_path": resolved,
+    }
+
+
 # ─── Semantic search over codebase embeddings ─────────────────────────
 
 @app.post("/semantic-search", response_model=SemanticSearchResponse)
 def semantic_search(request: SemanticSearchRequest):
     """Search the vector index for chunks semantically similar to the query."""
-    persist_dir = os.path.join(request.repo_path, ".codewalk", "chroma")
+    repo_path = _ensure_repo_path(request.repo_path)
+
+    persist_dir = os.path.join(repo_path, ".codewalk", "chroma")
     if not os.path.isdir(persist_dir):
-        return SemanticSearchResponse(results=[])
+        raise HTTPException(
+            status_code=404,
+            detail=f"No index found for {repo_path}. Run POST /analyze first.",
+        )
 
     try:
-        store = VectorStore(persist_dir=persist_dir)
-        store.create_collection("codebase")
+        store = state.get_store()
         raw_results = store.search(request.query, n_results=request.n_results)
         results = [
             SemanticSearchResult(
@@ -1282,8 +1470,106 @@ def semantic_search(request: SemanticSearchRequest):
             for r in raw_results
         ]
         return SemanticSearchResponse(results=results)
+    except HTTPException:
+        raise
+    except RuntimeError as e:
+        raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         _log(f"[semantic-search] error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ─── RAG utility endpoints ────────────────────────────────────────────
+
+@app.post("/rag/expand-query", response_model=ExpandQueryResponse)
+def expand_query_endpoint(request: ExpandQueryRequest):
+    """Expand a natural-language query into multiple retrieval queries + symbol hint.
+
+    Uses an LLM. API-only; MCP must not call this.
+    """
+    from src.codewalk.rag.query_expander import expand_query
+    try:
+        result = expand_query(request.query)
+        return ExpandQueryResponse(
+            original=result.original,
+            queries=result.queries,
+            symbol_hint=result.symbol_hint,
+        )
+    except Exception as e:
+        _log(f"[rag/expand-query] error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/rag/rerank", response_model=RerankResponse)
+def rerank_endpoint(request: RerankRequest):
+    """Rerank a list of retrieved chunks by relevance to the query.
+
+    Uses an LLM. API-only; MCP must not call this.
+    """
+    from src.codewalk.rag.reranker import rerank_chunks
+    try:
+        raw_results = [
+            {
+                "id": r.id,
+                "text": r.text,
+                "metadata": r.metadata,
+                "distance": r.distance,
+            }
+            for r in request.results
+        ]
+        reranked = rerank_chunks(request.query, raw_results, top_k=request.top_k)
+        results = [
+            SemanticSearchResult(
+                id=r.get("id", ""),
+                text=r.get("text", ""),
+                metadata=r.get("metadata", {}),
+                distance=r.get("distance"),
+            )
+            for r in reranked
+        ]
+        return RerankResponse(results=results)
+    except Exception as e:
+        _log(f"[rag/rerank] error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/rag/symbol-lookup", response_model=SymbolLookupResponse)
+def symbol_lookup_endpoint(request: SymbolLookupRequest):
+    """Deterministic symbol lookup via the knowledge graph and vector store."""
+    from src.codewalk.services.symbol_service import lookup
+    repo_path = _ensure_repo_path()
+    persist_dir = os.path.join(repo_path, ".codewalk", "chroma")
+    if not os.path.isdir(persist_dir):
+        raise HTTPException(
+            status_code=404,
+            detail=f"No index found for {repo_path}. Run POST /analyze first.",
+        )
+    try:
+        store = state.get_store()
+        graph_store = state.get_graph_store()
+        raw_results = lookup(
+            request.query,
+            store,
+            graph_store,
+            include_callers=request.include_callers,
+            include_callees=request.include_callees,
+        )
+        results = [
+            SemanticSearchResult(
+                id=r.get("id", ""),
+                text=r.get("text", ""),
+                metadata=r.get("metadata", {}),
+                distance=r.get("distance"),
+            )
+            for r in raw_results
+        ]
+        return SymbolLookupResponse(results=results)
+    except HTTPException:
+        raise
+    except RuntimeError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        _log(f"[rag/symbol-lookup] error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 

@@ -16,6 +16,8 @@ from src.codewalk.review.models import DiffFile, DiffHunk, ChangedLine
 from src.codewalk.review.guidelines_loader import get_guidelines_store, search_guidelines
 from src.codewalk.config import settings
 from src.codewalk.review.fix_applier import apply_fix_to_file
+from src.codewalk.tools.static_analysis import run_static_analysis
+from src.codewalk.tools.test_runner import run_tests
 
 # Tools that mutate the repo — API HITL interrupts only before these run.
 WRITE_TOOL_NAMES = frozenset({"apply_fix"})
@@ -306,21 +308,17 @@ def create_tools(
     def load_guidelines(docs_path: str = "") -> str:
         """Load team coding guidelines for use in code reviews.
 
-        Reads guideline documents (.md, .txt, .rst) from the given directory,
+        Reads guideline documents (.md, .txt, .rst, .pdf) from the given directory,
         embeds them, and makes them available to review_diff and review_file.
 
         Args:
             docs_path: Path to directory containing guideline files.
-                       Falls back to REVIEW_GUIDELINES_PATH env var.
         """
         import os
 
-        path = docs_path or settings.review_guidelines_path
+        path = docs_path
         if not path:
-            return (
-                "No path provided. Either pass docs_path or set "
-                "REVIEW_GUIDELINES_PATH in your .env file."
-            )
+            return "No path provided. Pass docs_path."
 
         if not os.path.isdir(path):
             return f"Directory not found: {path}"
@@ -409,11 +407,54 @@ def create_tools(
             return "Error: No repo path available."
         result = apply_fix_to_file(repo_path, file_path, old_code, new_code)
         if result["ok"]:
-            return result["message"]
+            notes = []
+            if result.get("validation"):
+                notes.append(result["validation"]["message"])
+            return f"{result['message']}" + ("\n" + "\n".join(notes) if notes else "")
         return f"Error: {result['error']}"
+
+    # ─── TOOL 13: verify_fix ─────────────────────────────────────
+    @tool
+    def verify_fix(file_paths: list[str] | None = None) -> str:
+        """Run tests and static analysis to verify a fix.
+
+        Call this AFTER apply_fix to check that the change didn't break anything.
+        If file_paths is omitted, runs the full test suite.
+
+        Args:
+            file_paths: Optional list of changed files to focus verification on.
+        """
+        if not repo_path:
+            return "Error: No repo path available."
+
+        parts = ["## Verification Results"]
+
+        # Static analysis
+        sa_issues = run_static_analysis(repo_path, file_paths or [], language_hint=None)
+        if sa_issues:
+            parts.append(f"\nStatic analysis: {len(sa_issues)} issue(s)")
+            for issue in sa_issues[:10]:
+                loc = f"{issue.file_path}:{issue.line}" if issue.line else issue.file_path
+                parts.append(f"- [{issue.severity}] {loc} — {issue.message} ({issue.tool})")
+        else:
+            parts.append("\nStatic analysis: no issues")
+
+        # Tests
+        test_result = run_tests(repo_path, file_paths or [])
+        parts.append(f"\nTests: {'PASSED' if test_result.ok else 'FAILED'}")
+        if test_result.command:
+            parts.append(f"Command: {' '.join(test_result.command)}")
+        if test_result.stdout:
+            parts.append("```\n" + test_result.stdout[-1500:] + "\n```")
+        if test_result.stderr:
+            parts.append("stderr:\n```\n" + test_result.stderr[-1000:] + "\n```")
+        if test_result.error:
+            parts.append(f"Error: {test_result.error}")
+
+        return "\n".join(parts)
 
     return [search_codebase, get_module_info, explain_function,
             get_overview, get_blast_radius_map, get_reading_order,
             get_execution_flow, review_diff, review_file, load_guidelines,
-            get_architecture_health, apply_fix]
+            get_architecture_health, apply_fix, verify_fix]
 

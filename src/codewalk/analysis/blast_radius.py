@@ -3,6 +3,40 @@ import math
 
 from src.codewalk.graph.graph_runtime import GraphRuntime
 
+
+# Patterns that identify test-only, story-only, or mock consumers. These are
+# excluded from runtime blast-radius by default because they do not represent
+# production downstream usage.
+_TEST_STORY_PATTERNS = (
+    ".test.",
+    ".spec.",
+    ".stories.",
+    ".cy.",
+    "/__fixtures__/",
+    "/__mocks__/",
+    "/test/",
+    "/tests/",
+)
+
+
+def _is_test_or_story(path: str) -> bool:
+    lower = path.lower()
+    return any(p in lower for p in _TEST_STORY_PATTERNS)
+
+
+def _filter_impact_tree(impact_tree: dict[str, int], exclude_test_stories: bool = True):
+    """Return filtered impact_tree and derived direct/transitive lists."""
+    if not exclude_test_stories:
+        direct = sorted(file for file, d in impact_tree.items() if d == 1)
+        transitive = sorted(file for file, d in impact_tree.items() if d > 1)
+        return impact_tree, direct, transitive, len(impact_tree)
+
+    filtered = {file: d for file, d in impact_tree.items() if not _is_test_or_story(file)}
+    direct = sorted(file for file, d in filtered.items() if d == 1)
+    transitive = sorted(file for file, d in filtered.items() if d > 1)
+    return filtered, direct, transitive, len(filtered)
+
+
 def build_reverse_graph(graph: dict[str, list[str]]) -> dict[str, list[str]]:
     """Reverse the dependency graph: edges go from 'imported' → 'importer'.
 
@@ -19,7 +53,7 @@ def build_reverse_graph(graph: dict[str, list[str]]) -> dict[str, list[str]]:
 
     return reverse
 
-def get_blast_radius(target_file: str, graph: dict[str, list[str]]) -> dict:
+def get_blast_radius(target_file: str, graph: dict[str, list[str]], exclude_test_stories: bool = True) -> dict:
     """Calculate blast radius for a single file.
 
     source: GraphRuntime (igraph, C-speed) or dict (legacy Python BFS).
@@ -39,16 +73,16 @@ def get_blast_radius(target_file: str, graph: dict[str, list[str]]) -> dict:
         
         distances = file_graph.shortest_paths(source=idx, mode="in")[0]
 
-        impact_tree = {}
+        raw_impact_tree = {}
 
         for vertex_index, distance in enumerate(distances):
             if vertex_index == idx or math.isinf(distance):
                 continue
-            impact_tree[file_graph.vs[vertex_index]["name"]] = int(distance)
-        
-        direct = sorted(file for file, distance in impact_tree.items() if distance == 1)
-        transitive = sorted(file for file, distance in impact_tree.items() if distance > 1)
-        total_affected = len(impact_tree)
+            raw_impact_tree[file_graph.vs[vertex_index]["name"]] = int(distance)
+
+        impact_tree, direct, transitive, total_affected = _filter_impact_tree(
+            raw_impact_tree, exclude_test_stories=exclude_test_stories
+        )
         risk_level = _calculate_risk(total_affected, file_graph.vcount())
 
         return {
@@ -92,9 +126,9 @@ def get_blast_radius(target_file: str, graph: dict[str, list[str]]) -> dict:
                     queue.append((dependent, depth + 1))
                     visited.add(dependent)
 
-        direct = [file for file, depth in impact_tree.items() if depth == 1]
-        transitive = [file for file, depth in impact_tree.items() if depth > 1]
-        total_affected = len(impact_tree)
+        impact_tree, direct, transitive, total_affected = _filter_impact_tree(
+            impact_tree, exclude_test_stories=exclude_test_stories
+        )
         total_files = len(internal_files)
         risk_level = _calculate_risk(total_affected, total_files)
 
@@ -153,23 +187,26 @@ def calculate_full_blast_map(graph: dict[str, list[str]]) -> dict:
 
         for index in range(total_files):
             distances = all_distance[index]
-            direct_count = 0
-            total_affected = 0
+            raw_impact_tree = {}
 
             for vertex_index, distance in enumerate(distances):
                 if vertex_index == index or math.isinf(distance):
                     continue
-                total_affected += 1
-                if distance == 1:
-                    direct_count += 1
-            
+                name = file_graph.vs[vertex_index]["name"]
+                if not _is_test_or_story(name):
+                    raw_impact_tree[name] = int(distance)
+
+            _, direct, transitive, total_affected = _filter_impact_tree(
+                raw_impact_tree, exclude_test_stories=False
+            )
+
             risk_level = _calculate_risk(total_affected, total_files)
             results.append({
                 "file": file_graph.vs[index]["name"],
                 "affected_files": total_affected,
                 "risk_level": risk_level,
-                "direct_count": direct_count,
-                "transitive_count": total_affected - direct_count,
+                "direct_count": len(direct),
+                "transitive_count": len(transitive),
             })
             risk_counts[risk_level] += 1
         
@@ -215,15 +252,17 @@ def calculate_full_blast_map(graph: dict[str, list[str]]) -> dict:
                         queue_bfs.append((dependent, depth + 1))
                         visited.add(dependent)
 
-            total_affected = len(impact_tree)
+            _, direct, transitive, total_affected = _filter_impact_tree(
+                impact_tree, exclude_test_stories=True
+            )
             risk_level = _calculate_risk(total_affected, total_files)
 
             results.append({
                 "file": target_file,
                 "affected_files": total_affected,
                 "risk_level": risk_level,
-                "direct_count": sum(1 for d in impact_tree.values() if d == 1),
-                "transitive_count": sum(1 for d in impact_tree.values() if d > 1),
+                "direct_count": len(direct),
+                "transitive_count": len(transitive),
             })
             risk_counts[risk_level] = risk_counts.get(risk_level, 0) + 1
 

@@ -56,3 +56,165 @@
     @apply bg-background text-foreground;
   }
 }
+
+/* ── Knowledge Graph Dashboard Theme ───────────────────────────────────── */
+
+:root {
+  --kg-root: #0a0a0a;
+  --kg-surface: #111111;
+  --kg-elevated: #1a1a1a;
+  --kg-panel: #141414;
+  --kg-accent: #d4a574;
+  --kg-accent-dim: #c9a96e;
+  --kg-accent-bright: #e8c49a;
+  --kg-accent-rgb: 212, 165, 116;
+  --kg-text-primary: #f5f0eb;
+  --kg-text-secondary: #a39787;
+  --kg-text-muted: #6b5f53;
+  --kg-border-subtle: rgba(212, 165, 116, 0.12);
+  --kg-border-medium: rgba(212, 165, 116, 0.25);
+  --kg-glass-bg: rgba(20, 20, 20, 0.8);
+  --kg-glass-heavy-bg: rgba(17, 17, 17, 0.96);
+  --kg-diff-changed: #e05252;
+  --kg-diff-affected: #d4a030;
+
+  --kg-node-file: #4a7c9b;
+  --kg-node-function: #5a9e6f;
+  --kg-node-class: #8b6fb0;
+  --kg-node-method: #7a8fb0;
+  --kg-node-module: #b88a5a;
+  --kg-node-config: #c4a35a;
+  --kg-node-document: #7a9eb3;
+  --kg-node-resource: #9b7b6b;
+  --kg-node-table: #6b8e9b;
+  --kg-node-service: #9b6b6b;
+  --kg-node-domain: #8b7cb3;
+  --kg-node-flow: #8b9b6b;
+  --kg-node-step: #7a9b8b;
+  --kg-node-article: #b88a5a;
+  --kg-node-entity: #9b8a6b;
+  --kg-node-topic: #8b7c9b;
+  --kg-node-claim: #9b7a6b;
+  --kg-node-source: #6b9b8a;
+  --kg-node-concept: #8b9b7a;
+
+  --kg-cluster-0: #4a7c9b;
+  --kg-cluster-1: #5a9e6f;
+  --kg-cluster-2: #8b6fb0;
+  --kg-cluster-3: #c4a35a;
+  --kg-cluster-4: #9b6b6b;
+  --kg-cluster-5: #7a9eb3;
+  --kg-cluster-6: #6b8e9b;
+  --kg-cluster-7: #8b7cb3;
+}
+
+.kg-dashboard {
+  background-color: var(--kg-root);
+  color: var(--kg-text-primary);
+  font-family: var(--font-inter), ui-sans-serif, system-ui, sans-serif;
+}
+
+.kg-noise-overlay::before {
+  content: "";
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  z-index: 50;
+  opacity: 0.035;
+  background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 200 200' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.65' numOctaves='3' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
+}
+
+.kg-glass {
+  background: var(--kg-glass-bg, rgba(20, 20, 20, 0.85));
+  border: 1px solid var(--kg-border-subtle);
+  backdrop-filter: blur(12px);
+}
+
+.kg-glass-heavy {
+  background: var(--kg-glass-heavy-bg, rgba(17, 17, 17, 0.96));
+  border: 1px solid var(--kg-border-subtle);
+  backdrop-filter: blur(16px);
+}
+
+/* Animations */
+@keyframes kg-fade-slide-in {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes kg-slide-up {
+  from {
+    transform: translateY(100%);
+  }
+  to {
+    transform: translateY(0);
+  }
+}
+
+@keyframes kg-accent-pulse {
+  0%, 100% {
+    box-shadow: 0 0 0 0 rgba(var(--kg-accent-rgb), 0.4);
+  }
+  50% {
+    box-shadow: 0 0 0 8px rgba(var(--kg-accent-rgb), 0);
+  }
+}
+
+.kg-animate-fade-slide-in {
+  animation: kg-fade-slide-in 0.3s ease-out forwards;
+}
+
+.kg-animate-slide-up {
+  animation: kg-slide-up 0.3s ease-out forwards;
+}
+
+.kg-animate-accent-pulse {
+  animation: kg-accent-pulse 2s ease-in-out infinite;
+}
+
+/* Scrollbar hide utility */
+.kg-scrollbar-hide {
+  -ms-overflow-style: none;
+  scrollbar-width: none;
+}
+.kg-scrollbar-hide::-webkit-scrollbar {
+  display: none;
+}
+
+/* React Flow overrides inside kg dashboard */
+.kg-dashboard .react-flow__attribution {
+  display: none;
+}
+
+.kg-dashboard .react-flow__controls {
+  background: var(--kg-elevated);
+  border: 1px solid var(--kg-border-subtle);
+  border-radius: 8px;
+}
+
+.kg-dashboard .react-flow__controls-button {
+  background: var(--kg-elevated);
+  color: var(--kg-text-secondary);
+  border-bottom: 1px solid var(--kg-border-subtle);
+}
+
+.kg-dashboard .react-flow__controls-button:hover {
+  background: var(--kg-panel);
+  color: var(--kg-text-primary);
+}
+
+.kg-dashboard .react-flow__minimap {
+  background: var(--kg-surface) !important;
+  border: 1px solid var(--kg-border-subtle) !important;
+  border-radius: 8px;
+}
+
+.kg-dashboard .react-flow__background {
+  background-color: var(--kg-root);
+}

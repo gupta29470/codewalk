@@ -124,7 +124,7 @@ export interface AppliedFix {
 
 export interface ApplyFixesResponse {
     applied: AppliedFix[];
-    failed: { index: number; error: string } | null;
+    failed: { index: number; error: string }[] | null;
     total: number;
 }
 
@@ -173,6 +173,16 @@ export interface ReviewResponse {
     files_reviewed: number;
     lines_added: number;
     lines_removed: number;
+    verdict: string;
+    verdict_reason: string;
+}
+
+export interface ReviewFileResponse {
+    verdict: string;
+    verdict_reason: string;
+    issues: ReviewIssue[];
+    summary: string;
+    file_path: string;
 }
 
 export interface IncrementalReindexResponse {
@@ -186,12 +196,18 @@ export interface IncrementalReindexResponse {
 }
 
 export interface AdminRepo {
+    full_name: string;
     name: string;
+    owner: string;
     branch: string;
-    status: string | null;
-    commit_sha: string | null;
-    finished_at: string | null;
-    error: string | null;
+    last_indexed_sha: string | null;
+    index_status: string | null;
+    created_at: string | null;
+    updated_at: string | null;
+    job_status: string | null;
+    job_commit: string | null;
+    job_finished: string | null;
+    job_error: string | null;
 }
 
 export interface ProgressEvent {
@@ -245,7 +261,11 @@ async function apiFetch<T>(path: string, options?: RequestInit): Promise<T> {
 
     if (!res.ok) {
         const error = await res.json().catch(() => ({ detail: res.statusText }));
-        throw new Error(error.detail || `API error: ${res.status}`);
+        const detail =
+            typeof error.detail === "string"
+                ? error.detail
+                : JSON.stringify(error.detail ?? error);
+        throw new Error(detail || `API error: ${res.status}`);
     }
 
     return res.json();
@@ -254,13 +274,15 @@ async function apiFetch<T>(path: string, options?: RequestInit): Promise<T> {
 export const api = {
     health: () => apiFetch<{ status: string }>("/health"),
 
+    version: () =>
+        apiFetch<{ codewalk_version: string; commit_sha: string; released_at: string }>("/version"),
+
     getStaleness: () => apiFetch<StalenessStatus>("/staleness"),
 
-    analyze: (repoPath: string, indexMode: string = "auto") =>
+    analyze: (indexMode: string = "auto") =>
         apiFetch<AnalyzeResponse>("/analyze", {
             method: "POST",
             body: JSON.stringify({
-                repo_path: repoPath,
                 index_mode: indexMode,
             }),
         }),
@@ -282,7 +304,6 @@ export const api = {
     getExecutionFlow: () => apiFetch<ExecutionFlowResponse>("/execution-flow"),
 
     analyzeStream: async (
-        repoPath: string,
         indexMode: string,
         onProgress: (event: ProgressEvent) => void,
         collectionName?: string
@@ -291,7 +312,6 @@ export const api = {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({
-                repo_path: repoPath,
                 index_mode: indexMode,
                 collection_name: collectionName || "codebase",
             }),
@@ -384,7 +404,7 @@ export const api = {
         }),
 
     reviewFile: (filePath: string) =>
-        apiFetch<{ review: string; file_path: string }>("/review/file", {
+        apiFetch<ReviewFileResponse>("/review/file", {
             method: "POST",
             body: JSON.stringify({ file_path: filePath }),
         }),
@@ -456,7 +476,7 @@ export const api = {
         branch: string = "main",
         installationId: string = ""
     ) =>
-        apiFetch<{ repo_token: string }>("/admin/register", {
+        apiFetch<{ repo_token: string; full_name: string; status: string }>("/admin/register", {
             method: "POST",
             headers: { "X-Admin-Key": adminKey },
             body: JSON.stringify({
@@ -465,6 +485,13 @@ export const api = {
                 branch,
                 installation_id: installationId,
             }),
+        }),
+
+    adminIndex: (adminKey: string, fullName: string, branch: string = "") =>
+        apiFetch<{ repo: string; status: string; files_scanned?: number; total_chunks?: number }>("/admin/index", {
+            method: "POST",
+            headers: { "X-Admin-Key": adminKey },
+            body: JSON.stringify({ full_name: fullName, branch }),
         }),
 
     voiceAsk: async (audioBlob: Blob, threadId: string = "voice") => {

@@ -6,12 +6,19 @@ KEEP_DOT_DIRS = {
     ".github",
 }
 
-# Non-dot directories to skip
-SKIP_DIRS = {
-    # JS/TS
+# Core safety-net directories that are always pruned.
+# These are universally dangerous/useless to index: version-control metadata,
+# dependency folders, build/cache output, and generated artifacts.
+# Repo- or framework-specific exclusions (tools/, scripts/, cdk/, migrations/,
+# story files, etc.) belong in codewalk.yaml, not here.
+CORE_SKIP_DIRS = {
+    # Version control / Codewalk internal
+    ".git",
+    ".codewalk",
+    # JS/TS dependencies / build
     "node_modules",
     "bower_components",
-    # Python
+    # Python environments / caches
     "__pycache__",
     "venv",
     ".venv",
@@ -19,7 +26,7 @@ SKIP_DIRS = {
     ".env",
     "egg-info",
     ".codewalk-env",
-    # Generic build
+    # Generic build / output
     "dist",
     "build",
     "target",
@@ -31,21 +38,13 @@ SKIP_DIRS = {
     # Flutter / Dart
     "ephemeral",
     ".dart_tool",
-    # Go / Ruby / PHP
+    # Go / Ruby / PHP dependencies
     "vendor",
     "deps",
     # Swift
     "Packages",
     # Elixir
     "_build",
-    # Testing artifacts (keep test SOURCE, skip test OUTPUT)
-    "__snapshots__",
-    # Localization
-    "l10n",
-    "locales",
-    "i18n",
-    # Migrations
-    "migrations",
     # Gradle
     ".gradle",
     # Framework build caches
@@ -64,13 +63,13 @@ SKIP_DIRS = {
     ".eggs",
     "__pypackages__",
     ".hypothesis",
-    # JS build / deploy
+    # JS build / deploy caches
     ".cache",
     ".parcel-cache",
     "storybook-static",
     ".vercel",
     ".netlify",
-    # Output / generated
+    # Output / generated directories
     "out",
     "obj",
     "gen",
@@ -86,21 +85,26 @@ SKIP_DIRS = {
     "test-reports",
     # Docs build output
     "site",
-    # Generic
-    "tmp", "temp",
+    # Generic temp / logs
+    "tmp",
+    "temp",
     "logs",
     "reports",
 }
 
-# Extensions that aren't code (binary/media files)
-# Extensions that aren't useful code (binary, media, lock files, generated)
-SKIP_EXTENSIONS = {
+# Backwards-compatible aliases used by tests and existing callers.
+SKIP_DIRS = CORE_SKIP_DIRS
+
+# Core safety-net extensions that are never useful code:
+# binaries, media, archives, fonts, lock files, secrets, generated artifacts.
+# Keep this list conservative; stack-specific patterns belong in codewalk.yaml.
+CORE_SKIP_EXTENSIONS = {
     # Compiled / bytecode
     ".pyc", ".pyo", ".pyd",
     ".class",
     ".o", ".obj", ".a", ".lib",
     ".so", ".dylib", ".dll",
-    ".exe", ".bin",
+    ".exe",
     ".wasm",
     ".dex",
     ".beam",              # Erlang/Elixir
@@ -237,8 +241,11 @@ SKIP_EXTENSIONS = {
     ".coverage",
 }
 
-# Specific filenames to skip (generated / lock files)
-SKIP_FILES = {
+# Backwards-compatible alias.
+SKIP_EXTENSIONS = CORE_SKIP_EXTENSIONS
+
+# Specific filenames to skip (generated / lock files / OS junk).
+CORE_SKIP_FILES = {
     "package-lock.json",
     "yarn.lock",
     "pnpm-lock.yaml",
@@ -264,8 +271,11 @@ SKIP_FILES = {
     "MANIFEST",
 }
 
-# Filename suffixes for generated/auto-generated code
-SKIP_SUFFIXES = (
+# Backwards-compatible alias.
+SKIP_FILES = CORE_SKIP_FILES
+
+# Filename suffixes for generated/auto-generated code.
+CORE_SKIP_SUFFIXES = (
     ".g.dart",
     ".freezed.dart",
     ".gen.dart",
@@ -296,18 +306,25 @@ SKIP_SUFFIXES = (
     ".chunk.css",
 )
 
+# Backwards-compatible alias.
+SKIP_SUFFIXES = CORE_SKIP_SUFFIXES
+
 
 def should_skip_dir(dir_name: str) -> bool:
-    """Return True if this directory should be pruned during os.walk."""
+    """Return True if this directory should be pruned during os.walk.
+
+    This is the core safety net only. Framework- and repo-specific directory
+    pruning should be configured via codewalk.yaml indexing.exclude.
+    """
     if dir_name.startswith(".") and dir_name not in KEEP_DOT_DIRS:
         return True
-    if dir_name in SKIP_DIRS:
+    if dir_name in CORE_SKIP_DIRS:
         return True
     return False
 
 
 def should_skip(file_path: str, repo_path: str | None = None) -> bool:
-    """Return True if this file should be skipped."""
+    """Return True if this file should be skipped by the core safety net."""
 
     path = Path(file_path)
 
@@ -322,27 +339,23 @@ def should_skip(file_path: str, repo_path: str | None = None) -> bool:
 
     # Skip junk directories
     for part in path.parts:
-        if part in SKIP_DIRS:
+        if part in CORE_SKIP_DIRS:
             return True
 
     # Skip binary/media extensions
-    if path.suffix in SKIP_EXTENSIONS:
+    if path.suffix in CORE_SKIP_EXTENSIONS:
         return True
 
     # Skip specific filenames
-    if path.name in SKIP_FILES:
+    if path.name in CORE_SKIP_FILES:
         return True
 
     # Skip generated file patterns (e.g. foo.g.dart, bar.pb.go, baz.designer.cs)
-    if any(path.name.endswith(suffix) for suffix in SKIP_SUFFIXES):
+    if any(path.name.endswith(suffix) for suffix in CORE_SKIP_SUFFIXES):
         return True
 
     # Check .codewalkignore patterns
     if _codewalkignore_matches(file_path, repo_path=repo_path):
-        return True
-
-    # Check EXCLUDE_PATHS env var (comma-separated dirs/patterns)
-    if _exclude_paths_matches(file_path):
         return True
 
     return False
@@ -351,6 +364,7 @@ def should_skip(file_path: str, repo_path: str | None = None) -> bool:
 # ─── .codewalkignore support ─────────────────────────────────────────
 
 _codewalkignore_patterns: dict[str, list[str]] = {}
+
 
 def _load_codewalkignore(repo_path: str | None = None) -> list[str]:
     """Load patterns from .codewalkignore in the repo root (gitignore syntax)."""
@@ -403,53 +417,3 @@ def reset_codewalkignore():
     """Reset cached patterns (call when repo_path changes)."""
     global _codewalkignore_patterns
     _codewalkignore_patterns = {}
-
-
-# ─── EXCLUDE_PATHS env var support ───────────────────────────────────
-
-_exclude_paths_parsed: list[str] | None = None
-
-def _load_exclude_paths() -> list[str]:
-    """Parse EXCLUDE_PATHS from settings (comma-separated dirs/patterns)."""
-    global _exclude_paths_parsed
-    if _exclude_paths_parsed is not None:
-        return _exclude_paths_parsed
-
-    from src.codewalk.config import settings
-    raw = settings.exclude_paths.strip()
-    if not raw:
-        _exclude_paths_parsed = []
-        return _exclude_paths_parsed
-
-    _exclude_paths_parsed = [p.strip() for p in raw.split(",") if p.strip()]
-    return _exclude_paths_parsed
-
-
-def _exclude_paths_matches(file_path: str) -> bool:
-    """Check if a file path matches any EXCLUDE_PATHS pattern."""
-    patterns = _load_exclude_paths()
-    if not patterns:
-        return False
-
-    path = Path(file_path)
-    for pattern in patterns:
-        # Glob pattern (contains * or ?)
-        if "*" in pattern or "?" in pattern:
-            if fnmatch_module.fnmatch(file_path, pattern):
-                return True
-            if fnmatch_module.fnmatch(path.name, pattern):
-                return True
-        # Directory/path segment match (e.g. "test", "docs")
-        elif pattern in path.parts:
-            return True
-        # Prefix match (e.g. "scripts/legacy")
-        elif file_path.startswith(pattern + "/") or file_path.startswith(pattern):
-            return True
-    return False
-
-
-def reset_exclude_paths():
-    """Reset cached EXCLUDE_PATHS (call when settings change)."""
-    global _exclude_paths_parsed
-    _exclude_paths_parsed = None
-        

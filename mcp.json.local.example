@@ -1,0 +1,15 @@
+{
+  "servers": {
+    "codewalk": {
+      "command": "/path/to/codewalk/.codewalk-env/bin/python",
+      "args": [
+        "-c",
+        "import os, sys; sys.path.insert(0, os.environ['CODEWALK_PATH']); from src.codewalk.mcp.server import mcp; mcp.run(transport='stdio')"
+      ],
+      "cwd": "${workspaceFolder}",
+      "env": {
+        "CODEWALK_PATH": "/path/to/codewalk"
+      }
+    }
+  }
+}

@@ -418,26 +418,32 @@ Coupling: 0 outgoing, 5 incoming cross-module edges
 
 ```
 TABLE COUNTS:
-  files           9 rows
-  imports         0 rows
-  symbols         105 rows
-  symbol_calls    348 rows
-  chunks          0 rows
-  modules         3 rows
-  module_deps     0 rows
+  files             9 rows
+  imports           0 rows
+  symbols           105 rows
+  symbol_metadata   0 rows
+  class_hierarchy   0 rows
+  class_members     0 rows
+  symbol_calls      348 rows
+  chunks            0 rows
+  modules           3 rows
+  module_deps       0 rows
 ```
 
 ### `tj/commander.js` (JS CLI framework)
 
 ```
 TABLE COUNTS:
-  files           198 rows
-  imports         17 rows
-  symbols         277 rows
-  symbol_calls    478 rows
-  chunks          0 rows
-  modules         7 rows
-  module_deps     3 rows
+  files             198 rows
+  imports           17 rows
+  symbols           277 rows
+  symbol_metadata   0 rows
+  class_hierarchy   0 rows
+  class_members     0 rows
+  symbol_calls      478 rows
+  chunks            0 rows
+  modules           7 rows
+  module_deps       3 rows
 ```
 
 Sample `symbol_calls` data from `color`:
@@ -475,7 +481,7 @@ tests → root      (tests import index.js)
 
 ---
 
-## DuckDB Schema (7 Tables)
+## DuckDB Schema (10 Tables)
 
 ```sql
 -- 1. Every source file in the repo
@@ -501,10 +507,35 @@ CREATE TABLE symbols (
     file_id VARCHAR,               -- which file it's in
     symbol_type VARCHAR,           -- "function", "class", "method"
     start_line INTEGER,            -- 173
-    end_line INTEGER               -- 184
+    end_line INTEGER,              -- 184
+    parent_class VARCHAR           -- optional containing class
 );
 
--- 4. Function A calls Function B at line N
+-- 4. Extra metadata for symbols (routes, events, CLI commands, etc.)
+CREATE TABLE symbol_metadata (
+    symbol_id VARCHAR PRIMARY KEY REFERENCES symbols(symbol_id),
+    kind VARCHAR,
+    http_method VARCHAR,
+    http_path VARCHAR,
+    event_name VARCHAR,
+    cli_command VARCHAR
+);
+
+-- 5. Class inheritance edges
+CREATE TABLE class_hierarchy (
+    class_symbol_id VARCHAR REFERENCES symbols(symbol_id),
+    parent_symbol_id VARCHAR REFERENCES symbols(symbol_id),
+    PRIMARY KEY (class_symbol_id, parent_symbol_id)
+);
+
+-- 6. Class membership edges
+CREATE TABLE class_members (
+    class_symbol_id VARCHAR REFERENCES symbols(symbol_id),
+    member_symbol_id VARCHAR REFERENCES symbols(symbol_id),
+    PRIMARY KEY (class_symbol_id, member_symbol_id)
+);
+
+-- 7. Function A calls Function B at line N
 CREATE TABLE symbol_calls (
     caller_symbol_id VARCHAR,
     callee_symbol_id VARCHAR,
@@ -512,7 +543,7 @@ CREATE TABLE symbol_calls (
     PRIMARY KEY (caller_symbol_id, callee_symbol_id, line)
 );
 
--- 5. Chunk metadata (bridge to ChromaDB embeddings)
+-- 8. Chunk metadata (bridge to ChromaDB embeddings)
 CREATE TABLE chunks (
     chunk_id VARCHAR PRIMARY KEY,
     file_id VARCHAR,
@@ -523,13 +554,13 @@ CREATE TABLE chunks (
     embedding_id VARCHAR           -- links to ChromaDB
 );
 
--- 6. Auto-detected module groupings
+-- 9. Auto-detected module groupings
 CREATE TABLE modules (
     name VARCHAR PRIMARY KEY,      -- "lib", "tests", "root"
     file_count INTEGER             -- 6
 );
 
--- 7. Module A depends on Module B
+-- 10. Module A depends on Module B
 CREATE TABLE module_deps (
     source VARCHAR,                -- "tests"
     target VARCHAR,                -- "lib"

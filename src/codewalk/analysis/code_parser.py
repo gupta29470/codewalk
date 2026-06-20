@@ -247,15 +247,15 @@ def _extract_identifier_names(node) -> list[str]:
     """Recursively collect identifier-like names from a type/base node."""
     names: list[str] = []
     seen: set[str] = set()
-    for child in node.walk():
-        if child.type in (
-            "identifier", "simple_identifier", "type_identifier",
-            "property_identifier", "field_identifier", "name",
-        ):
-            name = child.text.decode("utf-8", errors="replace")
-            if name and name not in seen:
-                seen.add(name)
-                names.append(name)
+    target_types = {
+        "identifier", "simple_identifier", "type_identifier",
+        "property_identifier", "field_identifier", "name",
+    }
+    for child in walk_tree(node, target_types):
+        name = child.text.decode("utf-8", errors="replace")
+        if name and name not in seen:
+            seen.add(name)
+            names.append(name)
     return names
 
 

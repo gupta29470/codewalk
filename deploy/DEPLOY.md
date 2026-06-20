@@ -27,7 +27,7 @@ Before touching any server, verify these items locally.
 ### Code & Build
 
 - [ ] All tests pass (if you have them)
-- [ ] `python -m py_compile src/codewalk/**/*.py` — no syntax errors
+- [ ] `find src/codewalk -name "*.py" -exec python -m py_compile {} +` — no syntax errors
 - [ ] `deploy/Dockerfile` builds successfully locally:
   ```bash
   docker build -f deploy/Dockerfile -t codewalk:local .
@@ -96,7 +96,7 @@ Create a firewall and attach it to your server:
 | Inbound | TCP | 80 | Anywhere | HTTP → Caddy redirects to HTTPS |
 | Inbound | TCP | 443 | Anywhere | HTTPS → Caddy reverse proxy |
 
-**Do NOT expose port 8000.** The API is internal-only; Caddy proxies to it.
+**Do NOT expose port 8000 to the internet.** `docker-compose.yml` maps it for local health checks, but the Hetzner firewall should allow only 22/80/443; Caddy proxies public traffic to it.
 
 ---
 
@@ -267,14 +267,14 @@ Required for **cloud mode** — automatic repo indexing via webhooks.
 |------------|--------|-----|
 | **Repository contents** | Read-only | Clone/pull repos |
 | **Metadata** | Read-only | List repos in installation |
-| **Pull requests** | Read & write | Review PRs, post comments |
-| **Issues** | Read & write | Create issues for findings |
+| **Pull requests** | Read-only (optional) | Future PR review features |
+| **Issues** | Read-only (optional) | Future issue creation features |
 
 4. **Subscribe to events:**
    - ✅ Push
-   - ✅ Pull request
    - ✅ Installation
    - ✅ Installation repositories
+   - ⬜ Pull request (optional — only if you grant PR write access later)
 
 5. **Where can this GitHub App be installed?**
    - ✅ Any account (for public repos)
@@ -598,4 +598,4 @@ Common causes:
 
 ---
 
-*Last updated: 2025-06-09*
+*Last updated: 2026-06-16*

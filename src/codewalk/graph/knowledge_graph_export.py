@@ -1,8 +1,8 @@
 """Export DuckDB graph analysis to knowledge-graph.json for the dashboard UI.
 
 Schema version 1.0 — compatible with Understand-Anything-style consumers:
-  nodes: file | function | class | method | module
-  edges: imports | calls | exports | related | module_dep | contains
+  nodes: file | function | class | method | module | concept
+  edges: imports | calls | exports | extends | related | module_dep | contains
   layers: one per detected module (structural; no LLM required)
 """
 from __future__ import annotations
@@ -49,6 +49,76 @@ def _complexity_from_bytes(size_bytes: int) -> str:
     if size_bytes < 20_000:
         return "moderate"
     return "complex"
+
+
+def _compute_node_positions(graph: dict, canvas_size: float = 2000.0) -> None:
+    """Pre-compute 2D positions for every node and store them as x/y.
+
+    Layout is computed with igraph's Fruchterman-Reingold algorithm per
+    connected component so disconnected subgraphs don't pile on top of each
+    other. This lets the frontend skip expensive client-side layout.
+    """
+    nodes = graph.get("nodes", [])
+    edges = graph.get("edges", [])
+    if not nodes:
+        return
+
+    id_to_node = {n["id"]: n for n in nodes}
+    pairs = [
+        (e["source"], e["target"])
+        for e in edges
+        if e["source"] in id_to_node and e["target"] in id_to_node
+    ]
+    if not pairs:
+        # No edges: lay nodes out in a simple grid.
+        cols = max(1, int(len(nodes) ** 0.5))
+        spacing = canvas_size / cols
+        for i, node in enumerate(nodes):
+            node["x"] = round((i % cols) * spacing, 2)
+            node["y"] = round((i // cols) * spacing, 2)
+        return
+
+    try:
+        g = ig.Graph.TupleList(pairs, directed=True)
+    except Exception:
+        return
+
+    names = g.vs["name"]
+    clusters = g.connected_components()
+    component_layouts: list[tuple[list[int], ig.Layout]] = []
+    for comp in clusters:
+        subg = g.subgraph(comp)
+        niter = max(30, min(100, len(comp) // 20))
+        try:
+            lo = subg.layout("fruchterman_reingold", niter=niter)
+        except Exception:
+            continue
+        component_layouts.append((comp, lo))
+
+    if not component_layouts:
+        return
+
+    cols = max(1, int(len(component_layouts) ** 0.5))
+    for comp_idx, (comp, lo) in enumerate(component_layouts):
+        coords = lo.coords
+        xs = [c[0] for c in coords]
+        ys = [c[1] for c in coords]
+        min_x, max_x = min(xs), max(xs)
+        min_y, max_y = min(ys), max(ys)
+        width = max_x - min_x or 1.0
+        height = max_y - min_y or 1.0
+        scale = canvas_size / max(width, height)
+        col = comp_idx % cols
+        row = comp_idx // cols
+        offset_x = col * canvas_size
+        offset_y = row * canvas_size
+        for local_idx, v in enumerate(comp):
+            name = names[v]
+            node = id_to_node.get(name)
+            if node:
+                x, y = coords[local_idx]
+                node["x"] = round(offset_x + (x - min_x) * scale, 2)
+                node["y"] = round(offset_y + (y - min_y) * scale, 2)
 
 
 def _edge(source: str, target: str, edge_type: str, weight: float = 0.8, **extra: Any) -> dict:
@@ -466,6 +536,7 @@ def build_knowledge_graph(
         },
     }
     graph["tour"] = _generate_heuristic_tour(graph)
+    _compute_node_positions(graph)
     return graph
 
 

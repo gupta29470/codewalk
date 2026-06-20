@@ -1,7 +1,9 @@
 "use client";
 
-import { createContext, useContext, useState, useCallback, ReactNode } from "react";
+import { createContext, useContext, useState, useEffect, useCallback, ReactNode } from "react";
 import { AnalyzeResponse, OverviewResponse, ModuleResponse, BlastRadiusResponse, ReadingOrderResponse, ExecutionFlowResponse } from "@/lib/api";
+
+const API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
 
 interface PageCache {
     overview: OverviewResponse | null;
@@ -15,16 +17,16 @@ interface AnalyzeState {
     loading: boolean;
     result: AnalyzeResponse | null;
     error: string;
-    repoPath: string;
     indexMode: string;
     steps: string[];
+    hasIndex: boolean;
     cache: PageCache;
     setLoading: (v: boolean) => void;
     setResult: (v: AnalyzeResponse | null) => void;
     setError: (v: string) => void;
-    setRepoPath: (v: string) => void;
     setIndexMode: (v: string) => void;
     setSteps: (v: string[]) => void;
+    setHasIndex: (v: boolean) => void;
     addStep: (msg: string) => void;
     setCache: <K extends keyof PageCache>(key: K, value: PageCache[K]) => void;
     clearCache: () => void;
@@ -44,9 +46,9 @@ export function AnalyzeProvider({ children }: { children: ReactNode }) {
     const [loading, setLoading] = useState(false);
     const [result, setResult] = useState<AnalyzeResponse | null>(null);
     const [error, setError] = useState("");
-    const [repoPath, setRepoPath] = useState("");
     const [indexMode, setIndexMode] = useState("auto");
     const [steps, setSteps] = useState<string[]>([]);
+    const [hasIndex, setHasIndex] = useState(false);
     const addStep = (msg: string) => setSteps((prev) => [...prev, msg]);
     const [cache, setCacheState] = useState<PageCache>({ ...emptyCache });
 
@@ -58,11 +60,26 @@ export function AnalyzeProvider({ children }: { children: ReactNode }) {
         setCacheState({ ...emptyCache });
     }, []);
 
+    useEffect(() => {
+        let cancelled = false;
+        fetch(`${API_BASE}/index-status`)
+            .then((res) => (res.ok ? res.json() : { indexed: false }))
+            .then((data) => {
+                if (!cancelled) setHasIndex(Boolean(data.indexed));
+            })
+            .catch(() => {
+                if (!cancelled) setHasIndex(false);
+            });
+        return () => {
+            cancelled = true;
+        };
+    }, []);
+
     return (
         <AnalyzeContext.Provider
-            value={{
-                loading, result, error, repoPath, indexMode, steps, cache,
-                setLoading, setResult, setError, setRepoPath, setIndexMode, setSteps, addStep,
+value={{
+                loading, result, error, indexMode, steps, hasIndex, cache,
+                setLoading, setResult, setError, setIndexMode, setSteps, setHasIndex, addStep,
                 setCache, clearCache,
             }}
         >

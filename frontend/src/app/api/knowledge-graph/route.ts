@@ -1,7 +1,7 @@
 import { readFile } from "fs/promises";
 import { NextResponse } from "next/server";
 import { existsSync } from "fs";
-import { join, resolve } from "path";
+import { dirname, basename, join, resolve } from "path";
 import type { NextRequest } from "next/server";
 
 function candidatePaths(repoPath?: string | null): string[] {
@@ -22,6 +22,12 @@ function candidatePaths(repoPath?: string | null): string[] {
   return candidates;
 }
 
+function deriveRepo(filePath: string): { name: string; repoPath: string } {
+  // The repo root is the directory that contains the .codewalk folder.
+  const repoRoot = dirname(dirname(filePath));
+  return { name: basename(repoRoot), repoPath: repoRoot };
+}
+
 export async function GET(request: NextRequest) {
   const repoPath = request.nextUrl.searchParams.get("repoPath");
   const errors: string[] = [];
@@ -30,9 +36,15 @@ export async function GET(request: NextRequest) {
     if (!existsSync(filePath)) continue;
     try {
       const content = await readFile(filePath, "utf-8");
-      return new NextResponse(content, {
-        headers: { "Content-Type": "application/json" },
-      });
+      const graph = JSON.parse(content) as Record<string, unknown>;
+      const project = (graph.project as Record<string, unknown> | undefined) ?? {};
+      // Use the actual repo directory as the source of truth so the UI can detect
+      // which repo is being displayed even when the bundle is cached.
+      const repo = deriveRepo(filePath);
+      project.name = repo.name;
+      project.repoPath = repo.repoPath;
+      graph.project = project;
+      return NextResponse.json(graph);
     } catch (error) {
       errors.push(`${filePath}: ${error instanceof Error ? error.message : String(error)}`);
     }

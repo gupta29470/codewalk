@@ -1,0 +1,53 @@
+name: Review Quality Evaluation
+
+on:
+  pull_request:
+    branches: [master]
+  push:
+    branches: [master]
+  workflow_dispatch:
+
+jobs:
+  review-eval:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+          cache: 'pip'
+
+      - name: Cache HuggingFace models
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/huggingface
+          key: ${{ runner.os }}-hf-${{ hashFiles('requirements.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-hf-
+
+      - name: Install dependencies
+        run: |
+          python -m venv .codewalk-env
+          .codewalk-env/bin/pip install --upgrade pip
+          .codewalk-env/bin/pip install -r requirements.txt
+
+      - name: Write .env
+        run: |
+          cat > .env <<EOF
+          LLM_PROVIDER=deepseek
+          LLM_MODEL=deepseek-v4-flash
+          DEEPSEEK_API_KEY=${{ secrets.DEEPSEEK_API_KEY }}
+          EMBEDDING_MODEL=jinaai/jina-code-embeddings-1.5b
+          EOF
+
+      - name: Build Codewalk index
+        run: |
+          .codewalk-env/bin/python -m src.codewalk.cli analyze --repo .
+
+      - name: Run review-quality benchmark
+        run: |
+          .codewalk-env/bin/python -m src.codewalk.eval.review_eval

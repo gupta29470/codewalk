@@ -48,6 +48,7 @@ class Issue:
     suggestion: str | None = None
     fix_description: str | None = None
     code_snippet: str | None = None
+    cross_file: bool = False
 
 @dataclass
 class ReviewResult:

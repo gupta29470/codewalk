@@ -8,6 +8,7 @@ logger = logging.getLogger("codewalk")
 CONFIG_FILE_MAP = {
     "package.json": "javascript/node",
     "tsconfig.json": "typescript",
+    "nx.json": "nx",
     "pubspec.yaml": "dart/flutter",
     "requirements.txt": "python",
     "pyproject.toml": "python",

@@ -35,7 +35,7 @@ _init_lock = threading.Lock()
 _state_lock = threading.RLock()  # Guards all state mutations (initialize, refresh, rebuild)
 _doc_store: DocStore | None = None
 _db = None  # Postgres connection wrapper — cloud mode only
-pending_update: str | None = None  # Set by MCP ensure_local_index when remote is newer
+pending_update: str | None = None  # Set by MCP download_cloud_index_if_missing when remote is newer
 
 
 def _resolve_repo_path(repo_path: str | None = None) -> str:
@@ -133,11 +133,16 @@ def _init_cloud_tables(conn):
         conn.commit()
 
 
+# Thread-local Postgres connection wrapper. psycopg2 connections are NOT thread-safe,
+# so each thread that needs cloud DB access gets its own connection.
+_db_local = threading.local()
+
+
 def get_db():
-    """Get or create the Postgres connection wrapper (cloud/server mode only).
+    """Get or create a thread-local Postgres connection wrapper (cloud/server mode only).
     Requires DATABASE_URL env var."""
-    global _db
-    if _db is None:
+    helper = getattr(_db_local, "helper", None)
+    if helper is None:
         import psycopg2
         import psycopg2.extras
         db_url = os.environ.get("DATABASE_URL")
@@ -146,8 +151,9 @@ def get_db():
         conn = psycopg2.connect(db_url, cursor_factory=psycopg2.extras.RealDictCursor)
         conn.autocommit = True
         _init_cloud_tables(conn)
-        _db = _PgHelper(conn)
-    return _db
+        helper = _PgHelper(conn)
+        _db_local.helper = helper
+    return helper
 
 def get_store() -> VectorStore:
     """Get the VectorStore. Loads from disk if needed. Raises if no index."""
@@ -218,7 +224,8 @@ def initialize(store: VectorStore, agent, modules_result: dict, analyze_result: 
                files: list[dict] | None = None, deps: dict | None = None,
                repo_path: str | None = None,
                embedded_chunks: list[dict] | None = None,
-               guidelines_path: str = "", docs_path: str = ""):
+               guidelines_path: str = "", docs_path: str = "",
+               force_reindex_extras: bool = False):
     """Set all state after a successful /analyze."""
     global _store, _agent, _modules_result, _analyze_result, _files, _deps, _repo_path, _graph_store, _graph_runtime
     from src.codewalk.pipeline import build_full_analysis
@@ -242,6 +249,8 @@ def initialize(store: VectorStore, agent, modules_result: dict, analyze_result: 
                 embedded_chunks=embedded_chunks,
                 guidelines_path=guidelines_path,
                 docs_path=docs_path,
+                force_reindex_extras=force_reindex_extras,
+                collection_name=getattr(store, "_collection_prefix", None) or get_collection_name(),
             )
             _files = result["files"]
             _deps = result["deps"]
@@ -268,7 +277,11 @@ def refresh(files: list[dict], deps: dict, modules_result: dict):
         if _graph_store is not None:
             _graph_store.close()
 
-        result = build_full_analysis(db_path=db_path, files=files)
+        result = build_full_analysis(
+            db_path=db_path,
+            files=files,
+            collection_name=get_collection_name(),
+        )
         _files = result["files"]
         _deps = result["deps"]
         _modules_result = result["modules_result"]
@@ -307,15 +320,16 @@ def chroma_path() -> str:
 
 
 def scan_repo_files(repo_path: str | None = None) -> list[dict]:
-    """Scan repo respecting codewalk.yaml indexing.exclude (same as cloud indexer)."""
+    """Scan repo respecting codewalk.yaml (same as cloud indexer).
+
+    Always uses team_scan_directory so both indexing.exclude and indexing.include
+    are honored, while the core file_filter.py safety net is still applied.
+    """
     path = _resolve_repo_path(repo_path).rstrip("/")
     config = load_codewalk_yaml(path)
-    if config.exclude:
-        files = team_scan_directory(path, config)
-        _log(f"[scan] team_scan: {len(files)} files (codewalk.yaml excludes applied)")
-        return files
-    _log(f"[scan] default scan: no indexing.exclude in codewalk.yaml")
-    return scan_directory(path)
+    files = team_scan_directory(path, config)
+    _log(f"[scan] team_scan: {len(files)} files (codewalk.yaml applied)")
+    return files
 
 
 def _rebuild_memory_caches():
@@ -349,12 +363,25 @@ def _collection_name_for_path(repo_path: str) -> str:
 
 
 def index_on_disk(repo_path: str | None = None) -> bool:
-    """True if .codewalk has chroma + duckdb and at least one embedded chunk."""
+    """True if .codewalk has the artifacts of a completed index run.
+
+    Fast path: manifest.json + chroma/ + graph.duckdb means the index completed.
+    Fallback: for indexes created before manifest.json was introduced, verify
+    chroma/ + graph.duckdb exist and chroma has at least one embedded chunk.
+    """
     path = _resolve_repo_path(repo_path).rstrip("/")
     chroma = f"{path}/.codewalk/chroma"
     duckdb = f"{path}/.codewalk/graph.duckdb"
+    manifest = f"{path}/.codewalk/manifest.json"
+
     if not os.path.isdir(chroma) or not os.path.isfile(duckdb):
         return False
+
+    # Fast path: manifest.json is written at the end of every indexing run.
+    if os.path.isfile(manifest):
+        return True
+
+    # Fallback for legacy indexes without manifest.json: actually count chunks.
     store = VectorStore(persist_dir=chroma)
     store.create_collection(_collection_name_for_path(path))
     return store.chunk_count() > 0
@@ -395,6 +422,17 @@ def load_scoped_analysis():
     _graph_store = GraphStore(db_path)
     _graph_runtime = GraphRuntime(_graph_store)
 
+    # If the DuckDB was migrated (old schema dropped) or is otherwise empty,
+    # repopulate the file/import/module tables from the in-memory scan before
+    # we try to backfill chunks from ChromaDB.
+    try:
+        file_count = _graph_store.conn.execute("SELECT COUNT(*) FROM files").fetchone()[0]
+    except Exception:
+        file_count = 0
+    if file_count == 0:
+        _log("[load_scoped] DuckDB files table empty — repopulating from analysis")
+        _graph_store.populate_from_analysis(_files, _deps, _modules_result)
+
     _wire_query_state()
     _check_upgrade_banner(get_repo_path())
     _log(f"[load_scoped] {len(_files)} scoped files, {_store.chunk_count()} chroma chunks")
@@ -429,6 +467,7 @@ def rebuild_analysis_cache(embedded_chunks: list[dict] | None = None,
             guidelines_path=guidelines_path,
             docs_path=docs_path,
             force_reindex_extras=force_reindex_extras,
+            collection_name=get_collection_name(),
         )
         _files = result["files"]
         _deps = result["deps"]

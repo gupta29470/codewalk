@@ -9,6 +9,7 @@
 <p align="center">
   <a href="#-features">Features</a> •
   <a href="#-demo">Demo</a> •
+  <a href="#-frontend--knowledge-graph-ui">Frontend</a> •
   <a href="#%EF%B8%8F-setup">Local Setup</a> •
   <a href="#-cloud-deployment">Cloud</a> •
   <a href="#-mcp-integration">MCP</a> •
@@ -39,7 +40,7 @@ Three ways to use it locally, plus optional cloud indexing:
 
 | Interface | Best for |
 |-----------|----------|
-| **Web UI** (Next.js) | Visual exploration — diagrams, module browser, blast radius viewer |
+| **Web UI** (Next.js) | Visual exploration — Knowledge Graph UI, diagrams, module browser, blast radius viewer |
 | **MCP Server** | VS Code Copilot, Claude Code, Cursor — AI agents use tools directly |
 | **REST API** | Scripts, CI/CD, custom integrations |
 
@@ -75,7 +76,7 @@ Three ways to use it locally, plus optional cloud indexing:
 | 🔎 **Semantic Search** | ChromaDB vector search on embedded code chunks (RAG) |
 | 🔬 **Code Review** | Multi-stage review pipeline: test coverage, blast radius, guidelines RAG, context-enriched deep analysis |
 | 🔄 **Incremental Reindex** | Content hash comparison — only re-embeds changed files, skips unchanged |
-| 🧩 **MCP Server** | 27 MCP tools for VS Code Copilot / Claude Code / Cursor / Codex |
+| 🧩 **MCP Server** | 33 MCP tools for VS Code Copilot / Claude Code / Cursor / Codex |
 | 🎙️ **Voice Interface** | Talk to your codebase — mic recording, local STT (faster-whisper), agent-driven routing (MCP + API), TTS response |
 | 🔬 **Graph Intelligence** | DuckDB persistent graph + igraph C-speed traversal: cycle detection, centrality, import chain tracing |
 | 🧬 **Corrective RAG** | Distance-based chunk filtering (free) + LLM answer grading + query rewriting for reliable answers |
@@ -135,6 +136,49 @@ https://github.com/user-attachments/assets/a1dfd347-1135-47d2-b01d-3d995d86208e
 ### Voice Interface
 
 https://github.com/user-attachments/assets/51d41d48-970f-437e-8c50-e6a104d71e0e
+
+---
+
+## 🖥️ Frontend — Knowledge Graph UI
+
+Codewalk ships with a Next.js frontend for visual codebase exploration.
+
+### What you can do
+
+- **Structural view** — explore the repo as a layered dependency graph: modules, files, classes, and functions laid out as an interactive path flow.
+- **Knowledge view** — semantic graph of entities and relationships surfaced by the AI analysis.
+- **Path Finder** — pick a source and target node and discover import/dependency paths between them.
+- **Search** — fuzzy + semantic search across files, symbols, and concepts.
+- **Blast Radius / Diff mode** — visually highlight changed and affected nodes.
+- **Themes** — switch between presets (Dark Gold, Dark Ocean, Dark Forest, Dark Rose, Light Minimal), accent colors, and heading fonts; your choice is saved locally.
+- **Info Panel** — unified node details, metrics, source preview, and project overview.
+- **Sidebar tab lock** — index-dependent tabs stay locked until `GET /index-status` reports `indexed: true`.
+- **Cloud Admin** — visit `/admin` to register repos, list repos, trigger indexing, copy tokens, and check server health/version.
+
+### Run it
+
+```bash
+cd frontend
+npm install
+npm run dev
+```
+
+If you change frontend code and see stale chunk 404s or client-side exceptions, restart with a clean build cache:
+
+```bash
+npm run dev:clean      # clears .next and starts fresh
+npm run restart        # kills port 3000 and restarts dev
+# or
+./scripts/restart-frontend.sh
+```
+
+Set `NEXT_PUBLIC_API_URL` to point at the backend (e.g. `http://localhost:8000` or `https://api.codewalk.xyz`).
+
+Then open `http://localhost:3000`, analyze a repo, and click **Knowledge Graph**.
+
+### Demo
+
+> 🎥 **[Video coming soon — add frontend walkthrough here]**
 
 ---
 
@@ -268,9 +312,18 @@ cd frontend
 npm run dev
 ```
 
-Open **http://localhost:3000** → enter a repo path → click **Analyze Codebase**.
+If the frontend throws stale chunk 404s after pulling or editing code, restart it cleanly:
+
+```bash
+npm run dev:clean
+# or from the project root
+./scripts/restart-frontend.sh
+```
+
+Open **http://localhost:3000** → click **Analyze Codebase** (the repo is discovered from the working directory via `codewalk.yaml`).
 
 Then explore:
+- **Knowledge Graph** — interactive structural + knowledge graph, layer/module legend, node-category filters, detail-level toggle, persona selector, Path Finder, export menu, code viewer, file explorer, tour/onboarding, mobile layout, edge styling, and diff overlay
 - **Overview** — tech stack, modules, dependency diagram, riskiest files
 - **Modules** — browse all modules, click one for file list + dependencies
 - **Blast Radius** — which files break if you change each file
@@ -280,6 +333,7 @@ Then explore:
 - **Code Review** — review git diffs, review single files, load team guidelines
 - **Voice** — click the mic, ask a question by speaking, hear the answer read aloud
 - **Smart Reindex** — incremental re-embed with stats (skipped, changed, deleted)
+- **Cloud Admin** — `/admin` page for repo registration, token management, and server health
 
 ### Option 2: MCP Server (VS Code Copilot / Claude Code / Cursor)
 
@@ -295,13 +349,18 @@ uvicorn src.codewalk.api.main:app --reload --port 8000
 
 **Step 1 — Analyze a codebase:**
 ```bash
+# Run from inside the repo you want to analyze (repo is discovered from cwd via codewalk.yaml)
 curl -X POST http://localhost:8000/analyze \
   -H "Content-Type: application/json" \
-  -d '{"repo_path": "/path/to/your/repo", "index_mode": "auto"}'
+  -d '{"index_mode": "auto"}'
 ```
 
-**Step 2 — Explore the results:**
+**Step 2 — Check index status and explore the results:**
 ```bash
+# Check whether the current workspace is indexed
+# Optional: ?repo_path=/path/to/repo (defaults to cwd discovery)
+curl "http://localhost:8000/index-status" | python3 -m json.tool
+
 # Project overview (tech stack, modules, riskiest files)
 curl http://localhost:8000/overview | python3 -m json.tool
 
@@ -365,9 +424,13 @@ Codewalk runs as an MCP (Model Context Protocol) server, so any AI agent that sp
   "servers": {
     "codewalk": {
       "command": "/path/to/codewalk/.codewalk-env/bin/python",
-      "args": ["-m", "src.codewalk.mcp.server"],
+      "args": [
+        "-c",
+        "import os, sys; sys.path.insert(0, os.environ['CODEWALK_PATH']); from src.codewalk.mcp.server import mcp; mcp.run(transport='stdio')"
+      ],
       "cwd": "${workspaceFolder}",
       "env": {
+        "CODEWALK_PATH": "/path/to/codewalk",
         "CODEWALK_SERVER_URL": "https://api.codewalk.xyz",
         "CODEWALK_REPO_NAME": "owner/repo",
         "CODEWALK_REPO_TOKEN": "cw_repo_xxxxxxxx"
@@ -377,7 +440,7 @@ Codewalk runs as an MCP (Model Context Protocol) server, so any AI agent that sp
 }
 ```
 
-> The repo path comes from the MCP server's `cwd` (`${workspaceFolder}`). Open the target repo in your editor and the MCP server runs from that workspace.
+> `cwd` should be the **target repo** (where `codewalk.yaml` lives). `CODEWALK_PATH` tells Python where to find the Codewalk source package. Open the target repo in your editor so the server starts from that workspace.
 
 Get `repo_token` after first index (on server):
 
@@ -386,7 +449,9 @@ docker compose exec postgres psql -U codewalk -d codewalk -c \
   "SELECT repo_token FROM repos WHERE full_name='owner/repo';"
 ```
 
-Run **`codewalk_connect_repo`** in Cursor or let analyze auto-download the index.
+Run **`codewalk_connect_repo`** in Cursor or let analyze auto-download the index. Cloud sync tools include `codewalk_pull_index`, `codewalk_connect_repo`, `codewalk_index_status`, `codewalk_check_version`, and `codewalk_show_knowledge_graph`.
+
+> Every MCP tool is wrapped with a workspace-change guard (`_refresh_state_if_moved`) that re-discovers the current working directory and resets state if the workspace changes.
 
 ### Local-only MCP (index on your machine)
 
@@ -395,16 +460,16 @@ No cloud — index runs locally via `codewalk_analyze_codebase`. After `rebuild_
 | Surface | Local embed entrypoint | Notes |
 |---------|------------------------|-------|
 | **MCP** `codewalk_analyze_codebase` | `index_from_paths_parallel` | `rebuild_analysis_cache` → parallel chunk/embed → `write_manifest` |
-| **API** `POST /analyze` (+ `/analyze/stream`) | `full_index_parallel` | Same Chroma output under `{repo_path}/.codewalk/` |
+| **API** `POST /analyze` (+ `/analyze/stream`) | `full_index_parallel` | Same Chroma output under `{repo}/.codewalk/` |
 
 ### Review & approve fixes (agent + MCP)
 
 You talk to your **IDE agent**; the agent calls **Codewalk MCP tools**. Codewalk does not render UI — each host has its own approve/reject experience (Cursor approval cards, Copilot chat, Claude Code prompts, etc.). The agent must present each fix and wait for your approval through that host UI (or yes/no in chat).
 
-1. Agent runs `codewalk_review_diff` → `codewalk_reflect_review`
+1. Agent runs `codewalk_review_diff`
 2. Per fix: `codewalk_approve_action` → you approve/reject in **your host's UI**
 3. On approve: `codewalk_apply_fix(..., approval_token=<token>)` (enforced in code)
-4. After edits: `codewalk_incremental_reindex`
+4. After edits: `codewalk_verify_fix` → `codewalk_incremental_reindex`
 
 Full agent rules: `src/codewalk/mcp/server.py` FastMCP `instructions` (sent on MCP connect).
 
@@ -417,12 +482,17 @@ Full agent rules: `src/codewalk/mcp/server.py` FastMCP `instructions` (sent on M
 | Tool | Index required? | Notes |
 |------|-----------------|-------|
 | `codewalk_analyze_codebase` | Builds/loads | Cloud download or local embed |
-| Query tools (search, overview, modules, …) | Yes | `_require_index()` auto-loads disk |
+| `codewalk_generate_config` | No | Creates starter `codewalk.yaml` |
+| Query tools (search, overview, modules, symbols, …) | Yes | `_require_index()` auto-loads disk |
+| `codewalk_find_circular_dependencies` | Yes | Uses graph data |
 | `codewalk_incremental_reindex`, `refresh_analysis` | Yes | |
-| `codewalk_review_diff` | Soft | Better with index |
-| `codewalk_pull_index`, `connect_repo`, `index_status` | Cloud config | Replace `.codewalk/` on download |
+| `codewalk_review_diff`, `review_file`, `reflect_review`, `get_review_context` | Soft / Yes | Better with index |
 | `codewalk_approve_action` / `apply_fix` | No / edits files | Token required for apply |
-| Docs / guidelines / voice / `check_version` | Varies | See MCP server `instructions` |
+| `codewalk_verify_fix` | No | Runs static analysis + tests |
+| `codewalk_run_static_analysis` | No | ruff/mypy/eslint/etc. |
+| `codewalk_run_tests` | No | pytest/npm test/etc. |
+| `codewalk_pull_index`, `connect_repo`, `index_status` | Cloud config | Replace `.codewalk/` on download |
+| Docs / guidelines / voice / `check_version` / `show_knowledge_graph` | Varies | See MCP server `instructions` |
 
 ### Starting the MCP Server in VS Code
 
@@ -451,36 +521,50 @@ Full agent rules: `src/codewalk/mcp/server.py` FastMCP `instructions` (sent on M
 Add to `.vscode/mcp.json` in your desired project:
 
 > ⚠️ **Replace `/path/to/codewalk`** with the actual absolute path where you cloned codewalk.
-> The repo to analyze is determined by `cwd` (`${workspaceFolder}`). Open the target repo in your editor so the MCP server starts from that workspace.
+> `cwd` (`${workspaceFolder}`) should be the target repo so the server discovers `codewalk.yaml`. `CODEWALK_PATH` must point at the cloned Codewalk repo so `src.codewalk.mcp.server` resolves.
 
 ```json
 {
   "servers": {
     "codewalk": {
       "command": "/path/to/codewalk/.codewalk-env/bin/python",
-      "args": ["-m", "src.codewalk.mcp.server"],
+      "args": [
+        "-c",
+        "import os, sys; sys.path.insert(0, os.environ['CODEWALK_PATH']); from src.codewalk.mcp.server import mcp; mcp.run(transport='stdio')"
+      ],
       "cwd": "${workspaceFolder}",
       "env": {
-        "EXCLUDE_PATHS": "",
-        "REVIEW_GUIDELINES_PATH": "",
-        "CODE_DOCS_PATH": ""
+        "CODEWALK_PATH": "/path/to/codewalk"
       }
     }
   }
 }
 ```
 
-> **`EXCLUDE_PATHS`** — comma-separated list of paths/patterns to skip during scanning. Example: `"tests,docs,scripts/legacy,*.generated.*"`
-
-> **`REVIEW_GUIDELINES_PATH`** — path to a folder of team coding guidelines (.md files). Used by `codewalk_review_diff` and `codewalk_review_file` to check code against your team's standards. Example: `"/path/to/team/review-guidelines"`
-
-> **`CODE_DOCS_PATH`** — default path for team documents (.md, .pdf, .txt). Used by `codewalk_index_docs` if no path argument is given. Example: `"/path/to/team/docs"`
-
-> **Customizing file filters:** Codewalk uses a deterministic file filter ([`src/codewalk/ingestion/file_filter.py`](src/codewalk/ingestion/file_filter.py)) — no LLM involved. If a folder or file is **not being indexed** that you need, you have three options:
+> **Team config (`codewalk.yaml`):** Put repo-specific settings in the repo root:
 >
-> 1. **`EXCLUDE_PATHS` env var** — comma-separated dirs/patterns passed via `mcp.json` or `.env`. Example: `"test,docs,*.generated.*"`. These are checked at scan time.
-> 2. **`.codewalkignore` file** — gitignore-style patterns in the repo root (see below).
-> 3. **Edit `file_filter.py` directly** — remove entries from `SKIP_DIRS`, `SKIP_EXTENSIONS`, `SKIP_FILES`, or `SKIP_SUFFIXES` to allow specific file types that are blocked by default (e.g., `.md`, `.css`, `.sql`, `migrations/`).
+> ```yaml
+> guidelines_path: contributing-docs
+> docs_path: team-docs
+> indexing:
+>   exclude:
+>     - tests/**
+>     - docs/**
+>     - scripts/legacy/**
+>     - "*.generated.*"
+>   include:
+>     - docs/architecture/**
+> ```
+>
+> `indexing.exclude` is a list of paths/patterns skipped during scanning. `indexing.include` overrides exclusions (and the core safety net) for specific paths. These are checked at scan time. Generate a starter config with stack-specific excludes via `python -m src.codewalk.cli generate-config` or `@codewalk Run codewalk_generate_config`.
+
+> **Customizing file filters:** Codewalk uses a deterministic core safety net ([`src/codewalk/ingestion/file_filter.py`](src/codewalk/ingestion/file_filter.py)) — no LLM involved. It always skips universally bad content (`.git`, `node_modules`, dependency/build/cache dirs, binaries, media, secrets, lock files, generated suffixes). Repo- or framework-specific exclusions (e.g., `tools/`, `scripts/`, `cdk/`, `migrations/`, story files) belong in `codewalk.yaml` (often generated by `generate-config`). If a folder or file is **not being indexed** that you need, you have three options:
+>
+> 1. **`codewalk.yaml` `indexing.include`** — override exclusions for specific paths. Example: `["docs/architecture/**", "src/migrations/schema.py"]`.
+> 2. **`codewalk.yaml` `indexing.exclude`** — repo-specific dirs/patterns. Example: `["tests/**", "docs/**", "*.generated.*"]`.
+> 3. **`.codewalkignore` file** — gitignore-style patterns in the repo root (see below).
+>
+> You generally do **not** need to duplicate `node_modules`, `.git`, build dirs, etc. in `codewalk.yaml`; those are handled by the core safety net.
 
 > **`.codewalkignore`** — Create a `.codewalkignore` file in the root of the repo you're analyzing to skip specific files/directories:
 >
@@ -521,12 +605,13 @@ Add to `~/.claude/mcp.json`:
   "mcpServers": {
     "codewalk": {
       "command": "/path/to/codewalk/.codewalk-env/bin/python",
-      "args": ["-m", "src.codewalk.mcp.server"],
+      "args": [
+        "-c",
+        "import os, sys; sys.path.insert(0, os.environ['CODEWALK_PATH']); from src.codewalk.mcp.server import mcp; mcp.run(transport='stdio')"
+      ],
       "cwd": "${workspaceFolder}",
       "env": {
-        "EXCLUDE_PATHS": "",
-        "REVIEW_GUIDELINES_PATH": "",
-        "CODE_DOCS_PATH": ""
+        "CODEWALK_PATH": "/path/to/codewalk"
       }
     }
   }
@@ -544,13 +629,13 @@ Settings → MCP Servers → Add:
     "args": ["-m", "src.codewalk.mcp.server"],
     "cwd": "${workspaceFolder}",
     "env": {
-      "EXCLUDE_PATHS": "",
-      "REVIEW_GUIDELINES_PATH": "",
-      "CODE_DOCS_PATH": ""
+      "CODEWALK_PATH": "/path/to/codewalk"
     }
   }
 }
 ```
+
+> Exclusions now live in `codewalk.yaml` (`indexing.exclude`) or `.codewalkignore`, not in the `EXCLUDE_PATHS` env var.
 
 ### OpenAI Codex CLI
 
@@ -561,12 +646,13 @@ Add to `~/.codex/mcp.json`:
   "mcpServers": {
     "codewalk": {
       "command": "/path/to/codewalk/.codewalk-env/bin/python",
-      "args": ["-m", "src.codewalk.mcp.server"],
+      "args": [
+        "-c",
+        "import os, sys; sys.path.insert(0, os.environ['CODEWALK_PATH']); from src.codewalk.mcp.server import mcp; mcp.run(transport='stdio')"
+      ],
       "cwd": "${workspaceFolder}",
       "env": {
-        "EXCLUDE_PATHS": "",
-        "REVIEW_GUIDELINES_PATH": "",
-        "CODE_DOCS_PATH": ""
+        "CODEWALK_PATH": "/path/to/codewalk"
       }
     }
   }
@@ -597,14 +683,16 @@ You just tell the AI to analyze — **the AI handles the rest automatically**.
 │                                                                     │
 │  codewalk_get_overview          → project summary + dependency flow │
 │  codewalk_search_codebase       → semantic code search              │
+│  codewalk_lookup_symbol         → find symbols by name across repo  │
 │  codewalk_get_module_info       → inspect a specific module         │
 │  codewalk_explain_function      → AI-powered function explanation   │
 │  codewalk_get_blast_radius_map  → change risk analysis              │
+│  codewalk_find_circular_dependencies → detect import cycles         │
 │  codewalk_get_reading_order     → optimal file reading sequence     │
 │  codewalk_get_execution_flow    → module/file dependency flow       │
 │  codewalk_get_architecture_health → bottlenecks, cycles, key files  │
 │  codewalk_call_chain(source, target) → trace import path between    │
-│  codewalk_index_docs(path)      → index .md/.pdf/.txt docs          │
+│  codewalk_index_docs(docs_path) → index .md/.pdf/.txt docs          │
 │  codewalk_search_docs(query)    → search indexed documents           │
 │  codewalk_ask_docs(question)    → RAG answer grounded in docs        │
 │  codewalk_approve_action(text)  → HITL gate (returns approval_token) │
@@ -614,12 +702,15 @@ You just tell the AI to analyze — **the AI handles the rest automatically**.
 ┌─────────────────────────────────────────────────────────────────────┐
 │                 MAINTENANCE (after code changes)                    │
 │                                                                     │
+│  codewalk_generate_config       → starter codewalk.yaml             │
 │  codewalk_incremental_reindex   → re-embed only changed files       │
 │  codewalk_refresh_analysis      → re-scan without re-embedding      │
 │  codewalk_review_diff           → review git diff (context + checks) │
 │  codewalk_reflect_review        → self-critique review (reflection)  │
 │  codewalk_review_file           → review file vs codebase patterns  │
 │  codewalk_load_guidelines       → load team coding standards        │
+│  codewalk_run_static_analysis   → ruff/mypy/eslint/etc. on files    │
+│  codewalk_run_tests             → pytest/npm test/etc. on files     │
 └─────────────────────────────────────────────────────────────────────┘
 
 ┌─────────────────────────────────────────────────────────────────────┐
@@ -932,6 +1023,86 @@ or
 
 ---
 
+#### "Find circular dependencies"
+
+**Tool:** `codewalk_find_circular_dependencies()` — no parameters
+
+Detect import cycles that can cause brittle architecture or load-order bugs.
+
+```
+@codewalk find circular dependencies
+or
+@codewalk_find_circular_dependencies
+```
+
+**When to use:** Before a refactor or when investigating why two modules feel tightly coupled.
+
+---
+
+#### "Look up a symbol"
+
+**Tool:** `codewalk_lookup_symbol(symbol_name)` — pass a function, class, or method name
+
+Find every definition and key references of a named symbol across the repo.
+
+```
+@codewalk lookup symbol authenticate_user
+or
+@codewalk_lookup_symbol authenticate_user
+```
+
+**When to use:** You know a name and want its exact file, line, and callers without doing a semantic search.
+
+---
+
+#### "Generate a starter config"
+
+**Tool:** `codewalk_generate_config()` — no parameters
+
+Create a stack-specific `codewalk.yaml` with sensible excludes for your repo.
+
+```
+@codewalk generate a codewalk.yaml for this repo
+or
+@codewalk_generate_config
+```
+
+**When to use:** First-time setup, before the first analyze, to avoid indexing build artifacts and tests.
+
+---
+
+#### "Run static analysis"
+
+**Tool:** `codewalk_run_static_analysis(file_paths)` — pass one or more files
+
+Run language-appropriate linters/type-checkers (ruff, mypy, eslint, etc.) on the given files.
+
+```
+@codewalk run static analysis on src/auth.py
+or
+@codewalk_run_static_analysis src/auth.py
+```
+
+**When to use:** After applying a fix or editing files to catch style/type issues quickly.
+
+---
+
+#### "Run tests"
+
+**Tool:** `codewalk_run_tests(file_paths)` — pass one or more files
+
+Auto-detect and run the relevant test command (pytest, npm test, go test, cargo test, etc.).
+
+```
+@codewalk run tests for src/auth.py
+or
+@codewalk_run_tests src/auth.py
+```
+
+**When to use:** After a fix or refactor to confirm nothing broke.
+
+---
+
 ### Quick Reference — What To Ask
 
 | You want to... | Just say... |
@@ -953,6 +1124,11 @@ or
 | Load guidelines | `@codewalk load guidelines from docs/` or `@codewalk_load_guidelines docs/` |
 | Architecture health | `@codewalk check architecture health` or `@codewalk_get_architecture_health` |
 | Trace import chain | `@codewalk trace chain from config.py to server.py` or `@codewalk_call_chain config.py server.py` |
+| Find circular dependencies | `@codewalk find circular dependencies` or `@codewalk_find_circular_dependencies` |
+| Lookup a symbol | `@codewalk lookup symbol authenticate_user` or `@codewalk_lookup_symbol authenticate_user` |
+| Run static analysis | `@codewalk run static analysis on src/auth.py` or `@codewalk_run_static_analysis src/auth.py` |
+| Run tests | `@codewalk run tests for src/auth.py` or `@codewalk_run_tests src/auth.py` |
+| Generate repo config | `@codewalk generate a codewalk.yaml` or `@codewalk_generate_config` |
 | Search team docs | `@codewalk search docs for deployment` or `@codewalk_search_docs deployment` |
 | Ask docs a question | `@codewalk how do we deploy?` or `@codewalk_ask_docs how do we deploy` |
 | Deep research | `@codewalk research how error handling works across the codebase` |
@@ -979,7 +1155,6 @@ uvicorn src.codewalk.api.main:app --reload --port 8000
 curl -X POST http://localhost:8000/analyze \
   -H "Content-Type: application/json" \
   -d '{
-    "repo_path": "/Users/you/projects/my-app",
     "collection_name": "",
     "index_mode": "auto"
   }'
@@ -996,6 +1171,7 @@ curl -X POST http://localhost:8000/analyze \
 }
 ```
 
+- The repo is discovered from the current working directory via `codewalk.yaml` (auto-created if missing). `repo_path` is no longer accepted in the request body.
 - `index_mode`: `"auto"` (skip if indexed), `"reindex"` (smart update), `"full"` (wipe & rebuild)
 - `collection_name`: leave empty — reads `manifest.collection_name` if present, else repo folder name
 - **`auto` + index on disk** → load only (`load_scoped_analysis`), no re-embed — same idea as MCP `codewalk_analyze_codebase`
@@ -1006,7 +1182,7 @@ curl -X POST http://localhost:8000/analyze \
 ```bash
 curl -N -X POST http://localhost:8000/analyze/stream \
   -H "Content-Type: application/json" \
-  -d '{"repo_path": "/Users/you/projects/my-app", "index_mode": "auto"}'
+  -d '{"index_mode": "auto"}'
 ```
 
 **Response (Server-Sent Events)** — `step` values from `analyze_stream()` in `main.py`:
@@ -1048,6 +1224,26 @@ data: {"step": "analyze", "message": "Detected 5 modules"}
 data: {"step": "done", "message": "Analysis complete!", "result": {...}}
 ```
 
+#### `GET /index-status` — Check whether the current workspace is indexed
+
+```bash
+# Check cwd-discovered repo
+curl http://localhost:8000/index-status | python3 -m json.tool
+
+# Optional: check a specific repo path
+curl "http://localhost:8000/index-status?repo_path=/Users/you/projects/my-app" | python3 -m json.tool
+```
+
+**Response:**
+```json
+{
+  "indexed": true,
+  "repo_path": "/Users/you/projects/my-app"
+}
+```
+
+The frontend sidebar uses this endpoint to lock index-dependent tabs until `indexed: true`.
+
 ### API endpoints — index requirements (parity with MCP)
 
 All query endpoints call `state.require_index()` — auto-loads `.codewalk/` from disk after server restart (same as MCP `_require_index()`).
@@ -1063,6 +1259,14 @@ All query endpoints call `state.require_index()` — auto-loads `.codewalk/` fro
 | `GET /reading-order` | Yes | `codewalk_get_reading_order` | |
 | `GET /execution-flow` | Yes | `codewalk_get_execution_flow` | |
 | `GET /architecture`, `/cycles` | Yes | `codewalk_get_architecture_health` | |
+| `POST /semantic-search` | Yes | `codewalk_search_codebase` | Chroma semantic search endpoint |
+| `POST /rag/expand-query` | Yes | — | LLM query expansion for RAG |
+| `POST /rag/rerank` | Yes | — | LLM chunk reranking |
+| `POST /rag/symbol-lookup` | Yes | `codewalk_lookup_symbol` | DuckDB symbol lookup |
+| `POST /tools/static-analysis` | No | `codewalk_run_static_analysis` | ruff/mypy/eslint/etc. on files |
+| `POST /tools/run-tests` | No | `codewalk_run_tests` | pytest/npm test/etc. on files |
+| `GET /version` | No | `codewalk_check_version` | Codewalk version + commit info |
+| `GET /staleness` | Yes | — | Local vs cloud index staleness |
 | `POST /refresh` | Yes | `codewalk_refresh_analysis` | No re-embed |
 | `POST /incremental-reindex` | Yes | `codewalk_incremental_reindex` | `team_config` + manifest collection |
 | `POST /review` | Soft (better with index) | `codewalk_review_diff` | Works with partial context |
@@ -1087,6 +1291,7 @@ curl -X POST http://localhost:8000/refresh
 ```json
 {
   "status": "refreshed",
+  "repo_path": "/Users/you/projects/my-app",
   "files": 142,
   "modules": ["api", "auth", "models", "utils", "frontend"]
 }
@@ -1284,6 +1489,8 @@ curl -X POST http://localhost:8000/incremental-reindex
 }
 ```
 
+**How it works:** Incremental reindex first performs a Chroma incremental update (only changed files are embedded/deleted). It then fully rebuilds DuckDB and `knowledge-graph.json` from all Chroma chunks, and re-indexes docs/guidelines. The manifest (`{repo}/.codewalk/manifest.json`) is updated every write with an incremented `index_version` and a `chunk_count` reflecting total Chroma chunks.
+
 ---
 
 ### Review Endpoints
@@ -1299,6 +1506,8 @@ curl -X POST http://localhost:8000/review \
 **Response:**
 ```json
 {
+  "verdict": "request_changes",
+  "verdict_reason": "Critical security issue found that must be fixed before merge.",
   "issues": [
     {
       "severity": "critical",
@@ -1332,7 +1541,21 @@ curl -X POST http://localhost:8000/review/file \
 **Response:**
 ```json
 {
-  "review": "## File Review: pipeline.py\n\n### Consistency...\n",
+  "verdict": "approve_with_nits",
+  "verdict_reason": "Non-critical issues found. Fix recommended but not blocking.",
+  "issues": [
+    {
+      "severity": "suggestion",
+      "category": "style",
+      "file_path": "src/codewalk/pipeline.py",
+      "line_number": 120,
+      "title": "Consider extracting helper function",
+      "explanation": "The inline loop is repeated in two places.",
+      "suggestion": "Move the loop body into a private helper.",
+      "code_snippet": "for chunk in chunks:"
+    }
+  ],
+  "summary": "Clean change with one minor style suggestion.",
   "file_path": "src/codewalk/pipeline.py"
 }
 ```
@@ -1423,7 +1646,7 @@ Local MCP → GET /indexes/{owner}/{repo} → query locally
 | Event | What happens |
 |-------|----------------|
 | **First `git push`** | Auto-registers repo, incremental index, `index_status: ready` |
-| **Later pushes** | Incremental re-index; `index_version` bumps |
+| **Later pushes** | Incremental re-index; cloud Postgres `index_version` bumps and is written to the downloaded `.codewalk/manifest.json` |
 | **Push during indexing** | Older run superseded; newest commit wins |
 | **Deploy / API restart** | Orphan jobs cancelled; catch-up re-indexes stale/pending repos (~15s) |
 | **Stale `codewalk_version`** | Catch-up full re-index after semver deploy |
@@ -1432,6 +1655,10 @@ Local MCP → GET /indexes/{owner}/{repo} → query locally
 **Laptop after server index updates:** `codewalk_pull_index` (not `codewalk_analyze_codebase` when cloud is configured).
 
 **Staleness banners (MCP):** `[Cloud]` → pull index / wait for server catch-up; `[Local]` → `codewalk_analyze_codebase`. See [deploy/SERVER_OPS.md](deploy/SERVER_OPS.md) §6.
+
+**Cloud Admin UI:** The frontend includes an `/admin` page to register repos, list repos, trigger indexing, copy per-repo tokens, and check server health/version. Production API base is configured via `NEXT_PUBLIC_API_URL`.
+
+**Local-ahead safety:** `codewalk_pull_index` and `codewalk_connect_repo` warn and require `force=True` when the local `.codewalk/manifest.json` `index_version` is ahead of the cloud Postgres row.
 
 ### Architecture (components)
 
@@ -1476,12 +1703,24 @@ indexing:
     - master
     - release/**
   exclude:
+    # Repo-specific dirs/files (the core safety net already skips
+    # node_modules, build artifacts, binaries, secrets, lock files, etc.)
     - frontend/**
-    - build/**
     - docs/**
+  include:
+    # Override an exclusion for a specific path
+    - docs/architecture/**
 ```
 
-Cloud reads this on every index. Pushes to other branches are ignored. See [FULL_SETUP_GUIDE.md § Phase 7](FULL_SETUP_GUIDE.md#9-phase-7--team-config-codewalkyaml).
+Generate a starter config with stack-specific excludes:
+
+```bash
+python -m src.codewalk.cli generate-config
+```
+
+Or via MCP: `@codewalk Run codewalk_generate_config`.
+
+Cloud reads `codewalk.yaml` on every index. Pushes to other branches are ignored. See [FULL_SETUP_GUIDE.md § Phase 7](FULL_SETUP_GUIDE.md#9-phase-7--team-config-codewalkyaml).
 
 ### Config templates
 
@@ -1527,11 +1766,14 @@ Push to `master` → build image → GHCR → deploy to Hetzner (`deploy-server.
 │   LangGraph StateGraph ─── LLM (bind_tools) ───┐        │
 │          │                                      │        │
 │          ▼                                      ▼        │
-│   ┌─ 7 Agent Tools ──────────────────────────────┐       │
-│   │ search_codebase    get_overview              │       │
-│   │ get_module_info    get_blast_radius_map       │       │
-│   │ explain_function   get_reading_order          │       │
-│   │                    get_execution_flow         │       │
+│   ┌─ 13 Agent Tools ─────────────────────────────┐       │
+│   │ search_codebase     get_overview             │       │
+│   │ get_module_info     get_blast_radius_map     │       │
+│   │ explain_function    get_reading_order        │       │
+│   │ review_diff         get_execution_flow       │       │
+│   │ review_file         get_architecture_health  │       │
+│   │ load_guidelines     apply_fix                │       │
+│   │ verify_fix                                     │       │
 │   └──────────────────────────────────────────────┘       │
 ├──────────────────────────────────────────────────────────┤
 │                    ANALYSIS LAYER                         │
@@ -1546,7 +1788,7 @@ Push to `master` → build image → GHCR → deploy to Hetzner (`deploy-server.
 │                    GRAPH LAYER                           │
 │                                                          │
 │   graph/store.py ──► graph/runtime.py                    │
-│   (DuckDB 7-table     (igraph C-speed                    │
+│   (DuckDB 10-table    (igraph C-speed                    │
 │    persistent          traversal: cycles,                 │
 │    graph)              centrality, paths)                 │
 │                                                          │
@@ -1628,7 +1870,7 @@ codewalk/
 │   │   ├── blast_radius.py        #   Change impact (BFS)
 │   │   └── reading_order.py       #   Topological sort
 │   ├── graph/                     # Graph intelligence layer
-│   │   ├── graph_store.py         #   DuckDB 7-table schema + stable hash IDs
+│   │   ├── graph_store.py         #   DuckDB 10-table schema + stable hash IDs
 │   │   └── graph_runtime.py       #   igraph: cycles, centrality, shortest path
 │   ├── embeddings/                # Vectorization
 │   │   ├── chunker.py             #   Code → chunks
@@ -1673,7 +1915,7 @@ codewalk/
 │   │   └── github_app.py          #   GitHub App webhook handler
 │   ├── cli.py                     #   Command-line interface
 │   └── mcp/                       # Model Context Protocol
-│       └── server.py              #   27 MCP tools (stdio)
+│       └── server.py              #   33 MCP tools (stdio)
 │
 ├── frontend/                      # Next.js 14 web UI
 │   └── src/app/
@@ -1697,7 +1939,8 @@ codewalk/
 ├── <target-repo>/.codewalk/
 │   ├── chroma/                    # ChromaDB persistent storage (per repo)
 │   ├── graph.duckdb               # DuckDB graph database (relationships)
-│   └── meta.json                  # Version tracking + index metadata
+│   ├── knowledge-graph.json       # Serialized knowledge graph entities/relationships
+│   └── manifest.json              # Version tracking + index metadata (index_version, chunk_count)
 │
 ├── deploy/                        # Production deployment
 │   ├── Dockerfile                 #   Multi-stage Python 3.11 build
@@ -1729,14 +1972,11 @@ codewalk/
 | `LLM_PROVIDER` | `ollama` | LLM backend: `ollama`, `openai`, `anthropic`, `gemini`, `groq`, `openrouter` |
 | `LLM_MODEL` | `qwen3.5:27b` | Model name (must match provider) |
 | `EMBEDDING_MODEL` | `jinaai/jina-code-embeddings-1.5b` | Sentence-transformer model for code embeddings |
-| `EXCLUDE_PATHS` | — | Comma-separated paths to exclude from scanning (e.g. `tests,docs,*.generated.*`) |
 | `GROQ_API_KEY` | — | Groq API key |
 | `OPENAI_API_KEY` | — | OpenAI API key |
 | `ANTHROPIC_API_KEY` | — | Anthropic API key |
 | `GOOGLE_API_KEY` | — | Google Gemini API key |
 | `OPENROUTER_API_KEY` | — | OpenRouter API key |
-| `REVIEW_GUIDELINES_PATH` | — | Path to directory with team coding guidelines (.md, .txt, .rst) |
-| `CODE_DOCS_PATH` | — | Path to team documents for semantic search |
 | `POSTGRES_PASSWORD` | — | Postgres password (for Docker/server deployment) |
 | `CORS_ORIGINS` | `*` | Comma-separated allowed origins (e.g. `https://yourdomain.com`) |
 | `RATE_LIMIT_REQUESTS` | `60` | Max requests per IP per window |
@@ -1810,7 +2050,7 @@ Add this to each target repo's `.gitignore`:
 | **Voice STT** | faster-whisper (local, small model, int8) |
 | **Voice TTS** | edge-tts (free, en-US-AriaNeural) |
 | **Voice Router** | User's configured LLM (via get_llm()) |
-| **Embeddings** | Jina Code Embeddings 1.5B (1536-dim, MPS/CUDA) |
+| **Embeddings** | Jina Code Embeddings 1.5B (768-dim, Ollama/MPS) |
 | **Code Parsing** | Tree-sitter (15+ language grammars) |
 | **Frontend** | Next.js 14, React 18, TypeScript 5 |
 | **Styling** | Tailwind CSS, shadcn/ui |

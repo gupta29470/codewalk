@@ -4,7 +4,7 @@ from pydantic import BaseModel
 
 class AnalyzeRequest(BaseModel):
     """POST /analyze — request body."""
-    repo_path: str
+    repo_path: str | None = None
     collection_name: str = ""
     index_mode: str = "auto"  # "auto" | "reindex" | "full"
 
@@ -69,6 +69,8 @@ class ReviewRequest(BaseModel):
 class ReviewFileRequest(BaseModel):
     """POST /review/file — request body."""
     file_path: str
+    repo_path: str | None = None
+    guidelines_path: str | None = None
 
 class ReviewResponse(BaseModel):
     """POST /review — response body."""
@@ -82,12 +84,16 @@ class ReviewResponse(BaseModel):
 
 class ReviewFileResponse(BaseModel):
     """POST /review/file — response body."""
-    review: str
+    verdict: str
+    verdict_reason: str
+    issues: list[dict]
+    summary: str
     file_path: str
 
 class GuidelinesRequest(BaseModel):
     """POST /review/guidelines — request body."""
     docs_path: str | None = None
+    repo_path: str | None = None
 
 class ErrorResponse(BaseModel):
     """Error response for any endpoint."""
@@ -96,20 +102,24 @@ class ErrorResponse(BaseModel):
 
 class DocsIndexRequest(BaseModel):
     docs_path: str
+    repo_path: str | None = None
 
 class DocsSearchRequest(BaseModel):
     query: str
     n_results: int = 5
+    repo_path: str | None = None
 
 class DocsAskRequest(BaseModel):
     question: str
     n_results: int = 5
+    repo_path: str | None = None
 
 class SemanticSearchRequest(BaseModel):
     """POST /semantic-search — request body."""
     query: str
-    repo_path: str
+    repo_path: str | None = None
     n_results: int = 5
+    collection_name: str | None = None
 
 class SemanticSearchResult(BaseModel):
     """One semantic search hit."""
@@ -138,6 +148,10 @@ class FixItem(BaseModel):
 class ApplyFixesRequest(BaseModel):
     """POST /review/apply — request body."""
     fixes: list[FixItem]
+    continue_on_error: bool = False
+    validate_only: bool = False
+    run_formatter: bool = True
+
 
 class AppliedFix(BaseModel):
     """One successfully applied fix."""
@@ -150,5 +164,84 @@ class AppliedFix(BaseModel):
 class ApplyFixesResponse(BaseModel):
     """POST /review/apply — response body."""
     applied: list[AppliedFix]
-    failed: dict | None = None
+    failed: list[dict] | None = None
     total: int
+
+
+class StaticAnalysisIssue(BaseModel):
+    """One normalized static-analysis finding."""
+    file_path: str
+    line: int | None
+    column: int | None
+    severity: str
+    rule: str
+    message: str
+    category: str
+    tool: str
+
+
+class StaticAnalysisRequest(BaseModel):
+    """POST /tools/static-analysis — request body."""
+    file_paths: list[str]
+    language_hint: str | None = None
+
+
+class StaticAnalysisResponse(BaseModel):
+    """POST /tools/static-analysis — response body."""
+    issues: list[StaticAnalysisIssue]
+    total: int
+
+
+class TestRunRequest(BaseModel):
+    """POST /tools/run-tests — request body."""
+    file_paths: list[str] | None = None
+    language_hint: str | None = None
+    command: list[str] | None = None
+
+
+class TestRunResponse(BaseModel):
+    """POST /tools/run-tests — response body."""
+    command: str
+    ok: bool
+    returncode: int
+    stdout: str
+    stderr: str
+    error: str | None
+
+
+# ─── RAG utility endpoints ───────────────────────────────────────────
+
+class ExpandQueryRequest(BaseModel):
+    """POST /rag/expand-query — request body."""
+    query: str
+
+
+class ExpandQueryResponse(BaseModel):
+    """POST /rag/expand-query — response body."""
+    original: str
+    queries: list[str]
+    symbol_hint: str | None = None
+
+
+class RerankRequest(BaseModel):
+    """POST /rag/rerank — request body."""
+    query: str
+    results: list[SemanticSearchResult]
+    top_k: int | None = None
+
+
+class RerankResponse(BaseModel):
+    """POST /rag/rerank — response body."""
+    results: list[SemanticSearchResult]
+
+
+class SymbolLookupRequest(BaseModel):
+    """POST /rag/symbol-lookup — request body."""
+    query: str
+    include_callers: bool = True
+    include_callees: bool = False
+
+
+class SymbolLookupResponse(BaseModel):
+    """POST /rag/symbol-lookup — response body."""
+    results: list[SemanticSearchResult]

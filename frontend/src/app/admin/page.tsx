@@ -5,14 +5,30 @@ import { api, AdminRepo } from "@/lib/api";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { Loader2, Shield, Plus, KeyRound, RefreshCw, CheckCircle2, XCircle, Clock } from "lucide-react";
+import {
+    Loader2,
+    Shield,
+    Plus,
+    KeyRound,
+    RefreshCw,
+    CheckCircle2,
+    XCircle,
+    Clock,
+    Play,
+    Server,
+    Copy,
+    Check,
+} from "lucide-react";
 
 export default function AdminPage() {
     const [adminKey, setAdminKey] = useState("");
     const [repos, setRepos] = useState<AdminRepo[]>([]);
     const [error, setError] = useState("");
+    const [indexingRepo, setIndexingRepo] = useState<string | null>(null);
+    const [indexResult, setIndexResult] = useState("");
+    const [copied, setCopied] = useState(false);
+    const [server, setServer] = useState<{ health: string; version: string; commit: string } | null>(null);
 
-    // Register form state
     const [form, setForm] = useState({
         name: "",
         github_url: "",
@@ -21,6 +37,19 @@ export default function AdminPage() {
     });
     const [registering, setRegistering] = useState(false);
     const [registerResult, setRegisterResult] = useState("");
+
+    const fetchServerInfo = useCallback(async () => {
+        try {
+            const [health, version] = await Promise.all([api.health(), api.version()]);
+            setServer({
+                health: health.status,
+                version: version.codewalk_version,
+                commit: version.commit_sha,
+            });
+        } catch {
+            setServer(null);
+        }
+    }, []);
 
     const fetchRepos = useCallback(async () => {
         if (!adminKey.trim()) return;
@@ -33,7 +62,10 @@ export default function AdminPage() {
         }
     }, [adminKey]);
 
-    // Poll every 5 seconds
+    useEffect(() => {
+        fetchServerInfo();
+    }, [fetchServerInfo]);
+
     useEffect(() => {
         if (!adminKey.trim()) return;
         fetchRepos();
@@ -58,7 +90,7 @@ export default function AdminPage() {
                 form.branch,
                 form.installation_id
             );
-            setRegisterResult(`Registered! Repo token: ${result.repo_token}`);
+            setRegisterResult(`Registered ${result.full_name || form.name}. Repo token: ${result.repo_token}`);
             setForm({ name: "", github_url: "", branch: "main", installation_id: "" });
             fetchRepos();
         } catch (err) {
@@ -68,12 +100,39 @@ export default function AdminPage() {
         }
     }
 
+    async function handleIndex(repo: AdminRepo) {
+        if (!adminKey.trim()) return;
+        setIndexingRepo(repo.full_name);
+        setIndexResult("");
+        setError("");
+        try {
+            const result = await api.adminIndex(adminKey, repo.full_name, repo.branch);
+            setIndexResult(
+                `Indexed ${result.repo}: ${result.status}${result.files_scanned ? ` • ${result.files_scanned} files` : ""
+                }${result.total_chunks ? ` • ${result.total_chunks} chunks` : ""}`
+            );
+            fetchRepos();
+        } catch (err) {
+            setError(err instanceof Error ? err.message : `Index failed for ${repo.full_name}`);
+        } finally {
+            setIndexingRepo(null);
+        }
+    }
+
+    function copyToken(token: string) {
+        navigator.clipboard.writeText(token);
+        setCopied(true);
+        setTimeout(() => setCopied(false), 1500);
+    }
+
     function statusBadge(status: string | null) {
         if (!status) return <span className="text-muted-foreground text-xs">—</span>;
         const map: Record<string, { icon: React.ReactNode; className: string }> = {
             queued: { icon: <Clock className="h-3 w-3" />, className: "bg-yellow-100 text-yellow-700" },
             running: { icon: <Loader2 className="h-3 w-3 animate-spin" />, className: "bg-blue-100 text-blue-700" },
+            indexing: { icon: <Loader2 className="h-3 w-3 animate-spin" />, className: "bg-blue-100 text-blue-700" },
             done: { icon: <CheckCircle2 className="h-3 w-3" />, className: "bg-green-100 text-green-700" },
+            ready: { icon: <CheckCircle2 className="h-3 w-3" />, className: "bg-green-100 text-green-700" },
             failed: { icon: <XCircle className="h-3 w-3" />, className: "bg-red-100 text-red-700" },
         };
         const style = map[status] || { icon: null, className: "bg-gray-100 text-gray-700" };
@@ -92,7 +151,27 @@ export default function AdminPage() {
                 <h1 className="text-2xl font-bold tracking-tight">Cloud Admin</h1>
             </div>
 
-            {/* Admin Key Input */}
+            {server && (
+                <Card>
+                    <CardHeader>
+                        <CardTitle className="text-sm flex items-center gap-2">
+                            <Server className="h-4 w-4" />
+                            Server
+                        </CardTitle>
+                    </CardHeader>
+                    <CardContent>
+                        <div className="flex flex-wrap gap-4 text-sm">
+                            <span className="inline-flex items-center gap-1">
+                                <CheckCircle2 className="h-3.5 w-3.5 text-green-600" />
+                                Health: {server.health}
+                            </span>
+                            <span className="text-muted-foreground">Version: {server.version}</span>
+                            <span className="text-muted-foreground font-mono">Commit: {server.commit}</span>
+                        </div>
+                    </CardContent>
+                </Card>
+            )}
+
             <Card>
                 <CardHeader>
                     <CardTitle className="text-sm flex items-center gap-2">
@@ -120,7 +199,6 @@ export default function AdminPage() {
                 </CardContent>
             </Card>
 
-            {/* Register Repo Form */}
             <Card>
                 <CardHeader>
                     <CardTitle className="text-sm flex items-center gap-2">
@@ -134,7 +212,7 @@ export default function AdminPage() {
                             <div>
                                 <label className="text-xs font-medium">Repo Name</label>
                                 <Input
-                                    placeholder="my-project"
+                                    placeholder="owner/repo"
                                     value={form.name}
                                     onChange={(e) => setForm({ ...form, name: e.target.value })}
                                     required
@@ -180,15 +258,26 @@ export default function AdminPage() {
                             )}
                         </Button>
                         {registerResult && (
-                            <div className="text-xs text-green-600 bg-green-50 p-2 rounded-md">
-                                {registerResult}
+                            <div className="flex items-start gap-2 text-xs text-green-600 bg-green-50 p-2 rounded-md">
+                                <span className="flex-1 break-all">{registerResult}</span>
+                                <button
+                                    type="button"
+                                    onClick={() => copyToken(registerResult.split("Repo token: ")[1] || "")}
+                                    className="shrink-0"
+                                    title="Copy token"
+                                >
+                                    {copied ? <Check className="h-3.5 w-3.5" /> : <Copy className="h-3.5 w-3.5" />}
+                                </button>
                             </div>
                         )}
                     </form>
                 </CardContent>
             </Card>
 
-            {/* Repos Table */}
+            {indexResult && (
+                <div className="text-xs text-green-600 bg-green-50 p-3 rounded-md">{indexResult}</div>
+            )}
+
             <Card>
                 <CardHeader>
                     <CardTitle className="text-sm">Registered Repositories</CardTitle>
@@ -209,30 +298,48 @@ export default function AdminPage() {
                             <table className="w-full text-sm">
                                 <thead>
                                     <tr className="border-b text-muted-foreground">
-                                        <th className="text-left py-2 px-3 font-medium">Name</th>
+                                        <th className="text-left py-2 px-3 font-medium">Repository</th>
                                         <th className="text-left py-2 px-3 font-medium">Branch</th>
-                                        <th className="text-left py-2 px-3 font-medium">Status</th>
+                                        <th className="text-left py-2 px-3 font-medium">Index Status</th>
+                                        <th className="text-left py-2 px-3 font-medium">Job</th>
                                         <th className="text-left py-2 px-3 font-medium">Commit</th>
                                         <th className="text-left py-2 px-3 font-medium">Finished</th>
                                         <th className="text-left py-2 px-3 font-medium">Error</th>
+                                        <th className="text-left py-2 px-3 font-medium">Action</th>
                                     </tr>
                                 </thead>
                                 <tbody>
-                                    {repos.map((repo, idx) => (
-                                        <tr key={idx} className="border-b last:border-0 hover:bg-muted/50">
-                                            <td className="py-2 px-3 font-medium">{repo.name}</td>
+                                    {repos.map((repo) => (
+                                        <tr key={repo.full_name} className="border-b last:border-0 hover:bg-muted/50">
+                                            <td className="py-2 px-3 font-medium">{repo.full_name}</td>
                                             <td className="py-2 px-3 text-muted-foreground">{repo.branch}</td>
-                                            <td className="py-2 px-3">{statusBadge(repo.status)}</td>
+                                            <td className="py-2 px-3">{statusBadge(repo.index_status)}</td>
+                                            <td className="py-2 px-3">{statusBadge(repo.job_status)}</td>
                                             <td className="py-2 px-3 font-mono text-xs text-muted-foreground">
-                                                {repo.commit_sha ? repo.commit_sha.slice(0, 7) : "—"}
+                                                {repo.last_indexed_sha ? repo.last_indexed_sha.slice(0, 7) : "—"}
                                             </td>
                                             <td className="py-2 px-3 text-muted-foreground text-xs">
-                                                {repo.finished_at
-                                                    ? new Date(repo.finished_at).toLocaleString()
+                                                {repo.job_finished
+                                                    ? new Date(repo.job_finished).toLocaleString()
                                                     : "—"}
                                             </td>
                                             <td className="py-2 px-3 text-red-600 text-xs max-w-xs truncate">
-                                                {repo.error || "—"}
+                                                {repo.job_error || "—"}
+                                            </td>
+                                            <td className="py-2 px-3">
+                                                <Button
+                                                    size="sm"
+                                                    variant="outline"
+                                                    onClick={() => handleIndex(repo)}
+                                                    disabled={indexingRepo === repo.full_name || !adminKey.trim()}
+                                                >
+                                                    {indexingRepo === repo.full_name ? (
+                                                        <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                                                    ) : (
+                                                        <Play className="h-3.5 w-3.5" />
+                                                    )}
+                                                    <span className="ml-1">Index</span>
+                                                </Button>
                                             </td>
                                         </tr>
                                     ))}

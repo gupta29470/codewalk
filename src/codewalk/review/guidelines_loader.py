@@ -3,33 +3,6 @@ from pathlib import Path
 
 from src.codewalk.embeddings.vector_store import VectorStore
 
-GUIDELINE_EXTENSIONS = {".md", ".txt", ".rst"}
-
-def load_guidelines(guidelines_path: str) -> list[dict]:
-    """Read all guideline files (.md, .txt, .rst) from the guidelines folder.
-
-    Returns list of {"text": content, "metadata": {"source": filename}}
-    """
-    path = Path(guidelines_path)
-    if not path.exists():
-        return []
-    
-    docs = []
-    for doc_file in path.rglob("*"):
-        if not doc_file.is_file():
-            continue
-        if doc_file.suffix.lower() not in GUIDELINE_EXTENSIONS:
-            continue
-        content = doc_file.read_text(encoding="utf-8").strip()
-        if content:
-            docs.append({
-                "text": content,
-                "metadata": {
-                    "source": str(doc_file.relative_to(path)),
-                    "type": "guideline",
-                },
-            })
-    return docs
 
 def get_guidelines_store(
     guidelines_path: str = "",
@@ -38,20 +11,20 @@ def get_guidelines_store(
 ) -> VectorStore | None:
     """Get or create the guidelines vector store.
 
+    ``guidelines_path`` is read from ``codewalk.yaml`` by the caller.
+
+    If no path is passed but a non-empty ``guidelines`` collection already
+    exists in ChromaDB, the existing store is returned so previously indexed
+    guidelines stay available.
+
     Args:
-        guidelines_path: Folder containing guideline .md/.txt/.rst files.
-                         Falls back to REVIEW_GUIDELINES_PATH env var.
+        guidelines_path: Folder containing guideline .md/.txt/.rst/.pdf files.
         persist_dir:     ChromaDB directory (e.g. {repo}/.codewalk/chroma/).
-                         Falls back to {guidelines_path}/.codewalk_index/.
         force:           If True, clear existing and re-embed from scratch.
 
-    Returns None if no guidelines path is available.
-    Embeds guidelines on first call, reuses on subsequent calls.
+    Returns None if no guidelines path is available and no indexed collection
+    exists. Embeds guidelines on first call, reuses on subsequent calls.
     """
-    path = guidelines_path or os.getenv("REVIEW_GUIDELINES_PATH", "")
-    if not path:
-        return None
-
     # Default persist_dir: repo's .codewalk/chroma/ (same ChromaDB as code)
     if not persist_dir:
         from src.codewalk.config import settings
@@ -63,53 +36,76 @@ def get_guidelines_store(
     store.create_collection("guidelines")
 
     existing = store.chunk_count()
+
+    # No path configured, but an indexed collection exists -> reuse it.
+    if not guidelines_path:
+        return store if existing > 0 else None
+
     if existing > 0 and not force:
         return store
 
     # Force reindex — wipe existing chunks
     if force and existing > 0:
         store.clear_collection()
-    
-    # First time — load, chunk, embed, store
-    docs = load_guidelines(path)
-    if not docs:
-        return None
-    
-    chunks = []
-    for doc_idx, doc in enumerate(docs):
-        text = doc["text"]
-        source = doc["metadata"]["source"]
 
-        if len(text) < 2000:
-            chunks.append({
-                "text": text,
-                "file_path": source,
-                "language": "markdown",
-                "chunk_index": doc_idx,
-                "chunk_type": "leftover",
-                "parent_chunk_id": None,
-                "source": "guidelines",
-            })
-        else:
-            # Split by ## headers for large docs
-            sections = text.split("\n## ")
-            for sec_idx, section in enumerate(sections):
-                if sec_idx > 0:
-                    section = "## " + section
-                chunks.append({
-                    "text": section.strip(),
-                    "file_path": source,
-                    "language": "markdown",
-                    "chunk_index": f"{doc_idx}_{sec_idx}",
-                    "chunk_type": "leftover",
-                    "parent_chunk_id": None,
-                    "source": "guidelines",
-                })
-
+    # Load, chunk, embed, store — reuse the docs parser so PDFs are supported too.
+    from src.codewalk.doc_knowledge.doc_parser import parse_all_docs
     from src.codewalk.embeddings.embedder import embed_chunks
+
+    chunks = parse_all_docs(guidelines_path)
+
+    # The doc parser drops very short sections; for guidelines, fall back to
+    # reading each supported file as a single chunk so small rules aren't lost.
+    if not chunks:
+        chunks = _read_guideline_files_raw(guidelines_path)
+        if not chunks:
+            return None
+
+    for chunk in chunks:
+        metadata = chunk.get("metadata", {})
+        chunk["file_path"] = metadata.get("doc_path", "guideline")
+        chunk["chunk_index"] = metadata.get("chunk_index", 0)
+        chunk["chunk_type"] = "leftover"
+        chunk["parent_chunk_id"] = None
+        chunk["source"] = "guidelines"
+        chunk["language"] = "markdown"
+
     embedded = embed_chunks(chunks)
     store.add_parent_child_chunks(embedded)
     return store
+
+
+def _read_guideline_files_raw(guidelines_path: str) -> list[dict]:
+    """Read all supported guideline files as single chunks."""
+    from pathlib import Path
+
+    GUIDELINE_EXTENSIONS = {".md", ".txt", ".rst", ".pdf"}
+    path = Path(guidelines_path)
+    if not path.exists():
+        return []
+
+    chunks = []
+    for doc_file in path.rglob("*"):
+        if not doc_file.is_file():
+            continue
+        if doc_file.suffix.lower() not in GUIDELINE_EXTENSIONS:
+            continue
+        if doc_file.suffix.lower() == ".pdf":
+            from src.codewalk.doc_knowledge.doc_parser import parse_pdf
+            pdf_chunks = parse_pdf(str(doc_file), str(doc_file.relative_to(path)))
+            chunks.extend(pdf_chunks)
+            continue
+        content = doc_file.read_text(encoding="utf-8").strip()
+        if content:
+            chunks.append({
+                "text": content,
+                "metadata": {
+                    "doc_path": str(doc_file.relative_to(path)),
+                    "chunk_index": 0,
+                },
+            })
+    return chunks
+
 
 def search_guidelines(store: VectorStore, diff_files: list, n_results: int = 3) -> str:
     """Search guidelines relevant to the changed files.
@@ -119,7 +115,7 @@ def search_guidelines(store: VectorStore, diff_files: list, n_results: int = 3) 
     """
     if not store:
         return ""
-    
+
     # Build query from file context
     languages = set(diff_file.language for diff_file in diff_files if diff_file.language != "unknown")
     file_paths = [df.file_path for df in diff_files[:5]]
@@ -128,14 +124,12 @@ def search_guidelines(store: VectorStore, diff_files: list, n_results: int = 3) 
     results = store.search(query, n_results=n_results)
     if not results:
         return ""
-    
+
     # Format for prompt injection
     lines = ["## Team Coding Guidelines"]
     for doc in results:
         source = doc.get("metadata", {}).get("source", "unknown")
         lines.append(f"\n### From: {source}")
         lines.append(doc["text"])
-    
+
     return "\n".join(lines)
-
-

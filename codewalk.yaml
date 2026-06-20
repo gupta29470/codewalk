@@ -3,6 +3,13 @@
 # built-in skips), so include common local environments, build caches, and
 # dependency folders here.
 
+# Optional review evidence sources (relative to repo root).
+# When these paths are configured, the indexer embeds them alongside the codebase.
+# During review, the indexed collection is used if present; otherwise the raw
+# files are read directly.
+guidelines_path: ""
+docs_path: ""
+
 indexing:
   # Only these branches trigger cloud indexing (fnmatch patterns)
   branches:

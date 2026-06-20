@@ -3,18 +3,17 @@
 import { api, AnalyzeResponse } from "@/lib/api";
 import { useAnalyze } from "@/lib/analyze-context";
 import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { FolderOpen, Search, Loader2, CheckCircle2 } from "lucide-react";
 
 export default function HomePage() {
   const {
-    repoPath, setRepoPath,
     indexMode, setIndexMode,
     loading, setLoading,
     result, setResult,
     error, setError,
     steps, addStep, setSteps,
+    setHasIndex,
     clearCache,
   } = useAnalyze();
 
@@ -26,12 +25,8 @@ export default function HomePage() {
     setSteps([]);
     clearCache();
 
-    // Use last folder name as collection name so multiple repos don't collide
-    const pathParts = repoPath.replace(/\/+$/, "").split("/");
-    const collectionName = pathParts[pathParts.length - 1] || "codebase";
-
     try {
-      await api.analyzeStream(repoPath, indexMode, (event) => {
+      await api.analyzeStream(indexMode, (event) => {
         if (event.step === "error") {
           setError(event.message);
           return;
@@ -39,8 +34,9 @@ export default function HomePage() {
         addStep(event.message);
         if (event.step === "done" && event.result) {
           setResult(event.result as AnalyzeResponse);
+          setHasIndex(true);
         }
-      }, collectionName);
+      });
     } catch (err) {
       setError(err instanceof Error ? err.message : "Analysis failed");
     } finally {
@@ -67,18 +63,6 @@ export default function HomePage() {
           </CardHeader>
           <CardContent>
             <form onSubmit={handleAnalyze} className="space-y-4">
-              <div className="space-y-2">
-                <label className="text-sm font-medium">Repo Path</label>
-                <Input
-                  placeholder="/path/to/repo"
-                  value={repoPath}
-                  onChange={(e) => setRepoPath(e.target.value)}
-                />
-                <p className="text-xs text-muted-foreground">
-                  Required — absolute path to the repo you want to analyze
-                </p>
-              </div>
-
               <div className="space-y-2">
                 <label className="text-sm font-medium">Index Mode</label>
                 <div className="flex flex-col gap-3">

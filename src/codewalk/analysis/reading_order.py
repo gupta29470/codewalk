@@ -239,9 +239,9 @@ def tag_reading_relevance(order: list[dict]) -> list[dict]:
     # Strip <think>...</think> tags (DeepSeek reasoning models)
     import re
     text = re.sub(r"<think>[\s\S]*?</think>", "", text).strip()
-    if text.startswith("```"):
-        lines = text.split("\n")
-        text = "\n".join(lines[1:-1])
+    # Strip optional markdown code fences without dropping real content
+    text = re.sub(r"^```(?:json)?\s*\n?", "", text)
+    text = re.sub(r"\n?```\s*$", "", text).strip()
 
     try:
         tags = json.loads(text)

@@ -7,30 +7,34 @@ from src.codewalk.core.reflect import reflect
 REVIEW_CRITIC_PROMPT = """You are a senior tech lead reviewing another engineer's code review.
 Your job: identify what the reviewer MISSED, what they got WRONG, and what is a false positive.
 
-Given: the original git diff + the initial review (list of issues).
+Given: the original git diff + the initial review (list of issues in JSON or text form).
 
-You must also check whether the review failed to use blast radius, caller impact, or
-downstream break-risk information when the change appears to affect shared code, public
-APIs, or widely used behavior. If the initial review ignores likely downstream impact or
-fails to say what should be tested, treat that as a missed issue or critique it in the
-summary.
+Use this structured rubric:
+1. Completeness — Did the review catch every security vulnerability, crash risk, and obvious logic bug in the diff?
+2. Correct categorization — Are guard/null-check removals labeled error_handling (not bug)? Are auth/authorization guard removals labeled security? Are interface/signature changes labeled blast_radius?
+3. False positives — Did the reviewer flag code that is actually correct, or complain about style-only matters?
+4. Cross-file awareness — Did the review use blast radius, caller impact, or downstream break-risk information when the change affects shared code, public APIs, or widely used behavior?
+5. Actionability — Does each issue include a line number, a clear explanation, and either corrected code or a concrete fix description?
+6. Language neutrality — Did the reviewer apply language-agnostic patterns (NULL checks, force unwraps, .unwrap(), auth guards) rather than assuming Python-specific idioms?
 
 Output a JSON object:
 {
   "missed": [
-    {"title": "...", "explanation": "...", "severity": "CRITICAL|WARNING|SUGGESTION",
-     "category": "bug|security|style|design|...", "file_path": "...", "line_number": null}
+    {"title": "...", "explanation": "...", "severity": "critical|warning|suggestion",
+     "confidence": "high|medium|low",
+     "category": "bug|security|error_handling|blast_radius|style|test|design|naming|complexity|type_safety|architecture|logging|compatibility|privacy|hygiene",
+     "file_path": "...", "line_number": null}
   ],
   "false_positives": ["issue title that is actually fine and why in one sentence"],
   "summary_critique": "one sentence: overall quality of the initial review"
 }
 
 Rules:
-- Only flag genuinely missed issues — not stylistic disagreements
-- Only flag false positives if you are certain the flagged code is actually correct
-- If the review misses downstream break risk, affected callers/dependents, or obvious
-    test guidance for a risky change, call that out
-- If the initial review is thorough, return empty missed/false_positives arrays"""
+- Only flag genuinely missed issues — not stylistic disagreements.
+- Only flag false positives if you are certain the flagged code is actually correct.
+- If the review misses downstream break risk, affected callers/dependents, or obvious test guidance for a risky change, call that out.
+- If the initial review miscategorizes a removed guard as a bug instead of error_handling, or misses that an auth guard removal is security, list it under missed or false_positives as appropriate.
+- If the initial review is thorough, return empty missed/false_positives arrays."""
 
 def _apply_review_critique(result: ReviewResult, raw_critique: str) -> ReviewResult:
     """improve_fn for code review: add missed issues, remove false positives."""

@@ -40,18 +40,22 @@ _ROUTER_PROMPT = ChatPromptTemplate.from_messages([
      "You are a query router for a code exploration tool.\n"
      "Classify the user's question into one of these categories:\n\n"
      "- 'direct': User asks about a SPECIFIC function, class, or method BY NAME.\n"
-     "  Examples: 'What does scan_directory do?', 'Show me the GraphStore class'\n"
+     "  Examples: 'What does scan_directory do?', 'Show me the GraphStore class', "
+     "  'Explain parse_file'\n"
      "  target = the function/class name (e.g. 'scan_directory')\n\n"
      "- 'search': User asks about a concept, feature, or pattern in the code.\n"
-     "  Examples: 'How does authentication work?', 'Where is error handling done?'\n"
+     "  Examples: 'How does authentication work?', 'Where is error handling done?', "
+     "  'How are embeddings generated?'\n"
      "  target = a refined search query for semantic search\n\n"
      "- 'module': User asks about a module's structure, files, or dependencies.\n"
-     "  Examples: 'What's in the analysis module?', 'Show me the rag module'\n"
+     "  Examples: 'What's in the analysis module?', 'Show me the rag module', "
+     "  'List files in src/codewalk/review'\n"
      "  target = the module name (e.g. 'analysis')\n\n"
      "- 'overview': User asks about the project as a whole.\n"
-     "  Examples: 'What is this project?', 'Give me an overview', 'What tech stack?'\n"
+     "  Examples: 'What is this project?', 'Give me an overview', 'What tech stack?', "
+     "  'Summarize the architecture'\n"
      "  target = the query itself\n\n"
-     "Return the route and target."),
+     "Return the route and target. Pick the most specific route that fits."),
     ("human", "Question: {question}"),
 ])
 

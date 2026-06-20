@@ -24,6 +24,19 @@ EMBED_BATCH_SIZE = 128
 logger = logging.getLogger("codewalk")
 
 
+def _next_index_version(index_dir: str) -> int:
+    """Read existing manifest and return the next index_version, or 1."""
+    manifest_path = _Path(index_dir) / "manifest.json"
+    if manifest_path.exists():
+        try:
+            with open(manifest_path) as f:
+                data = json.load(f)
+            return int(data.get("index_version", 0)) + 1
+        except Exception:
+            pass
+    return 1
+
+
 def chunk_and_embed_parallel(files: list[dict]) -> tuple[list[dict], int]:
     """Parallel chunk + embed using producer-consumer threads.
 
@@ -128,7 +141,14 @@ def full_index_parallel(repo_path: str = "", collection_name: str = "codebase",
     store.create_collection(collection_name)
     store.clear_collection()
     store.add_parent_child_chunks(all_embedded)
-    write_manifest(f"{repo_path.rstrip('/')}/.codewalk", file_count=len(files), chunk_count=len(all_embedded))
+    index_dir = f"{repo_path.rstrip('/')}/.codewalk"
+    write_manifest(
+        index_dir,
+        file_count=len(files),
+        chunk_count=store.chunk_count(),
+        collection_name=collection_name,
+        index_version=_next_index_version(index_dir),
+    )
 
     total_time = time.time() - pipeline_start
     _log(f"[parallel] Complete: {len(all_embedded)} chunks in {total_time:.1f}s")
@@ -217,7 +237,14 @@ def index_from_paths_parallel(paths: list[str], repo_path: str = "",
     # Step 4: Store
     t0 = time.time()
     store.add_parent_child_chunks(all_embedded)
-    write_manifest(f"{repo_path.rstrip('/')}/.codewalk", file_count=len(files), chunk_count=len(all_embedded))
+    index_dir = f"{repo_path.rstrip('/')}/.codewalk"
+    write_manifest(
+        index_dir,
+        file_count=len(files),
+        chunk_count=store.chunk_count(),
+        collection_name=collection_name,
+        index_version=_next_index_version(index_dir),
+    )
     store_time = time.time() - t0
 
     total_time = time.time() - pipeline_start
@@ -311,19 +338,30 @@ def incremental_reindex(
         all_files = team_scan_directory(repo_path, team_config)
     else:
         all_files = scan_directory(repo_path)
-    path_set = set(paths)
-    disk_files = []
 
-    for file in all_files:
-        file_path = file["file_path"]
-        if file_path in path_set:
-            disk_files.append(file)
-            continue
-        for path in path_set:
-            if file_path.startswith(path.rstrip("/") + "/"):
+    # If the repo root itself is in the path list, include every scanned file.
+    # This lets callers pass [repo_path] to pick up new files as well as changed ones.
+    repo_root_resolved = Path(repo_path).resolve()
+    include_all = any(
+        Path(p).resolve() == repo_root_resolved or p in ("", ".")
+        for p in paths
+    )
+
+    if include_all:
+        disk_files = all_files
+    else:
+        path_set = set(paths)
+        disk_files = []
+        for file in all_files:
+            file_path = file["file_path"]
+            if file_path in path_set:
                 disk_files.append(file)
-                break
-    
+                continue
+            for path in path_set:
+                if file_path.startswith(path.rstrip("/") + "/"):
+                    disk_files.append(file)
+                    break
+
     # Step 2: Open existing collection (DON'T recreate — that wipes it)
     store = VectorStore(persist_dir=persist_dir)
     store.create_collection(collection_name)  # get_or_create — safe
@@ -342,7 +380,7 @@ def incremental_reindex(
         file_path = file_info["file_path"]
         disk_paths.add(file_path)
 
-        content = read_file_content(file_info["absolute_path"])
+        content = read_file_content(file_info["absolute_path"]) or ""
         if not content.strip():
             skipped += 1
             continue
@@ -375,8 +413,15 @@ def incremental_reindex(
         all_embedded, total_chunks = chunk_and_embed_parallel(to_embed)
         store.add_parent_child_chunks(all_embedded)
         embedded_count = len(all_embedded)
-    
-    write_manifest(f"{repo_path.rstrip('/')}/.codewalk", file_count=len(disk_files), chunk_count=embedded_count)
+
+    index_dir = f"{repo_path.rstrip('/')}/.codewalk"
+    write_manifest(
+        index_dir,
+        file_count=len(disk_files),
+        chunk_count=store.chunk_count(),
+        collection_name=collection_name,
+        index_version=_next_index_version(index_dir),
+    )
 
     total_time = time.time() - pipeline_start
 
@@ -412,7 +457,7 @@ def write_manifest(
     Single source of truth for index metadata — used by:
       - Local indexing (file_count + chunk_count, commit fields empty)
       - Cloud worker (all fields populated after git clone)
-      - MCP ensure_local_index (reads index_version to check staleness)
+      - MCP download_cloud_index_if_missing (reads index_version to check staleness)
       - state._check_upgrade_banner (reads codewalk_version)
     """
     manifest = {
@@ -446,6 +491,7 @@ def build_full_analysis(
     force_reindex_extras: bool = False,
     repo_path: str = "",
     repo_name: str = "",
+    collection_name: str | None = None,
 ) -> dict:
     """Stateless analysis: deps → modules → DuckDB → knowledge-graph → docs → guidelines.
 
@@ -461,6 +507,8 @@ def build_full_analysis(
         force_reindex_extras:  If True, wipe + re-embed docs/guidelines.
         repo_path:             Repo root path (defaults to parent of db_path's parent).
         repo_name:             Repo name (defaults to repo_path basename).
+        collection_name:       Code collection name used for this index; doc collection
+                               becomes ``{collection_name}_docs``. Falls back to repo_name.
 
     Returns: {"files", "deps", "modules_result", "knowledge_graph_path",
               "docs_indexed", "guidelines_indexed"}
@@ -509,8 +557,8 @@ def build_full_analysis(
 
     if docs_path and os.path.isdir(docs_path):
         from src.codewalk.doc_knowledge.doc_store import DocStore
-        repo_name = Path(db_path).parent.parent.name
-        doc_store = DocStore(persist_dir=chroma_dir, collection_name=f"{repo_name}_docs")
+        doc_col = f"{(collection_name or derived_repo_name)}_docs"
+        doc_store = DocStore(persist_dir=chroma_dir, collection_name=doc_col)
         doc_store.create_collection()
         if force_reindex_extras or doc_store.chunk_count() == 0:
             if force_reindex_extras and doc_store.chunk_count() > 0:

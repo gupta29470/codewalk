@@ -27,21 +27,24 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libportaudio2 \
     && rm -rf /var/lib/apt/lists/*
 
-# Create non-root user
-RUN groupadd -r codewalk && useradd -r -g codewalk codewalk
+# Create non-root user with a fixed UID/GID that matches the host ownership
+# used by ensure-storage.sh / reset-repo.sh (default 999).
+RUN groupadd -r -g 999 codewalk && \
+    useradd -r -u 999 -g codewalk -d /home/codewalk -m -s /bin/bash codewalk
 
 WORKDIR /app
 
 # Copy installed packages from builder
 COPY --from=builder /root/.local /home/codewalk/.local
 ENV PATH=/home/codewalk/.local/bin:$PATH
+ENV HOME=/home/codewalk
 
 # Copy application code
 COPY src/ ./src/
 COPY deploy/pyproject.toml .
 
-# Create data dirs and set ownership
-RUN mkdir -p /var/codewalk /app/.codewalk && \
+# Create data dirs, HF cache dir, and set ownership
+RUN mkdir -p /var/codewalk /app/.codewalk /home/codewalk/.cache/huggingface && \
     chown -R codewalk:codewalk /var/codewalk /app /home/codewalk
 
 USER codewalk

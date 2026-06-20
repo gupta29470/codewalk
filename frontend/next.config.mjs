@@ -1,13 +1,4 @@
 /** @type {import('next').NextConfig} */
-const nextConfig = {
-  async rewrites() {
-    return [
-      {
-        source: "/knowledge-graph",
-        destination: "/knowledge-graph/index.html",
-      },
-    ];
-  },
-};
+const nextConfig = {};
 
 export default nextConfig;

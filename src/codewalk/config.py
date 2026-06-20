@@ -22,19 +22,6 @@ class Settings(BaseSettings):
     openrouter_api_key: str = os.getenv("OPENROUTER_API_KEY", "")
     deepseek_api_key: str = os.getenv("DEEPSEEK_API_KEY", "")
 
-    # Comma-separated paths to exclude from scanning/indexing
-    # e.g. "tests,docs,scripts/legacy,*.generated.*"
-    exclude_paths: str = os.getenv("EXCLUDE_PATHS", "")
-
-    review_guidelines_path: str = os.getenv("REVIEW_GUIDELINES_PATH", "")
-
-    # Optional default path for team documents (PDF, markdown, txt)
-    # Override via .env: CODE_DOCS_PATH=/path/to/team/docs
-    # Can also be passed directly to codewalk_index_docs(path)
-    code_docs_path: str = os.getenv("CODE_DOCS_PATH", "")
-
-    checkpoint_db_path: str = ".codewalk/checkpoints.sqlite"
-
     # CORS
     cors_origins: str = os.getenv("CORS_ORIGINS", "*")
 

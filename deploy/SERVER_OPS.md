@@ -117,6 +117,7 @@ docker compose logs --tail 100 caddy
 
 # Filter indexing / embedding progress
 docker compose logs -f codewalk-api 2>&1 | grep -vE 'GET /health|404 Not Found'
+docker compose logs -f codewalk-api | grep -iE 'embed|chunk|index|worker|webhook|error|failed'
 docker compose logs codewalk-api 2>&1 | grep -iE 'embed|chunk|index|worker|webhook|error|failed'
 
 # Worker thread

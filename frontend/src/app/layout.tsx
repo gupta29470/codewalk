@@ -1,7 +1,8 @@
 import type { Metadata } from "next";
 import localFont from "next/font/local";
+import { DM_Serif_Display, Inter, JetBrains_Mono } from "next/font/google";
 import "./globals.css";
-import { Sidebar } from "@/components/Sidebar";
+import { RootShell } from "@/components/RootShell";
 import { AnalysisLoader } from "@/components/AnalysisLoader";
 import { AnalyzeProvider } from "@/lib/analyze-context";
 
@@ -14,6 +15,26 @@ const geistMono = localFont({
   src: "./fonts/GeistMonoVF.woff",
   variable: "--font-geist-mono",
   weight: "100 900",
+});
+
+const dmSerif = DM_Serif_Display({
+  subsets: ["latin"],
+  weight: "400",
+  variable: "--font-dm-serif",
+  display: "swap",
+});
+
+const inter = Inter({
+  subsets: ["latin"],
+  weight: ["300", "400", "500", "600"],
+  variable: "--font-inter",
+  display: "swap",
+});
+
+const jetbrainsMono = JetBrains_Mono({
+  subsets: ["latin"],
+  variable: "--font-jetbrains-mono",
+  display: "swap",
 });
 
 export const metadata: Metadata = {
@@ -29,13 +50,10 @@ export default function RootLayout({
   return (
     <html lang="en">
       <body
-        className={`${geistSans.variable} ${geistMono.variable} antialiased`}
+        className={`${geistSans.variable} ${geistMono.variable} ${dmSerif.variable} ${inter.variable} ${jetbrainsMono.variable} antialiased`}
       >
         <AnalyzeProvider>
-          <div className="flex min-h-screen">
-            <Sidebar />
-            <main className="flex-1 p-6 overflow-auto">{children}</main>
-          </div>
+          <RootShell>{children}</RootShell>
           <AnalysisLoader />
         </AnalyzeProvider>
       </body>

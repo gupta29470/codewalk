@@ -313,12 +313,27 @@ def overview_text(repo_path: str, modules_result: dict, deps: dict,
     )
 
 
+def _project_of(path: str) -> str:
+    """Return the top-level project directory of a repo path."""
+    return path.split("/")[0] if path else "unknown"
+
+
+def _group_by_project(paths: list[str]) -> dict[str, list[str]]:
+    groups: dict[str, list[str]] = {}
+    for p in paths:
+        groups.setdefault(_project_of(p), []).append(short_name(p))
+    return groups
+
+
 def blast_radius_map_text(modules_result: dict, deps: dict,
                           target: str = "",
                           graph_runtime: GraphRuntime | None = None) -> str:
     """Blast radius report for a target module, file, or top 30 riskiest."""
+    from src.codewalk.analysis.blast_radius import get_blast_radius, _calculate_risk
+
     graph = deps["graph"]
     runtime = graph_runtime or graph
+    total_files = len(graph)
 
     if target:
         modules = modules_result.get("modules", {})
@@ -326,6 +341,42 @@ def blast_radius_map_text(modules_result: dict, deps: dict,
         if actual_module:
             target_files = sorted(modules[actual_module]["files"])
             scope = f"module '{actual_module}'"
+
+            # Aggregate dependents across all files in the module.
+            direct_set: set[str] = set()
+            transitive_set: set[str] = set()
+            for file_path in target_files:
+                radius = get_blast_radius(file_path, runtime, exclude_test_stories=True)
+                direct_set.update(radius["direct"])
+                transitive_set.update(radius["transitive"])
+
+            # Direct files are not transitive, even if reached through multiple paths.
+            transitive_set -= direct_set
+            affected = len(direct_set | transitive_set)
+            max_risk = _calculate_risk(affected, total_files)
+
+            lines = [f"**Aggregate runtime blast radius for module `{actual_module}`**"]
+            lines.append(f"- **Projects affected:** {len(_group_by_project(direct_set | transitive_set))}")
+            lines.append(f"- **Direct runtime dependents:** {len(direct_set)}")
+            lines.append(f"- **Transitive runtime dependents:** {len(transitive_set)}")
+            lines.append("")
+
+            if direct_set:
+                lines.append("### Direct dependents (by project)")
+                for project, files in sorted(_group_by_project(list(direct_set)).items()):
+                    lines.append(f"- **{project}**: {', '.join(sorted(set(files)))}")
+            if transitive_set:
+                lines.append("\n### Transitive dependents (by project)")
+                for project, files in sorted(_group_by_project(list(transitive_set)).items()):
+                    lines.append(f"- **{project}**: {', '.join(sorted(set(files)))}")
+            if not direct_set and not transitive_set:
+                lines.append("No runtime dependents found (test/story files excluded).")
+
+            header = (
+                f"## Blast Radius — {scope}\n"
+                f"**Overall risk:** {max_risk.upper()}\n"
+            )
+            return header + "\n" + "\n".join(lines)
         else:
             matched = [f for f in graph.keys() if short_name(f) == target or f.endswith(target)]
             if matched:

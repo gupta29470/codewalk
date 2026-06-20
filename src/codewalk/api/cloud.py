@@ -14,6 +14,7 @@ from fastapi.responses import StreamingResponse
 from src.codewalk import __version__ as _codewalk_version
 from src.codewalk.api import state as api_state
 from src.codewalk.config import settings as _settings
+from src.codewalk.embeddings.vector_store import VectorStore
 
 cloud_router = APIRouter()
 
@@ -31,6 +32,17 @@ def _stuck_index_minutes() -> int:
         return max(5, int(raw))
     except ValueError:
         return 30
+
+
+def _require_env(name: str) -> str:
+    """Return an environment variable or raise HTTPException(403) if missing/empty."""
+    value = os.environ.get(name)
+    if not value:
+        raise HTTPException(
+            status_code=403,
+            detail=f"Missing or empty environment variable: {name}",
+        )
+    return value
 
 
 def _claim_index_slot(full_name: str, commit: str) -> None:
@@ -191,6 +203,12 @@ def _run_catchup_indexing(logger):
                 "UPDATE repos SET index_status=$1, updated_at=NOW() WHERE full_name=$2",
                 "indexing", full_name,
             )
+            # Track this catch-up run in the jobs table so /admin/repos shows a
+            # current job instead of a stale failed orphan.
+            db.execute(
+                "INSERT INTO jobs (repo_name, commit_sha, commit_message, status, started_at) VALUES ($1, $2, $3, $4, NOW())",
+                full_name, head_sha, "", "running",
+            )
 
             try:
                 # Catch-up does a full index + full DuckDB rebuild to ensure consistency
@@ -201,6 +219,10 @@ def _run_catchup_indexing(logger):
                 )
                 if superseded:
                     _discard_incoming(full_name, head_sha)
+                    db.execute(
+                        "UPDATE jobs SET status=$1, finished_at=NOW() WHERE repo_name=$2 AND commit_sha=$3",
+                        "failed", full_name, head_sha,
+                    )
                     logger.info(f"[catchup] Skipped {full_name} — newer index run claimed slot")
                     continue
 
@@ -239,6 +261,10 @@ def _run_catchup_indexing(logger):
                         "UPDATE repos SET last_indexed_sha=$1, index_status=$2, index_version=$3, updated_at=NOW() WHERE full_name=$4",
                         git_sha or "catchup", "ready", new_version, full_name,
                     )
+                    db.execute(
+                        "UPDATE jobs SET status=$1, finished_at=NOW() WHERE repo_name=$2 AND commit_sha=$3",
+                        "done", full_name, head_sha,
+                    )
                     logger.info(
                         f"[catchup] ✅ {full_name} indexed (v{new_version}): "
                         f"{result.get('files_scanned', 0)} files, "
@@ -251,6 +277,10 @@ def _run_catchup_indexing(logger):
                         "UPDATE repos SET index_status=$1, updated_at=NOW() WHERE full_name=$2",
                         "failed", full_name,
                     )
+                    db.execute(
+                        "UPDATE jobs SET status=$1, error=$2, finished_at=NOW() WHERE repo_name=$3 AND commit_sha=$4",
+                        "failed", error, full_name, head_sha,
+                    )
                     logger.error(f"[catchup] ❌ {full_name} failed: {error}")
 
             except Exception as e:
@@ -259,6 +289,10 @@ def _run_catchup_indexing(logger):
                 db.execute(
                     "UPDATE repos SET index_status=$1, updated_at=NOW() WHERE full_name=$2",
                     "failed", full_name,
+                )
+                db.execute(
+                    "UPDATE jobs SET status=$1, error=$2, finished_at=NOW() WHERE repo_name=$3 AND commit_sha=$4",
+                    "failed", str(e), full_name, head_sha,
                 )
 
     except Exception as e:
@@ -281,14 +315,23 @@ def _verify_webhook(body: bytes, signature: str, secret: str) -> bool:
 
 
 def _allowed_index_branches(repo: dict) -> list[str]:
-    """Resolve which branches may trigger indexing (from codewalk.yaml on server clone)."""
+    """Resolve which branches may trigger indexing (from codewalk.yaml on server clone).
+
+    Before the repo has been cloned we fall back to the default branch list so we
+    do not create a non-empty directory that would break the subsequent git clone.
+    """
     from src.codewalk.team_config import load_codewalk_yaml, index_branches
+    from src.codewalk.repo_discovery import ensure_codewalk_yaml
 
     storage = repo.get("storage_path") or f"/var/codewalk/repos/{repo['full_name']}"
-    repo_path = Path(storage)
-    if (repo_path / "codewalk.yaml").exists():
-        return index_branches(load_codewalk_yaml(str(repo_path)))
-    return ["master"]
+    storage_path = Path(storage)
+
+    # Not cloned yet — defer to defaults; _clone_or_pull_repo will ensure yaml.
+    if not storage_path.exists() or not (storage_path / "codewalk.yaml").exists():
+        return ["main", "master"]
+
+    repo_path = Path(str(ensure_codewalk_yaml(storage, create=True)))
+    return index_branches(load_codewalk_yaml(str(repo_path)))
 
 
 def _get_or_create_repo(db, full_name: str, clone_url: str, installation_id: str, branch: str = "master") -> dict:
@@ -317,29 +360,45 @@ def _get_or_create_repo(db, full_name: str, clone_url: str, installation_id: str
 
 
 def _clone_or_pull_repo(repo: dict, branch: str) -> Path:
-    """Clone repo if not exists, or git pull if it does."""
+    """Clone repo if not exists, or git pull if it does.
+
+    Returns the discovered repo root (where codewalk.yaml lives), auto-creating
+    a default codewalk.yaml if the repository does not contain one.
+    """
+    from src.codewalk.repo_discovery import ensure_codewalk_yaml
+
     storage_path = repo.get("storage_path") or f"/var/codewalk/repos/{repo['full_name']}"
     repo_path = Path(storage_path)
 
     if repo_path.exists() and (repo_path / ".git").exists():
         # Pull latest
-        subprocess.run(
+        pull_result = subprocess.run(
             ["git", "pull", "origin", branch],
             cwd=str(repo_path),
             check=False,
             capture_output=True,
+            text=True,
         )
+        if pull_result.returncode != 0:
+            raise RuntimeError(
+                f"git pull failed for {repo['full_name']}: {pull_result.stderr.strip()}"
+            )
     else:
         # Clone fresh
         repo_path.parent.mkdir(parents=True, exist_ok=True)
         clone_url = repo.get("clone_url", f"https://github.com/{repo['full_name']}.git")
-        subprocess.run(
+        clone_result = subprocess.run(
             ["git", "clone", "--depth=1", "--branch", branch, clone_url, str(repo_path)],
             check=False,
             capture_output=True,
+            text=True,
         )
+        if clone_result.returncode != 0:
+            raise RuntimeError(
+                f"git clone failed for {repo['full_name']}: {clone_result.stderr.strip()}"
+            )
 
-    return repo_path
+    return Path(str(ensure_codewalk_yaml(str(repo_path), create=True)))
 
 
 def _artifacts_dir(repo_full_name: str) -> Path:
@@ -681,12 +740,17 @@ def _analyze_repo(repo_path: Path, repo_full_name: str, run_id: str) -> dict:
             embedded_chunks=index_result.get("embedded_chunks"),
             guidelines_path=guidelines_path,
             docs_path=docs_path,
+            force_reindex_extras=True,
+            collection_name=col,
         )
 
+        # Report total counts from the freshly built ChromaDB index.
+        vs = VectorStore(persist_dir=persist_dir)
+        vs.create_collection(col)
         return {
             "status": "success",
-            "files_scanned": index_result.get("files_scanned", 0),
-            "chunks_embedded": index_result.get("chunks_embedded", 0),
+            "files_scanned": len(index_result.get("files", [])),
+            "chunks_embedded": vs.chunk_count(),
         }
     except Exception as e:
         _discard_incoming(repo_full_name, run_id)
@@ -717,6 +781,12 @@ def _run_incremental_index(repo_path: Path, repo_full_name: str, run_id: str) ->
 
         files = team_scan_directory(str(repo_path), config)
 
+        # Rebuild DuckDB + KG from every chunk currently in ChromaDB, not just
+        # the changed ones, so the graph store stays consistent.
+        vs = VectorStore(persist_dir=persist_dir)
+        vs.create_collection(col)
+        all_chunks = vs.get_all_chunks()
+
         guidelines_path = ""
         docs_path = ""
         if config.guidelines_path:
@@ -727,16 +797,20 @@ def _run_incremental_index(repo_path: Path, repo_full_name: str, run_id: str) ->
         build_full_analysis(
             db_path=db_path,
             files=files,
+            embedded_chunks=all_chunks,
             guidelines_path=guidelines_path,
             docs_path=docs_path,
+            force_reindex_extras=True,
+            collection_name=col,
         )
 
         return {
             "status": "success",
-            "files_scanned": result.get("files_scanned", 0),
+            "files_scanned": len(files),
             "files_changed": result.get("changed_files", 0),
             "files_deleted": result.get("deleted_files", 0),
             "chunks_embedded": result.get("chunks_embedded", 0),
+            "total_chunks": vs.chunk_count(),
         }
     except Exception as e:
         _discard_incoming(repo_full_name, run_id)
@@ -757,7 +831,7 @@ async def github_webhook(request: Request):
     delivery_id = request.headers.get("X-GitHub-Delivery", "")
     event_type = request.headers.get("X-GitHub-Event", "")
 
-    if not _verify_webhook(body, signature, os.environ["GITHUB_WEBHOOK_SECRET"]):
+    if not _verify_webhook(body, signature, _require_env("GITHUB_WEBHOOK_SECRET")):
         raise HTTPException(403, "Invalid signature")
 
     try:
@@ -853,6 +927,8 @@ async def github_webhook(request: Request):
     loop = asyncio.get_event_loop()
 
     def _do_index():
+        # Each webhook indexing thread gets its own Postgres connection.
+        db = api_state.get_db()
         try:
             db.execute(
                 "UPDATE jobs SET status=$1, started_at=NOW() WHERE repo_name=$2 AND commit_sha=$3 AND status=$4",
@@ -881,7 +957,7 @@ async def github_webhook(request: Request):
                     repo_full_name,
                     commit,
                     file_count=result.get("files_scanned", 0),
-                    chunk_count=result.get("chunks_embedded", 0),
+                    chunk_count=result.get("total_chunks", result.get("chunks_embedded", 0)),
                     repo_name=repo_full_name,
                     collection_name=_collection_name(repo_full_name),
                     commit_sha=commit,
@@ -950,7 +1026,7 @@ async def github_webhook(request: Request):
 @cloud_router.post("/admin/register")
 async def register_repo(request: Request, x_admin_key: str = Header(alias="X-Admin-Key")):
     """Register a repo manually. Returns a per-repo download token."""
-    if not secrets.compare_digest(x_admin_key, os.environ["ADMIN_API_KEY"]):
+    if not secrets.compare_digest(x_admin_key, _require_env("ADMIN_API_KEY")):
         raise HTTPException(403, "Invalid admin key")
 
     body = await request.json()
@@ -982,7 +1058,7 @@ async def register_repo(request: Request, x_admin_key: str = Header(alias="X-Adm
 
 @cloud_router.post("/admin/repos")
 async def list_repos(x_admin_key: str = Header(alias="X-Admin-Key")):
-    if not secrets.compare_digest(x_admin_key, os.environ["ADMIN_API_KEY"]):
+    if not secrets.compare_digest(x_admin_key, _require_env("ADMIN_API_KEY")):
         raise HTTPException(403, "Invalid admin key")
 
     db = api_state.get_db()
@@ -1005,7 +1081,7 @@ async def trigger_index(
     x_admin_key: str = Header(alias="X-Admin-Key"),
 ):
     """Manually trigger indexing for a registered repo."""
-    if not secrets.compare_digest(x_admin_key, os.environ["ADMIN_API_KEY"]):
+    if not secrets.compare_digest(x_admin_key, _require_env("ADMIN_API_KEY")):
         raise HTTPException(403, "Invalid admin key")
 
     body = await request.json()
@@ -1017,16 +1093,26 @@ async def trigger_index(
     if not repo:
         raise HTTPException(404, f"Repo '{full_name}' not registered")
 
+    import asyncio
+
     repo = dict(repo)
-    repo_path = _clone_or_pull_repo(repo, branch or repo["branch"])
-    head_sha = _git_head_sha(repo_path) or "admin-index"
+    try:
+        repo_path = await asyncio.to_thread(
+            _clone_or_pull_repo, repo, branch or repo["branch"]
+        )
+    except RuntimeError as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+    head_sha = (await asyncio.to_thread(_git_head_sha, repo_path)) or "admin-index"
     _cancel_open_jobs(db, full_name, "superseded by admin/index")
     _claim_index_slot(full_name, head_sha)
     db.execute(
         "UPDATE repos SET index_status=$1, updated_at=NOW() WHERE full_name=$2",
         "indexing", full_name,
     )
-    result = _run_incremental_index(repo_path, full_name, head_sha)
+    result = await asyncio.to_thread(
+        _run_incremental_index, repo_path, full_name, head_sha
+    )
 
     if result["status"] == "success":
         if not _index_slot_active(full_name, head_sha):
@@ -1061,7 +1147,7 @@ async def trigger_index(
             full_name,
             head_sha,
             file_count=result.get("files_scanned", 0),
-            chunk_count=result.get("chunks_embedded", 0),
+            chunk_count=result.get("total_chunks", result.get("chunks_embedded", 0)),
             repo_name=full_name,
             collection_name=_collection_name(full_name),
             commit_sha=git_sha,
@@ -1127,10 +1213,11 @@ async def download_index(
         raise HTTPException(404, "No index available yet")
 
     import tarfile
-    storage = os.environ.get("INDEX_STORAGE_PATH", "/var/codewalk")
+    import tempfile
+    import uuid
 
     def stream_tarball():
-        tmp_path = Path(storage) / f"{owner}__{repo}.tmp.tar.gz"
+        tmp_path = Path(tempfile.gettempdir()) / f"codewalk_{owner}__{repo}_{os.getpid()}_{uuid.uuid4().hex}.tmp.tar.gz"
         try:
             with tarfile.open(tmp_path, "w:gz") as tar:
                 # Follow the active symlink so the tarball contains the real files,
