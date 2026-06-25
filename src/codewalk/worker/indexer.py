@@ -1,3 +1,4 @@
+"""Cloud indexing worker: poll Postgres jobs, clone repos, build indexes, publish atomically."""
 import os
 import tempfile
 import subprocess

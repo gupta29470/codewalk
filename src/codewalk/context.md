@@ -1,6 +1,6 @@
 # `src/codewalk/` — Root Package
 
-This is the top-level Python package for Codewalk. It wires together ingestion, embeddings, analysis, graph storage, RAG, review, agent, voice, API, MCP, and cloud worker pieces.
+This is the top-level Python package for Codewalk. It wires together ingestion, embeddings, analysis, graph storage, RAG, review, agent, voice, API, MCP, cloud worker, services, tools, and debug pieces.
 
 ## Key modules at this level
 

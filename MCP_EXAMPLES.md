@@ -56,14 +56,6 @@ Rebuild deps/modules without re-embedding.
 @codewalk Rebuild analysis cache without reindexing embeddings.
 ```
 
-### `codewalk_reset_state`
-When switching branches or the index seems stale.
-
-```text
-@codewalk Reset codewalk state.
-@codewalk Clear the in-memory cache and reload from disk.
-```
-
 ---
 
 ## 2. High-level understanding
@@ -180,13 +172,14 @@ Bottlenecks, centrality, cycles, refactoring priorities.
 
 ## 5. Code review
 
-### `codewalk_get_review_context`
-Gather raw diff + blast radius + caller context for a review.
+### `codewalk_run_review`
+Gather raw diff + blast radius + caller context for a review. The host LLM (Copilot/Claude) writes the final review from the returned context.
 
 ```text
 @codewalk Get review context for the current diff.
 @codewalk Review context for PR feat/KOSM-2650.
 @codewalk Show me review context for these changes.
+@codewalk Run review for the diff between main and this branch.
 ```
 
 ### `codewalk_review_file`
@@ -198,29 +191,20 @@ Review a single file against conventions.
 @codewalk Review this file: packages/Common/src/index.ts.
 ```
 
-### `codewalk_review_diff`
-Review a git diff (branch, staged, or range).
+### `codewalk_get_stack_info`
+Get deterministic stack signals (changed files, imports, build/config files) for the current diff.
 
 ```text
-@codewalk Review the diff for feat/apple-pay-v2.
-@codewalk Review staged changes.
-@codewalk Review the diff between main and this branch.
-```
-
-### `codewalk_reflect_review`
-Self-critique a previous review to catch missed issues and remove false positives.
-
-```text
-@codewalk Reflect on the review and improve it.
-@codewalk Run codewalk_reflect_review on the last diff review.
-@codewalk Critique the staged-change review and suggest what was missed.
+@codewalk What stack is this repo using?
+@codewalk Show me stack info for the current diff.
 ```
 
 ### Review fixes / human-in-the-loop
 
 ```text
 @codewalk Propose a fix for issue #1.
-@codewalk Apply the suggested fix after I approve.
+@codewalk Accept finding 2 and apply the accepted fixes.
+@codewalk Approve applying the fix to packages/Button/src/Button.tsx.
 @codewalk Verify the fix by running tests.
 ```
 

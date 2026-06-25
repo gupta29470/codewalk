@@ -1,3 +1,4 @@
+"""Actor-critic reflection loop utilities for self-improving LLM outputs."""
 from __future__ import annotations
 from typing import TypeVar, Callable
 from langchain_core.messages import SystemMessage, HumanMessage

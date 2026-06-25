@@ -1,3 +1,4 @@
+"""Load and validate codewalk.yaml team configuration."""
 from dataclasses import dataclass, field
 from pathlib import Path
 import fnmatch
@@ -9,6 +10,7 @@ from src.codewalk.ingestion.file_filter import should_skip, should_skip_dir
 
 @dataclass
 class TeamConfig:
+    """Per-repo configuration extracted from codewalk.yaml."""
     exclude: list[str] = field(default_factory=list)
     include: list[str] = field(default_factory=list)  # override exclude + core filter
     branches: list[str] = field(default_factory=list)  # allowed index branches (fnmatch)

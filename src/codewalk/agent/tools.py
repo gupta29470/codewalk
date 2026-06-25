@@ -1,3 +1,4 @@
+"""LangGraph agent tool definitions for codebase Q&A and modifications."""
 from langchain_core.tools import tool
 
 from src.codewalk.embeddings.vector_store import VectorStore
@@ -8,12 +9,7 @@ from src.codewalk.query import (
     overview_text, blast_radius_map_text, reading_order_text,
     execution_flow_text,
 )
-from src.codewalk.rag.chain import ask_corrective, format_context as _format_context
-from src.codewalk.rag.chain import retrieve_corrective as _retrieve_corrective
-from src.codewalk.review.reviewer import review_diff as _review_diff
-from src.codewalk.review.reviewer import _get_caller_context, _get_security_context_for_file
-from src.codewalk.review.models import DiffFile, DiffHunk, ChangedLine
-from src.codewalk.review.guidelines_loader import get_guidelines_store, search_guidelines
+from src.codewalk.rag.chain import ask_corrective
 from src.codewalk.config import settings
 from src.codewalk.review.fix_applier import apply_fix_to_file
 from src.codewalk.tools.static_analysis import run_static_analysis
@@ -176,145 +172,21 @@ def create_tools(
             return "Error: No analysis data available."
         return execution_flow_text(modules_result, deps, module_name)
 
-    # ─── TOOL 8: review_diff ─────────────────────────────────────
-    @tool
-    def review_diff(staged: bool = False, target_branch: str = "") -> str:
-        """Review git diff for bugs, security issues, and style problems.
-
-        Runs multi-stage review: test coverage check, blast radius,
-        codebase patterns, team guidelines, and LLM deep review.
-
-        Args:
-            staged: If True, review only staged changes. Default: unstaged.
-            target_branch: Diff against a branch (e.g. "main") for full PR review.
-        """
-        if not repo_path:
-            return "Error: No repo path available."
-        result = _review_diff(
-            staged=staged,
-            target_branch=target_branch or None,
-            use_llm=True,
-            store=store,
-            deps=deps,
-            graph_store=graph_store,
-            repo_path=repo_path,
-        )
-
-        if not result.issues:
-            return (
-                f"✅ No issues found.\n"
-                f"Reviewed {result.files_reviewed} files "
-                f"(+{result.lines_added} / -{result.lines_removed})\n\n"
-                f"{result.summary}"
-            )
-
-        lines = []
-        for issue in result.issues:
-            icon = {"critical": "🔴", "warning": "🟡", "suggestion": "🟢"}.get(
-                issue.severity, "⚪"
-            )
-            loc = f"{issue.file_path}:{issue.line_number}" if issue.line_number else issue.file_path
-            lines.append(f"{icon} [{issue.category}] {loc}: {issue.title}")
-            if issue.explanation:
-                lines.append(f"   {issue.explanation}")
-
-        return (
-            f"## Code Review Results\n"
-            f"Reviewed {result.files_reviewed} files "
-            f"(+{result.lines_added} / -{result.lines_removed})\n\n"
-            + "\n".join(lines)
-            + f"\n\n**Summary:** {result.summary}"
-        )
-
-    # ─── TOOL 9: review_file ────────────────────────────────────
-    @tool
-    def review_file(file_path: str) -> str:
-        """Review a single file for bugs, security issues, and code quality.
-
-        Works on any file — doesn't need to be in git diff.
-        Returns the file with context (imports, callers, guidelines)
-        for analysis.
-
-        Args:
-            file_path: Path to the file to review (relative to repo root).
-        """
-        import os
-
-        if not repo_path:
-            return "Error: No repo path available."
-        full_path = os.path.join(repo_path, file_path) if not os.path.isabs(file_path) else file_path
-        real_repo = os.path.realpath(repo_path)
-        real_full = os.path.realpath(full_path)
-
-        # Path traversal guard: file must be inside the repo
-        if real_full != real_repo and not real_full.startswith(real_repo + os.sep):
-            return f"Error: '{file_path}' is outside the repository."
-
-        if not os.path.exists(real_full):
-            return f"File '{file_path}' not found."
-        if not os.path.isfile(real_full):
-            return f"Error: '{file_path}' is not a file."
-
-        try:
-            with open(real_full, "r", errors="replace") as f:
-                content = f.read()
-        except OSError as e:
-            return f"Cannot read file: {e}"
-
-        file_lines = content.splitlines()
-        changed_lines = [
-            ChangedLine(line_number=i + 1, content=line, change_type="added")
-            for i, line in enumerate(file_lines)
-        ]
-        synthetic_diff = DiffFile(
-            file_path=file_path, language="",
-            hunks=[DiffHunk(start_line=1, end_line=len(file_lines), lines=changed_lines)],
-            is_new_file=True, added_lines=len(file_lines), removed_lines=0,
-        )
-
-        output_parts = [f"## File Review: {file_path} ({len(file_lines)} lines)\n"]
-
-        caller_ctx = _get_caller_context(synthetic_diff, deps, graph_store)
-        if caller_ctx:
-            output_parts.append(caller_ctx)
-
-        if store:
-            sec_ctx = _get_security_context_for_file(synthetic_diff, store)
-            if sec_ctx:
-                output_parts.append(sec_ctx)
-            result = _retrieve_corrective(
-                f"code in {file_path}", store,
-                graph_store=graph_store,
-            )
-            if result["chunks"]:
-                output_parts.append("## Similar patterns elsewhere")
-                output_parts.append(_format_context(result["chunks"]))
-
-        guidelines_store = get_guidelines_store()
-        if guidelines_store:
-            gl = search_guidelines(guidelines_store, [synthetic_diff], n_results=3)
-            if gl:
-                output_parts.append(gl)
-
-        truncated = content[:15000]
-        if len(content) > 15000:
-            truncated += "\n... (truncated at 15000 chars)"
-        output_parts.append(f"<file>\n{truncated}\n</file>")
-
-        return "\n\n".join(output_parts)
-
-    # ─── TOOL 10: load_guidelines ────────────────────────────────
+    # ─── TOOL 8: load_guidelines ────────────────────────────────
     @tool
     def load_guidelines(docs_path: str = "") -> str:
-        """Load team coding guidelines for use in code reviews.
+        """Load project docs/standards for use in code reviews.
 
-        Reads guideline documents (.md, .txt, .rst, .pdf) from the given directory,
-        embeds them, and makes them available to review_diff and review_file.
+        Indexes .md/.txt/.rst/.pdf documents from the given directory. Reviews
+        will automatically include any file named `code_guidelines` as code-review
+        guidelines.
 
         Args:
-            docs_path: Path to directory containing guideline files.
+            docs_path: Path to directory containing doc/guideline files.
         """
         import os
+        from src.codewalk.doc_knowledge.doc_store import DocStore
+        from src.codewalk.config import settings
 
         path = docs_path
         if not path:
@@ -323,13 +195,13 @@ def create_tools(
         if not os.path.isdir(path):
             return f"Directory not found: {path}"
 
-        gl_store = get_guidelines_store(guidelines_path=path)
-        if not gl_store:
-            return f"No guideline files found in {path}"
+        persist_dir = getattr(settings, "CHROMA_PERSIST_DIR", None) or ".codewalk/chroma"
+        store = DocStore(persist_dir=persist_dir, collection_name="docs")
+        store.create_collection()
+        store.clear()
+        count = store.index_docs(path)
+        return f"Indexed {count} doc chunks from {path}"
 
-        count = gl_store.chunk_count()
-        return f"Loaded {count} guideline chunks from {path}"
-    
 
     # ─── TOOL 11: get_architecture_health ─────────────────────────
     @tool
@@ -455,6 +327,6 @@ def create_tools(
 
     return [search_codebase, get_module_info, explain_function,
             get_overview, get_blast_radius_map, get_reading_order,
-            get_execution_flow, review_diff, review_file, load_guidelines,
+            get_execution_flow, load_guidelines,
             get_architecture_health, apply_fix, verify_fix]
 

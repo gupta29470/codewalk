@@ -1,3 +1,4 @@
+"""Indexing pipeline: scan → chunk → embed → store, plus incremental reindex and manifest management."""
 import time
 import logging
 import sys
@@ -566,30 +567,13 @@ def build_full_analysis(
             docs_indexed = doc_store.index_docs(docs_path)
             _log(f"[analysis] Docs indexed: {docs_indexed}")
 
-    if guidelines_path and os.path.isdir(guidelines_path):
-        from src.codewalk.review.guidelines_loader import get_guidelines_store
-        gl_store = get_guidelines_store(
-            guidelines_path=guidelines_path,
-            persist_dir=chroma_dir,
-            force=force_reindex_extras,
-        )
-        if gl_store:
-            guidelines_indexed = gl_store.chunk_count()
-            _log(f"[analysis] Guidelines indexed: {guidelines_indexed} chunks")
-
     return {
         "files": files,
         "deps": deps,
         "modules_result": modules_result,
         "knowledge_graph_path": knowledge_graph_path,
         "docs_indexed": docs_indexed,
-        "guidelines_indexed": guidelines_indexed,
+        "guidelines_indexed": None,
     }
-
-
-
-
-
-
 
 

@@ -1,3 +1,4 @@
+"""ChromaDB wrapper for code/doc/guideline collections and parent/child chunk storage."""
 import logging
 
 import chromadb
@@ -9,6 +10,7 @@ logger = logging.getLogger("codewalk")
 _CHROMA_BATCH = 500
 
 class VectorStore:
+    """ChromaDB wrapper for code, doc, and guideline collections."""
     def __init__(self, persist_dir: str = "./data/chroma"):
         self.client = chromadb.PersistentClient(path=persist_dir)
         self.embedding_model = get_embedding_model()

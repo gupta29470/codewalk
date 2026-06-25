@@ -1,3 +1,4 @@
+"""LangGraph agent definition with tools, memory, and human-in-the-loop interrupts."""
 import json
 import logging
 import re

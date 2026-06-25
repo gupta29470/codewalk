@@ -1,3 +1,4 @@
+"""Voice request router: transcribed speech → tool selection → answer generation."""
 import json
 from src.codewalk.config import settings, get_llm
 from langchain_core.prompts import ChatPromptTemplate

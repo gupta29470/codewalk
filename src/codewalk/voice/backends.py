@@ -1,3 +1,4 @@
+"""Voice tool execution backends (local API bridge)."""
 import httpx
 import asyncio
 import inspect

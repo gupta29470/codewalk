@@ -1,3 +1,4 @@
+"""Multi-language tree-sitter parser and symbol extraction utilities."""
 import logging
 import importlib
 from tree_sitter import Language, Parser

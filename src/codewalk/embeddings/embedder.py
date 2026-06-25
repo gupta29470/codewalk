@@ -1,3 +1,4 @@
+"""Sentence-transformer embedding model wrapper for code chunks."""
 import gc
 import torch
 from sentence_transformers import SentenceTransformer

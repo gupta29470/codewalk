@@ -1,3 +1,4 @@
+"""Standalone voice companion loop for hands-free codebase Q&A."""
 import argparse
 import json
 import sys
@@ -101,6 +102,7 @@ def summarize_for_speech(text: str) -> str:
     return format_voice_response(text)["speech"]
 
 def main():
+    """Standalone voice companion entry point."""
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "--backend",

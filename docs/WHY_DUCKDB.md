@@ -322,10 +322,10 @@ Calls:
 
 **What happens**: Codewalk finds which symbols were changed, then queries DuckDB for their callers to warn about breaking changes.
 
-**Applying fixes (MCP):** Review is agent-driven — your IDE agent calls `codewalk_review_diff` / `codewalk_reflect_review`. Each proposed fix goes through `codewalk_approve_action`; you approve or reject in your **host's UI** (Cursor cards, chat, etc.). Only after approval does the agent call `codewalk_apply_fix` with the returned `approval_token`. See [README.md](../README.md) § “Review & approve fixes”.
+**Applying fixes (MCP):** Review is agent-driven — your IDE agent calls `codewalk_run_review` (or `codewalk_review_file`). Each proposed fix goes through `codewalk_approve_action`; you approve or reject in your **host's UI** (Cursor cards, chat, etc.). Only after approval does the agent call `codewalk_apply_fix` with the returned `approval_token`. See [README.md](../README.md) § “Review & approve fixes”.
 
 ```python
-# reviewer.py — called by codewalk_review_diff
+# review/engine.py — called by codewalk_run_review / codewalk_review_file
 symbols = graph_store.get_symbols_in_file(diff_file.file_path)  # ← DuckDB
 for symbol in symbols:
     if changed_lines & symbol_line_range:

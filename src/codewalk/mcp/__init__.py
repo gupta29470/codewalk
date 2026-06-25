@@ -1,0 +1,1 @@
+"""Codewalk MCP server package."""

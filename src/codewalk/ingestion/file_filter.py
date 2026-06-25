@@ -1,3 +1,4 @@
+"""File and directory skip rules for repo scanning."""
 from pathlib import Path
 import fnmatch as fnmatch_module
 

@@ -1,3 +1,4 @@
+"""ChromaDB-backed doc/guideline store with section-aware chunking."""
 import logging
 
 import chromadb

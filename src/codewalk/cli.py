@@ -1,3 +1,4 @@
+"""Typer CLI entry point for Codewalk commands."""
 import typer
 import os
 from pathlib import Path
@@ -9,6 +10,8 @@ from src.codewalk.ingestion.tech_detect import detect_tech_stack
 from src.codewalk.ingestion.config_generator import generate_codewalk_yaml
 from src.codewalk.embeddings.vector_store import VectorStore
 from src.codewalk.repo_discovery import ensure_codewalk_yaml
+from src.codewalk.review.engine import run_review
+from src.codewalk.review.report import Verdict
 
 app_cli = typer.Typer(help="Codewalk — AI codebase intelligence")
 
@@ -181,7 +184,46 @@ def generate_config(
         typer.echo(f"⚠️  codewalk.yaml already exists at {existing}.")
 
 
+@app_cli.command()
+def review(
+    repo: Optional[str] = typer.Option(None, help="Path to repository root (default: discover from cwd)"),
+    target_branch: Optional[str] = typer.Option(None, help="Diff target branch (e.g. main)"),
+    staged: bool = typer.Option(False, help="Review staged changes only"),
+    incremental: bool = typer.Option(False, "--incremental", help="Review only files changed since the last review on this branch"),
+    force_full_review: bool = typer.Option(False, "--force-full-review", help="Ignore cache and previous review; run a full review"),
+    fail_on: Optional[str] = typer.Option(None, help="Exit non-zero if verdict is this or worse: blocking, warning"),
+    json_output: bool = typer.Option(False, "--json", help="Output raw JSON report"),
+):
+    """Run one-stop code review on the working tree or a branch diff."""
+    repo = _resolve_repo(repo)
+    typer.echo(f"Reviewing {repo} ...")
+
+    report = run_review(
+        repo_path=Path(repo),
+        target_branch=target_branch,
+        staged=staged,
+        incremental=incremental,
+        force_full_review=force_full_review,
+    )
+
+    if json_output:
+        import json
+        typer.echo(json.dumps(report.to_dict(), indent=2))
+    else:
+        from src.codewalk.review.renderers import render_cli
+
+        typer.echo(render_cli(report))
+
+    if fail_on == "blocking":
+        if report.verdict == Verdict.REQUEST_CHANGES:
+            raise typer.Exit(1)
+    elif fail_on == "warning":
+        if report.verdict in (Verdict.REQUEST_CHANGES, Verdict.APPROVE_WITH_NITS):
+            raise typer.Exit(1)
+
+
 def main():
+    """CLI entry point."""
     app_cli()
 
 

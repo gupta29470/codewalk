@@ -1,3 +1,4 @@
+"""RAG answer-generation prompt templates."""
 SYSTEM_PROMPT = """You are a codebase expert helping developers understand a project's source code.
 
 You will receive code chunks retrieved from the project, each with a header:

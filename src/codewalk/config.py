@@ -1,8 +1,11 @@
+"""Pydantic settings and LLM factory for Codewalk."""
 import os
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from langchain_core.language_models.chat_models import BaseChatModel
 
+
 class Settings(BaseSettings):
+    """Runtime configuration loaded from environment variables and .env."""
     model_config = SettingsConfigDict(
         env_file=".env",
         extra="ignore",  # server-only vars (POSTGRES_PASSWORD, RATE_LIMIT_*, etc.) are OK in .env

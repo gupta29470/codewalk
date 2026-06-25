@@ -1,3 +1,4 @@
+"""Parallel fan-out/fan-in graph utilities for multi-angle research."""
 from __future__ import annotations
 from collections.abc import Callable
 from langgraph.graph import StateGraph, START, END

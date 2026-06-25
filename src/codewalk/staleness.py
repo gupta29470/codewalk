@@ -436,6 +436,7 @@ def get_staleness_banners(tool_name: str) -> str:
 
 
 def prepend_staleness_banner(result: str, tool_name: str) -> str:
+    """Add a staleness warning banner to a tool result when the local index is outdated."""
     if not isinstance(result, str) or not result.strip():
         return result
     banner = get_staleness_banners(tool_name)
@@ -445,6 +446,7 @@ def prepend_staleness_banner(result: str, tool_name: str) -> str:
 
 
 def wrap_tool_fn(fn: Callable[..., Any], tool_name: str) -> Callable[..., Any]:
+    """Wrap an MCP tool so its output may include a staleness banner."""
     if getattr(fn, "_codewalk_staleness_wrapped", False):
         return fn
 
@@ -491,4 +493,5 @@ def check_version_message() -> str:
 
 
 def should_attach_staleness(path: str) -> bool:
+    """True if the tool path should be checked for index staleness."""
     return any(path.startswith(prefix) for prefix in _STALENESS_API_PREFIXES)

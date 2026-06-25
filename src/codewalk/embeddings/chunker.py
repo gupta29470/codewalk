@@ -1,3 +1,4 @@
+"""Code-aware chunking: split source files into parent/child chunks for embedding."""
 from pathlib import Path
 import hashlib
 import logging
@@ -39,7 +40,7 @@ def read_file_content(file_path: str) -> str:
     except (UnicodeDecodeError, PermissionError, FileNotFoundError, OSError):
         return ""
     
-def get_splitter(language: str, chunk_size: int = 1000, chunk_overlap: int = 200):
+def get_splitter(language: str, chunk_size: int = 3000, chunk_overlap: int = 400):
     """Get the right splitter for a language. Falls back to generic if unknown."""
     language_enum = LANGUAGE_MAP.get(language.lower())
 
@@ -76,7 +77,7 @@ def get_leftover_code(content: str, parsed_items: list[dict]) -> str:
 
     return "\n".join(leftover_lines).strip()
 
-def chunk_file_with_parser(file_info: dict, chunk_size: int = 1000, chunk_overlap: int = 200) -> list[dict]:
+def chunk_file_with_parser(file_info: dict, chunk_size: int = 3000, chunk_overlap: int = 400) -> list[dict]:
     """Use tree-sitter to extract function/class level chunks.
 
     Produces parent-child pairs:
@@ -186,7 +187,7 @@ def chunk_file_with_parser(file_info: dict, chunk_size: int = 1000, chunk_overla
 
     return chunks
 
-def chunk_file(file_info: dict, chunk_size: int = 1000, chunk_overlap: int = 200) -> list[dict]:
+def chunk_file(file_info: dict, chunk_size: int = 3000, chunk_overlap: int = 400) -> list[dict]:
     """Split a file into chunks. Uses tree-sitter parser when possible,
     falls back to text splitter for unsupported languages."""
     content = read_file_content(file_info["absolute_path"])
@@ -225,7 +226,7 @@ def chunk_file(file_info: dict, chunk_size: int = 1000, chunk_overlap: int = 200
         for index, text in enumerate(texts)
     ]
 
-def chunk_all_files(files: list[dict], chunk_size: int = 1000, chunk_overlap: int = 200) -> list[dict]:
+def chunk_all_files(files: list[dict], chunk_size: int = 3000, chunk_overlap: int = 400) -> list[dict]:
     """Chunk all scanned files. Returns flat list of all chunks."""
     all_chunks = []
     total = len(files)

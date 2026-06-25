@@ -1,3 +1,4 @@
+"""RAG query rewriting for corrective-RAG retries."""
 from langchain_core.prompts import ChatPromptTemplate
 
 from src.codewalk.config import get_llm

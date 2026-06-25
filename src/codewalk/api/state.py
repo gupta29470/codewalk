@@ -1,3 +1,4 @@
+"""FastAPI application state and index lifecycle management."""
 import json
 import logging
 import os
@@ -202,6 +203,12 @@ def get_graph_runtime() -> GraphRuntime:
         raise RuntimeError(INDEX_REQUIRED_API)
     return _graph_runtime
 
+
+def get_graph_runtime_if_ready() -> GraphRuntime | None:
+    """Return GraphRuntime only if already initialized; never trigger a cold start."""
+    return _graph_runtime
+
+
 def get_graph_store() -> GraphStore | None:
     """Get the GraphStore (DuckDB). Returns None if not initialized."""
     return _graph_store
@@ -390,7 +397,6 @@ def index_on_disk(repo_path: str | None = None) -> bool:
 def _wire_query_state():
     """Attach VectorStore + agent after DuckDB/files are ready. No rescan."""
     global _store, _agent, _analyze_result
-    from src.codewalk.agent.graph import create_agent
 
     repo = get_repo_path()
     _store = VectorStore(persist_dir=chroma_path())
@@ -399,11 +405,17 @@ def _wire_query_state():
         _graph_store.populate_chunks_from_chromadb(_store)
     _analyze_result = {"repo_path": repo, "skipped": True}
     if _store is not None and _modules_result is not None:
-        _agent = create_agent(
-            _store, _modules_result, files=_files, deps=_deps,
-            graph_runtime=_graph_runtime, graph_store=_graph_store,
-            repo_path=repo,
-        )
+        try:
+            _agent = create_agent(
+                _store, _modules_result, files=_files, deps=_deps,
+                graph_runtime=_graph_runtime, graph_store=_graph_store,
+                repo_path=repo,
+            )
+        except Exception as e:
+            # Agent creation requires an LLM, which may be unset in some MCP
+            # environments. The VectorStore + graph runtime are enough for
+            # review/blast-radius tools; chat tools will retry agent creation.
+            _log(f"[wire_query_state] Agent creation skipped: {e}")
 
 
 def load_scoped_analysis():
@@ -498,10 +510,17 @@ def ensure_initialized() -> bool:
             _log("[ensure_initialized] No index on disk — call POST /analyze or codewalk_analyze_codebase")
             return False
         _log("[ensure_initialized] Loading index from disk...")
-        load_scoped_analysis()
+        try:
+            load_scoped_analysis()
+        except Exception as e:
+            _log(f"[ensure_initialized] Failed to load scoped analysis: {e}")
+            return False
         ready = _store is not None and _store.chunk_count() > 0
         if ready:
             _log(f"[ensure_initialized] Ready — {_store.chunk_count()} chunks")
+        else:
+            count = _store.chunk_count() if _store else 0
+            _log(f"[ensure_initialized] Index loaded but store is empty ({count} chunks)")
         return ready
 
 def _check_upgrade_banner(repo_path: str):

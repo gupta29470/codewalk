@@ -1,13 +1,51 @@
+"""Diff Parser utilities for Codewalk."""
 import subprocess
+from dataclasses import dataclass, field
 from pathlib import Path
 
-from src.codewalk.review.models import DiffHunk, DiffFile, ChangedLine
 from src.codewalk.ingestion.scanner import detect_language
+
+
+@dataclass
+class ChangedLine:
+    """A single line from a unified diff.
+
+    Attributes:
+        line_number: Line number in the new version of the file.
+        content: The actual text of the line.
+        change_type: One of "added", "removed", or "context".
+    """
+    line_number: int
+    content: str
+    change_type: str
+
+
+@dataclass
+class DiffHunk:
+    """One @@...@@ block — a contiguous section of changes within a file."""
+    start_line: int
+    end_line: int
+    lines: list[ChangedLine] = field(default_factory=list)
+    source_start: int = 0      # old file start line
+    source_length: int = 0     # old file line count
+
+
+@dataclass
+class DiffFile:
+    """One changed file in the diff."""
+    file_path: str
+    language: str
+    hunks: list[DiffHunk] = field(default_factory=list)
+    is_new_file: bool = False
+    is_deleted: bool = False
+    added_lines: int = 0
+    removed_lines: int = 0
 
 
 def get_diff(
         staged: bool = False, target_branch: str | None = None,
-        commit: str | None = None, repo_path: str | None = None
+        commit: str | None = None, since_commit: str | None = None,
+        repo_path: str | None = None
 ) -> str:
     """Run git diff and return raw unified diff text.
 
@@ -15,9 +53,10 @@ def get_diff(
           staged: If True, diff staged changes (--staged).
           target_branch: Diff current HEAD against this branch.
           commit: Show diff for a specific commit (SHA or ref like HEAD, HEAD~2).
+          since_commit: Diff ``since_commit..HEAD`` for incremental reviews.
           repo_path: Working directory for git command.
 
-      Priority: commit > target_branch > staged > unstaged (default).
+      Priority: commit > since_commit > target_branch > staged > unstaged (default).
     """
     cmd = ["git", "diff", "--unified=5"]
 
@@ -34,6 +73,10 @@ def get_diff(
             cmd = ["git", "diff", "--unified=5", f"{commit}~1", commit]
         else:
             cmd = ["git", "show", "--format=", "-p", commit]
+    elif since_commit:
+        # Diff everything from the baseline commit to the current working tree.
+        # This captures both commits made since the baseline and uncommitted edits.
+        cmd = ["git", "diff", "--unified=5", since_commit]
     elif staged:
         cmd.append("--staged")
     elif target_branch:

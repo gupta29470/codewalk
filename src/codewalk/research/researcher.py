@@ -1,3 +1,4 @@
+"""Deep research orchestrator: fan-out parallel sub-question execution and synthesis."""
 from __future__ import annotations
 from dataclasses import dataclass, field
 import asyncio
@@ -22,6 +23,7 @@ Return your answer as structured markdown with this format:
 
 @dataclass
 class SubFindings:
+    """Findings produced for one sub-question."""
     sub_question_id: str
     sub_question_text: str
     findings: str           # structured answer with citations

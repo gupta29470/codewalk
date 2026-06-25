@@ -1,3 +1,4 @@
+"""Corrective RAG chain: retrieve, grade, generate, and verify answers over the codebase."""
 import logging
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import StrOutputParser
@@ -163,6 +164,7 @@ def format_context(results: list[dict]) -> str:
 
 
 def ask(question: str, store: VectorStore, n_results: int = 5) -> str:
+    """Simple one-shot RAG answer (no corrective retries)."""
     _log(f"[rag] Question: {question[:80]}...")
     """Full RAG pipeline: question → retrieve → prompt → LLM → answer."""
     # 1. Retrieve relevant chunks from ChromaDB

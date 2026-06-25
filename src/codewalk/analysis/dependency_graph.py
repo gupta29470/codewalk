@@ -1,3 +1,4 @@
+"""Dependency graph builder: extract imports/requires across 15+ languages."""
 import logging
 from pathlib import Path
 from platform import node

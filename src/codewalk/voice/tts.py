@@ -1,3 +1,4 @@
+"""Text-to-speech synthesis utilities for the voice interface."""
 import asyncio
 import atexit
 import os

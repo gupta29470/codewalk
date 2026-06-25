@@ -1,3 +1,4 @@
+"""Research question planner: decompose a complex question into parallel sub-questions."""
 from __future__ import annotations
 from dataclasses import dataclass
 from src.codewalk.config import get_llm
@@ -22,6 +23,7 @@ Example for "How does auth work?":
 
 @dataclass
 class SubQuestion:
+    """One parallel sub-question in a deep-research plan."""
     id: str        # "sq_1", "sq_2", ...
     text: str      # the sub-question text
 

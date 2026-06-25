@@ -1,3 +1,4 @@
+"""Technology stack detection from file extensions and dependency manifests."""
 import logging
 from pathlib import Path
 
@@ -26,6 +27,7 @@ CONFIG_FILE_MAP = {
 }
 
 def detect_tech_stack(repo_path: str) -> list[str]:
+    """Detect the technology stack of a repository from files and manifests."""
     _log(f"[tech_detect] Detecting tech stack: {repo_path}")
     """Detect the tech stack of a repo by checking for config files.
 

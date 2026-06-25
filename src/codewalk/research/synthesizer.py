@@ -1,3 +1,4 @@
+"""Synthesize parallel research findings into a single coherent report."""
 from __future__ import annotations
 from dataclasses import dataclass, field
 from src.codewalk.research.researcher import SubFindings
@@ -34,6 +35,7 @@ Return a numbered list of specific gaps. Be concise. If the report is complete, 
 
 @dataclass
 class StructuredReport:
+    """Final research report with citations."""
     question: str
     markdown: str
     sources: list[str] = field(default_factory=list)

@@ -291,20 +291,45 @@ def apply_fix_to_file(
             "file_path": file_path,
         }
 
-    # Atomic write: temp file → rename
+    # Atomic write with rollback backup
     temp_path = full_path.with_suffix(full_path.suffix + ".tmp")
+    backup_path = full_path.with_suffix(full_path.suffix + ".bak")
     try:
         temp_path.write_text(new_content, errors="replace")
+        # Keep a backup of the original content before replacing.
+        backup_path.write_text(content, errors="replace")
         temp_path.replace(full_path)
     except OSError as e:
+        # Clean up temp/backup files on write failure.
+        for p in (temp_path, backup_path):
+            try:
+                p.unlink(missing_ok=True)
+            except OSError:
+                pass
         return {"ok": False, "error": f"Cannot write file: {e}"}
 
     # Validation
     validation = _validate_file(full_path)
     if validation and not validation["ok"]:
-        # Roll back by restoring from temp? Temp was renamed, so no backup.
-        # Best effort: report failure so caller can handle it.
+        # Roll back to the original content.
+        try:
+            backup_path.replace(full_path)
+        except OSError as rollback_err:
+            return {
+                "ok": False,
+                "error": (
+                    f"Validation failed: {validation['message']}. "
+                    f"Rollback also failed: {rollback_err}. "
+                    f"Original content is in {backup_path}"
+                ),
+            }
         return {"ok": False, "error": validation["message"]}
+
+    # Success: remove backup.
+    try:
+        backup_path.unlink(missing_ok=True)
+    except OSError:
+        pass
 
     # Formatting
     formatter_result = None

@@ -1,3 +1,4 @@
+"""GitHub App installation token retrieval and private-key handling."""
 import os
 import jwt as _jwt         
 import time as _time

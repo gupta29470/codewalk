@@ -1,3 +1,4 @@
+"""Human-in-the-loop interrupt utilities for LangGraph agents."""
 from __future__ import annotations
 import os
 import sqlite3

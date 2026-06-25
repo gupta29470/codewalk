@@ -543,14 +543,14 @@ curl -s https://api.codewalk.xyz/indexes/gupta29470/codewalk/manifest \
 
 Codewalk does not ship its own approve/reject UI. You talk to your **IDE agent** (Cursor, Copilot, Claude Code, etc.); the agent calls **Codewalk MCP tools**. Each host shows its own approval experience (Cursor approval cards, chat yes/no, etc.).
 
-The MCP server exposes **33 tools**. Every tool is wrapped with a workspace-change guard that re-discovers the cwd and resets state when you switch workspaces. Cloud-specific tools include `codewalk_pull_index`, `codewalk_connect_repo`, `codewalk_index_status`, `codewalk_check_version`, and `codewalk_show_knowledge_graph`. Recently added local tools include `codewalk_lookup_symbol`, `codewalk_find_circular_dependencies`, `codewalk_run_static_analysis`, `codewalk_run_tests`, and `codewalk_generate_config`.
+The MCP server exposes **38 tools**. Every tool is wrapped with a workspace-change guard that re-discovers the cwd and resets state when you switch workspaces. Cloud-specific tools include `codewalk_pull_index`, `codewalk_connect_repo`, `codewalk_index_status`, `codewalk_check_version`, and `codewalk_show_knowledge_graph`. Recently added local tools include `codewalk_lookup_symbol`, `codewalk_find_circular_dependencies`, `codewalk_run_static_analysis`, `codewalk_run_tests`, `codewalk_generate_config`, `codewalk_explain_class`, `codewalk_get_stack_info`, `codewalk_get_review_details`, `codewalk_finding_verdict`, and `codewalk_apply_accepted`.
 
 **Canonical review flow:**
 
 1. Ask the agent to review — e.g. `@codewalk review my changes`
-2. Agent: `codewalk_review_diff`
-3. Per fix: `codewalk_approve_action` → you approve or reject in **your host's UI**
-4. On approve only: `codewalk_apply_fix(..., approval_token=<token>)` — enforced in MCP server code
+2. Agent: `codewalk_run_review` (returns enriched context for the host LLM to review)
+3. For each finding: accept/reject via `codewalk_finding_verdict`
+4. Apply accepted fixes: `codewalk_apply_accepted` (or per-fix: `codewalk_approve_action` → `codewalk_apply_fix(..., approval_token=<token>)`)
 5. Verify: `codewalk_verify_fix`
 6. After edits: `codewalk_incremental_reindex`
 

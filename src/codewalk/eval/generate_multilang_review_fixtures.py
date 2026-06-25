@@ -48,7 +48,7 @@ CASES: list[dict] = [
         "expected": {
             "title_contains": "unwrap",
             "category": ["error_handling", "bug"],
-            "severity": "warning",
+            "severity": "error",
             "line_marker": "unwrap()",
         },
     },
@@ -62,7 +62,7 @@ CASES: list[dict] = [
         "expected": {
             "title_contains": "range",
             "category": "bug",
-            "severity": "warning",
+            "severity": "error",
             "line_marker": "&& len(args) > max",
         },
     },
@@ -76,7 +76,7 @@ CASES: list[dict] = [
         "expected": {
             "title_contains": "force unwrap",
             "category": ["error_handling", "security"],
-            "severity": "warning",
+            "severity": "error",
             "line_marker": "URL(string: self)!",
         },
     },
@@ -95,7 +95,7 @@ CASES: list[dict] = [
         "expected": {
             "title_contains": "safeParse",
             "category": "bug",
-            "severity": "warning",
+            "severity": "error",
             "line_marker": "success: true",
         },
     },
@@ -113,7 +113,7 @@ CASES: list[dict] = [
         "expected": {
             "title_contains": "null",
             "category": "error_handling",
-            "severity": "warning",
+            "severity": "error",
             "line_marker": "new JsonPrimitive(string)",
         },
     },
@@ -127,7 +127,7 @@ CASES: list[dict] = [
         "expected": {
             "title_contains": "require",
             "category": "bug",
-            "severity": "warning",
+            "severity": "error",
             "line_marker": "size != options.size",
         },
     },
@@ -155,7 +155,7 @@ CASES: list[dict] = [
         "expected": {
             "title_contains": "null",
             "category": "error_handling",
-            "severity": "warning",
+            "severity": "error",
             "line_marker": "values!.entries",
         },
     },
@@ -177,7 +177,7 @@ CASES: list[dict] = [
         "expected": {
             "title_contains": "error details",
             "category": ["privacy", "security"],
-            "severity": "critical",
+            "severity": "blocker",
             "line_marker": "$error['exception']",
         },
     },
@@ -191,7 +191,7 @@ CASES: list[dict] = [
         "expected": {
             "title_contains": "basic",
             "category": "security",
-            "severity": "critical",
+            "severity": "blocker",
             "line_marker": "if valid?(auth)",
         },
     },
@@ -205,7 +205,7 @@ CASES: list[dict] = [
         "expected": {
             "title_contains": "null",
             "category": "error_handling",
-            "severity": "warning",
+            "severity": "error",
             "line_marker": "if (init==SDS_NOINIT)",
         },
     },
@@ -219,7 +219,7 @@ CASES: list[dict] = [
         "expected": {
             "title_contains": "validation",
             "category": "bug",
-            "severity": "warning",
+            "severity": "error",
             "line_marker": "|| !string.IsNullOrWhiteSpace(workspace)",
         },
     },
@@ -273,6 +273,7 @@ def generate_case(case: dict, temp_root: Path) -> dict:
 
 
 def main() -> int:
+    """Generate synthetic multi-language review fixtures."""
     diffs_dir = ROOT / "diffs"
     expected_dir = ROOT / "expected"
     originals_dir = ROOT / "originals"

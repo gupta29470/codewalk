@@ -1,3 +1,4 @@
+"""Speech-to-text transcription utilities for the voice interface."""
 import sys
 
 import numpy as np

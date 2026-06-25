@@ -1,3 +1,4 @@
+"""LLM answer faithfulness and relevance grading."""
 from pydantic import BaseModel, Field, model_validator
 from langchain_core.prompts import ChatPromptTemplate
 

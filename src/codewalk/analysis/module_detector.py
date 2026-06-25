@@ -1,3 +1,4 @@
+"""Automatic module/package boundary detection from directory structure."""
 import logging
 from collections import Counter, defaultdict
 

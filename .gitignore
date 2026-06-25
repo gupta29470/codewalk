@@ -52,3 +52,7 @@ blogs/
 tests/
 
 local_docs/
+
+src/codewalk/eval/eval_runs/*
+
+.kimi-code/*

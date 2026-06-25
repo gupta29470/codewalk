@@ -1,3 +1,4 @@
+"""System and agent prompt templates."""
 AGENT_SYSTEM_PROMPT = """You are a codebase expert assistant helping developers \
 understand a software project.
 

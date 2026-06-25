@@ -1,3 +1,4 @@
+"""Directory scanning and file enumeration for indexing."""
 import logging
 import os as _os
 from pathlib import Path

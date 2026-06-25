@@ -23,6 +23,7 @@ class QueryRoute(BaseModel):
             "One of: 'direct' (specific function/class by name), "
             "'search' (semantic code search), "
             "'module' (module structure/info), "
+            "'docs' (guidelines/process/config/documentation question), "
             "'overview' (project-level question)"
         )
     )
@@ -30,6 +31,7 @@ class QueryRoute(BaseModel):
         description=(
             "For 'direct': the function/class name. "
             "For 'module': the module name. "
+            "For 'docs': the refined docs question. "
             "For 'search'/'overview': the refined search query."
         )
     )
@@ -51,6 +53,11 @@ _ROUTER_PROMPT = ChatPromptTemplate.from_messages([
      "  Examples: 'What's in the analysis module?', 'Show me the rag module', "
      "  'List files in src/codewalk/review'\n"
      "  target = the module name (e.g. 'analysis')\n\n"
+     "- 'docs': User asks about conventions, guidelines, commit rules, config, environment,\n"
+     "  process, or documentation.\n"
+     "  Examples: 'What is the commit message convention?', 'How are env files handled?', "
+     "  'What do the review guidelines say about imports?', 'Explain the barrel import pattern'\n"
+     "  target = the docs question itself\n\n"
      "- 'overview': User asks about the project as a whole.\n"
      "  Examples: 'What is this project?', 'Give me an overview', 'What tech stack?', "
      "  'Summarize the architecture'\n"
@@ -66,7 +73,7 @@ def route_query(question: str) -> QueryRoute:
     Cost: 1 LLM call.
 
     Returns:
-        QueryRoute with .route ('direct'|'search'|'module'|'overview')
+        QueryRoute with .route ('direct'|'search'|'module'|'docs'|'overview')
         and .target (refined query or symbol/module name).
     """
     llm = get_llm(temperature=0, reasoning=False)

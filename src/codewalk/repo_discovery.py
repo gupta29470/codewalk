@@ -132,4 +132,19 @@ def ensure_codewalk_yaml(
         # Fallback to the minimal default if generation unexpectedly fails.
         _log(f"[repo_discovery] Creating default codewalk.yaml at {yaml_path}")
         yaml_path.write_text(DEFAULT_CODEWALK_YAML, encoding="utf-8")
+
+    return root
+
+
+def resolve_mcp_workspace_root(
+    start_dir: str | None = None,
+    *,
+    create: bool = True,
+) -> Path:
+    """Resolve the MCP workspace root, creating codewalk.yaml if needed.
+
+    This is the MCP-facing entry point that prefers the git root and guarantees
+    a codewalk.yaml marker exists when ``create=True``.
+    """
+    return ensure_codewalk_yaml(start_dir, create=create, prefer_git_root=True)
     return root

@@ -1,3 +1,4 @@
+"""Diagram Generator utilities for Codewalk."""
 def generate_module_diagram(module_graph: dict, direction: str = "TD") -> str:
     """Generate a Mermaid flowchart from the module dependency graph.
 

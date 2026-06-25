@@ -1,3 +1,4 @@
+"""Generate optimal file reading order via topological sort of the dependency graph."""
 import json
 
 from collections import deque

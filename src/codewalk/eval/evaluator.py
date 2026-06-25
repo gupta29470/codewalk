@@ -1,3 +1,4 @@
+"""RAGAS-based evaluation harness for retrieval and answer quality."""
 import time
 import logging
 from dataclasses import dataclass, field, asdict

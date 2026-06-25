@@ -1,47 +1,66 @@
-# `src/codewalk/review/` — Code Review & Fix Application
+# `src/codewalk/review/` — Code Review Engine
 
-This package performs LLM-based code review on diffs and single files, optionally guided by team docs/guidelines, and applies approved fixes safely.
+This package performs LLM-based code review on diffs and single files, optionally guided by team docs/guidelines and rubrics, and applies approved fixes safely.
 
 ## Modules
 
-| File | Role |
+| File / Package | Role |
 |------|------|
-| `reviewer.py` | Main review orchestrator: diff/file review, architecture context, blast radius, guidelines/docs search, parallel LLM passes. |
-| `diff_parser.py` | `get_diff()` and `get_parsed_diff()` — git diff generation and `unidiff` parsing. |
-| `guidelines_loader.py` | `get_guidelines_store()` — loads `.md/.txt/.rst` guidelines into a ChromaDB collection. |
-| `fix_applier.py` | `apply_fix_to_file()` / `apply_fixes_batch()` — exact-replacement atomic writes with path-traversal guards. |
-| `reflector.py` | Critic/reflection prompt for a second-pass review. |
-| `models.py` | Pydantic models for diff hunks, changed lines, review issues. |
+| `engine.py` | Main orchestrator. `run_review()` runs the full multi-stage review; `run_review_context()` returns the context package used by MCP without running the LLM review pass. |
+| `report.py` | Review data models: `Finding`, `ReviewReport`, `ReviewContextPackage`, plus enums for `Severity`, `Category`, `Verdict`, `Confidence`, `Source`, `Pillar`. |
+| `finding_store.py` | Persistent finding store: `build_finding_store`, `save_finding_store`, `load_finding_store`, `diff_findings`, `find_last_review`. |
+| `session.py` | `ReviewSession` dataclass and `SessionStatus` enum. |
+| `session_store.py` | Save/load review sessions and findings to `.codewalk/reviews/`. |
+| `diff_parser.py` | `get_diff()` and `get_parsed_diff()` — git diff generation and `unidiff` parsing into `DiffFile`/`DiffHunk`/`ChangedLine`. |
+| `fix_applier.py` | `apply_fix_to_file()` / `apply_fixes_batch()` — exact-replacement atomic writes with path-traversal guards, context-line disambiguation, and optional post-apply AST validation. |
+| `neighborhood.py` | `expand_neighborhood()` — blast-radius and import-neighbor context expansion around changed files. |
+| `static_analysis.py` | Deterministic static analysis (`run_static_analysis`) — graph-based risk scoring, PageRank, fan-in, cycle detection, bottleneck identification. |
+| `stack_detect.py` | Parse stack traces and map them to likely source locations. |
+| `utils.py` | Shared utilities: git HEAD SHA, token counting, import-block extraction, smart file truncation around hunks. |
+| `metrics.py` | `compute_metrics()` — aggregate statistics from a review run. |
+| `verdict.py` | Verdict computation helpers. |
+| `rubric_loader.py` | `build_rubrics()` — loads YAML rubric definitions into `Rubrics`. |
+| `cancellation.py` | Per-session cancellation tokens: `start_review`, `check_cancelled`, `end_review`, `ReviewCancelledError`. |
+| `progress.py` | Progress callbacks and reporting helpers. |
+| `adversarial.py` | Adversarial verification of LLM findings (skeptical re-review). |
+| `eval.py` | Evaluation helpers for comparing review output against expected issues. |
+| `review_cache.py` | Deterministic review-input cache keyed by repo HEAD + `codewalk.yaml` mtime + diff target. |
+| `reviewers/` | Pluggable reviewer implementations: `BaseReviewer`, `GenericReviewer`, `SecurityReviewer`, `ReviewerRegistry`, `DEFAULT_REVIEWERS`. |
+| `pipeline/` | Post-processing pipeline: `cluster`, `deduplicate`, `rank`, `verify`, `write_summary`/`write_narrative_summary`, `compute_verdict`. |
+| `renderers/` | Output formatters for different consumers: `markdown`, `cli`, `api`, `base`. |
 
 ## Data flow
 
 ```
-git diff or file content
+git diff or single file content
     ↓
-retrieve_corrective() + caller/blast context + guidelines/docs context
+diff_parser.py → DiffFile list
     ↓
-LLM review → list[Issue]
+neighborhood.py → expanded context + blast radius
     ↓
-(optional) reflector.py second pass
+static_analysis.py → deterministic auto-findings (+ review_cache lookup/save)
     ↓
-approved fixes → fix_applier.py
+engine.py assembles ReviewInputs (guidelines, architecture flags, file tree, rubrics)
+    ↓
+reviewers/ (GenericReviewer, SecurityReviewer, …) run in token-bounded batches
+    ↓
+pipeline/ → cluster → deduplicate → rank → verify (adversarial) → compute_verdict → write summary
+    ↓
+finding_store.py / session_store.py persist results under .codewalk/reviews/
+    ↓
+renderers/ format output for CLI / API / Markdown
 ```
 
 ## Connections
 
-- `reviewer.py` uses `rag/chain.py`, `query/`, `embeddings/vector_store.py`, `graph/graph_store.py`, and `doc_knowledge/doc_store.py`.
-- `review_context_service.py` wraps `reviewer.prepare_review_context()` for API/MCP review-context endpoints.
-- API endpoints: `/review`, `/review/file`, `/review/apply`, `/review/guidelines`.
-- MCP tools: `codewalk_get_review_context`, `codewalk_reflect_review`, `codewalk_apply_fix`, `codewalk_verify_fix` call into this package.
+- `engine.py` imports from every other module in this package and from `src.codewalk.config.get_llm()` for the review LLM.
+- `engine.py` uses `src.codewalk.team_config.load_codewalk_yaml()` to discover repo configuration and guidelines.
+- `neighborhood.py` uses `src.codewalk.analysis.blast_radius` and `src.codewalk.graph.graph_runtime` for graph-based context expansion.
+- `static_analysis.py` uses `src.codewalk.graph.graph_runtime` for PageRank/fan-in/cycle data and `src.codewalk.analysis.dependency_graph` for import parsing.
+- API endpoints in `src/codewalk/api/main.py` call into `engine.run_review()`, `engine.run_review_context()`, and `fix_applier.apply_fix_to_file()`.
+- MCP tools in `src/codewalk/mcp/server.py` expose `codewalk_run_review` (context), `codewalk_review_file` (full pipeline), `codewalk_get_review_details`, `codewalk_get_stack_info`, `codewalk_finding_verdict`, `codewalk_apply_accepted`, `codewalk_approve_action`, `codewalk_apply_fix`, and `codewalk_verify_fix`.
 
-## Recent fixes
+## Notes
 
-- `review_prompts.py` now instructs the LLM to classify issues as BLOCKING vs NON-BLOCKING and to keep the verdict consistent (Request changes when blocking issues exist).
-- `review_prompts.py` adds explicit guidance for reviewing sensitive domains (payments, auth, crypto, PII): validation, token/session handling, error paths, backward compatibility, and exhaustiveness of enums/region maps.
-- `review_prompts.py` asks the model to separate praise from issues and to avoid letting nits dilute blocking problems.
-- `reviewer.py` handles empty files gracefully and reviews them without generating an invalid diff.
-- `reviewer.py` now accepts an explicit `guidelines_path` for single-file reviews.
-- `reviewer.py` imports `log as _log` from `src.codewalk.log` so single-file review no longer raises `NameError`.
-- `fix_applier.py` now applies whitespace-normalized fixes by matching the original file span, instead of silently failing when spaces/tabs differ.
-- `fix_applier.py` context-line disambiguation now replaces only `old_code`, preserving the surrounding context lines.
-- `fix_applier.py` guards against path traversal when applying fixes.
+- The older monolithic `reviewer.py` has been split into `engine.py` + `reviewers/` + `pipeline/` + `renderers/`.
+- `run_review()` is the single entry point used by both the API `/review` endpoint and the MCP `codewalk_run_review` tool.

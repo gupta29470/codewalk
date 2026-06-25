@@ -1,3 +1,4 @@
+"""Debug fan-out agent for experimenting with parallel tool execution."""
 from __future__ import annotations
 import asyncio
 from typing import TypedDict
@@ -9,6 +10,7 @@ from src.codewalk.core.fanout import build_fanout_graph
 from src.codewalk.core.hitl import compile_with_hitl
 
 class DebugState(TypedDict):
+    """State schema for the debug fan-out agent."""
     query: str             # input — read by all parallel nodes
     search_results: str    # written by search_node
     git_log: str           # written by git_node

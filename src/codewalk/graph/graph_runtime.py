@@ -1,3 +1,4 @@
+"""igraph-based fast graph operations: cycles, centrality, shortest paths, reading order."""
 import logging
 from typing import Optional
 

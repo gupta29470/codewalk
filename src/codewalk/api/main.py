@@ -1,9 +1,11 @@
+"""FastAPI application exposing Codewalk endpoints for analysis, chat, review, search, docs, voice, and cloud."""
 import logging
 import os
 import sys
 import json
 import base64
 import asyncio
+import queue
 from pathlib import Path
 from contextlib import asynccontextmanager
 
@@ -20,10 +22,13 @@ from src.codewalk.pipeline import (
 )
 from src.codewalk.api.models import (
     AnalyzeRequest, AnalyzeResponse,
+    ApplyAcceptedRequest, ApplyAcceptedResponse,
+    CancelReviewRequest, CancelReviewResponse,
     ChatRequest, ChatResponse,
     ModuleResponse, OverviewResponse,
     BlastRadiusResponse,
-    ReviewRequest, ReviewFileRequest, ReviewResponse, ReviewFileResponse,
+    ReviewRequest, ReviewResponse, ReviewStreamRequest,
+    ReviewVerdictRequest, ReviewVerdictResponse,
     GuidelinesRequest,
     DocsIndexRequest, DocsAskRequest, DocsSearchRequest, ApproveRequest,
     ResearchRequest, ApplyFixesRequest, ApplyFixesResponse, AppliedFix,
@@ -506,6 +511,7 @@ def _run_chat_stream(agent, message: str, config: dict) -> list[dict]:
 # ─── POST /chat ──────────────────────────────────────────────────────
 @app.post("/chat", response_model=ChatResponse)
 def chat(request: ChatRequest):
+    """Run one turn of the LangGraph agent. Returns an answer or a HITL approval request."""
     try:
         state.require_index()
         agent = state.get_agent()
@@ -860,61 +866,48 @@ def incremental_reindex_endpoint():
 @app.post("/review", response_model=ReviewResponse)
 async def review_endpoint(request: ReviewRequest):
     """Review current git diff for bugs, security issues, and style.
-    Uses parallel context loading (guidelines + architecture + per-file) via asyncio.gather.
+    Runs the one-stop review engine (graph + deterministic + LLM + hard verdict).
     """
     try:
-        from src.codewalk.review.reviewer import review_diff_async
+        import secrets
+
+        from src.codewalk.review.engine import run_review
+        from src.codewalk.config import get_llm
 
         state.ensure_initialized()
+        repo_path = state.get_repo_path()
+        if not repo_path:
+            raise HTTPException(status_code=400, detail="Repository path not available")
 
-        store = None
-        deps = None
-        try:
-            store = state.get_store()
-            deps = state.get_deps()
-        except RuntimeError:
-            pass  # works without indexing, just less context
-
-        result = await review_diff_async(
-            staged=request.staged,
+        review_id = secrets.token_urlsafe(12)
+        llm = get_llm(temperature=0)
+        report = await asyncio.to_thread(
+            run_review,
+            repo_path=Path(repo_path),
             target_branch=request.target_branch,
             commit=request.commit,
-            store=store,
-            deps=deps,
-            graph_store=state.get_graph_store(),
-            repo_path=state.get_repo_path(),
+            staged=request.staged,
+            llm=llm,
+            incremental=request.incremental,
+            force_full_review=request.force_full_review,
+            review_id=review_id,
+            narrative_summary=request.narrative_summary,
         )
 
-        if request.reflect and result.diff_text:
-            from src.codewalk.review.reflector import reflect_on_review
-            result = await asyncio.to_thread(
-                reflect_on_review, result, result.diff_text, request.iterations
-            )
+        from src.codewalk.review.renderers import render_api_response
 
-        issues = [
-            {
-                "severity": issue.severity.value,
-                "confidence": issue.confidence.value,
-                "category": issue.category.value,
-                "file_path": issue.file_path,
-                "line_number": issue.line_number,
-                "title": issue.title,
-                "explanation": issue.explanation,
-                "suggestion": issue.suggestion,
-                "fix_description": issue.fix_description,
-                "code_snippet": issue.code_snippet,
-            }
-            for issue in result.issues
-        ]
+        response_data = render_api_response(report)
 
         return ReviewResponse(
-            verdict=result.verdict.value,
-            verdict_reason=result.verdict_reason,
-            issues=issues,
-            summary=result.summary,
-            files_reviewed=result.files_reviewed,
-            lines_added=result.lines_added,
-            lines_removed=result.lines_removed,
+            verdict=response_data["verdict"],
+            verdict_reason=response_data["verdict_reason"],
+            issues=response_data["issues"],
+            summary=response_data["summary"],
+            files_reviewed=response_data["files_reviewed"],
+            lines_added=response_data["lines_added"],
+            lines_removed=response_data["lines_removed"],
+            session_id=response_data["session_id"],
+            architecture_flags=response_data["architecture_flags"],
         )
     except RuntimeError as e:
         raise HTTPException(status_code=400, detail=str(e))
@@ -923,83 +916,220 @@ async def review_endpoint(request: ReviewRequest):
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-# ─── POST /review/file ───────────────────────────────────────────────
-@app.post("/review/file", response_model=ReviewFileResponse)
-async def review_file_endpoint(request: ReviewFileRequest):
-    """Review a single file against codebase conventions."""
+# ─── POST /review/cancel ─────────────────────────────────────────────
+@app.post("/review/cancel", response_model=CancelReviewResponse)
+async def cancel_review_endpoint(request: CancelReviewRequest):
+    """Cancel a running review by its review_id."""
     try:
-        import os
+        from src.codewalk.review.cancellation import cancel_review
 
-        from src.codewalk.review.reviewer import review_file
-
-        state.require_index()
-        repo_path = _ensure_repo_path(request.repo_path)
-        store = state.get_store()
-
-        full_path = (
-            os.path.join(repo_path, request.file_path)
-            if not os.path.isabs(request.file_path)
-            else request.file_path
-        )
-
-        # Path traversal guard: the file must live inside the repo
-        try:
-            Path(full_path).resolve().relative_to(Path(repo_path).resolve())
-        except ValueError:
-            raise HTTPException(
-                status_code=400,
-                detail=f"Invalid file path (outside repo): {request.file_path}",
+        cancelled = cancel_review(request.review_id)
+        if cancelled:
+            return CancelReviewResponse(
+                cancelled=True,
+                message=f"Review {request.review_id} cancellation requested.",
             )
-
-        result = await asyncio.to_thread(
-            review_file,
-            file_path=request.file_path,
-            repo_path=repo_path,
-            store=store,
-            graph_store=state.get_graph_store(),
-            deps=state._deps,
-            guidelines_path=request.guidelines_path,
+        return CancelReviewResponse(
+            cancelled=False,
+            message=f"Review {request.review_id} not found or already completed.",
         )
-
-        issues = [
-            {
-                "severity": issue.severity.value,
-                "confidence": issue.confidence.value,
-                "category": issue.category.value,
-                "file_path": issue.file_path,
-                "line_number": issue.line_number,
-                "title": issue.title,
-                "explanation": issue.explanation,
-                "suggestion": issue.suggestion,
-                "fix_description": issue.fix_description,
-                "code_snippet": issue.code_snippet,
-            }
-            for issue in result.issues
-        ]
-
-        return {
-            "verdict": result.verdict.value,
-            "verdict_reason": result.verdict_reason,
-            "issues": issues,
-            "summary": result.summary,
-            "file_path": request.file_path,
-        }
-    except FileNotFoundError:
-        raise HTTPException(status_code=404, detail=f"File not found: {request.file_path}")
-    except RuntimeError as e:
-        raise HTTPException(status_code=400, detail=str(e))
-    except HTTPException:
-        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+# ─── POST /review/stream ─────────────────────────────────────────────
+@app.post("/review/stream")
+async def review_stream_endpoint(request: ReviewStreamRequest):
+    """Run a review and stream phase progress as Server-Sent Events.
+
+    The client receives one SSE event per pipeline phase. The final event has
+    phase ``complete`` and includes the full review payload under ``data.report``.
+    """
+    import secrets
+
+    from src.codewalk.config import get_llm
+    from src.codewalk.review.engine import run_review
+    from src.codewalk.review.progress import ReviewProgressReporter, review_progress_bus
+    from src.codewalk.review.renderers import render_api_response
+
+    state.ensure_initialized()
+    repo_path = state.get_repo_path()
+    if not repo_path:
+        raise HTTPException(status_code=400, detail="Repository path not available")
+
+    review_id = secrets.token_urlsafe(12)
+    reporter = ReviewProgressReporter(review_id)
+    review_progress_bus.register(review_id, reporter)
+
+    async def _event_generator():
+        try:
+            while True:
+                try:
+                    event = await asyncio.to_thread(reporter.get, timeout=30.0)
+                except queue.Empty:
+                    break
+                if event is None:
+                    break
+                payload = {
+                    "phase": event.phase,
+                    "message": event.message,
+                    "data": event.data,
+                }
+                yield f"data: {json.dumps(payload)}\n\n".encode("utf-8")
+        finally:
+            review_progress_bus.unregister(review_id)
+
+    async def _run_review():
+        try:
+            llm = get_llm(temperature=0)
+            report = await asyncio.to_thread(
+                run_review,
+                repo_path=Path(repo_path),
+                target_branch=request.target_branch,
+                commit=request.commit,
+                staged=request.staged,
+                llm=llm,
+                incremental=request.incremental,
+                force_full_review=request.force_full_review,
+                review_id=review_id,
+                progress_reporter=reporter,
+                narrative_summary=request.narrative_summary,
+            )
+            response_data = render_api_response(report)
+            reporter.report(
+                "complete",
+                "Review complete",
+                {"report": response_data},
+            )
+        except Exception as e:
+            logger.exception("[review/stream] review failed")
+            reporter.report("error", f"Review failed: {e}", {"error": str(e)})
+        finally:
+            reporter.done()
+
+    # Start the review in the background; the generator streams events as they
+    # are produced.
+    asyncio.create_task(_run_review())
+    return StreamingResponse(
+        _event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+        },
+    )
+
+# ─── POST /review/verdict ────────────────────────────────────────────
+@app.post("/review/verdict")
+def review_verdict_endpoint(request: ReviewVerdictRequest):
+    """Record a user verdict (accepted/rejected) on a review finding."""
+    from src.codewalk.review.session_store import load_findings, save_findings, load_session
+    from datetime import datetime, timezone
+
+    if request.verdict not in ("accepted", "rejected"):
+        raise HTTPException(status_code=422, detail="verdict must be 'accepted' or 'rejected'")
+
+    repo_path = state.get_repo_path()
+    if not repo_path:
+        raise HTTPException(status_code=400, detail="Repository path not available")
+
+    session = load_session(Path(repo_path), request.session_id)
+    if session is None:
+        raise HTTPException(status_code=404, detail=f"Session {request.session_id} not found")
+
+    folder = session.folder_name or session.session_id
+    findings = load_findings(Path(repo_path), folder)
+    if not findings or request.finding_index < 0 or request.finding_index >= len(findings):
+        raise HTTPException(status_code=400, detail=f"Finding index {request.finding_index} out of range")
+
+    findings[request.finding_index]["user_verdict"] = request.verdict
+    findings[request.finding_index]["verdict_at"] = datetime.now(timezone.utc).isoformat()
+    if request.reason:
+        findings[request.finding_index]["verdict_reason"] = request.reason
+
+    save_findings(Path(repo_path), folder, findings)
+
+    title = findings[request.finding_index].get("title", "Untitled")
+    return {"success": True, "message": f"Finding #{request.finding_index} ({title}) marked as {request.verdict}"}
+
+
+# ─── POST /review/apply-accepted ─────────────────────────────────────
+@app.post("/review/apply-accepted")
+def apply_accepted_endpoint(request: ApplyAcceptedRequest):
+    """Apply all accepted fixes from a review session."""
+    import os
+    from src.codewalk.review.fix_applier import apply_fix_to_file
+    from src.codewalk.review.session_store import load_findings, load_session
+    from src.codewalk.review.finding_store import find_last_review
+    from src.codewalk.review.utils import get_current_branch
+
+    repo_path = state.get_repo_path()
+    if not repo_path:
+        raise HTTPException(status_code=400, detail="Repository path not available")
+
+    # Resolve session
+    if request.session_id:
+        session = load_session(Path(repo_path), request.session_id)
+        if session is None:
+            raise HTTPException(status_code=404, detail=f"Session {request.session_id} not found")
+        folder = session.folder_name or session.session_id
+    else:
+        branch = get_current_branch(Path(repo_path))
+        last_store = find_last_review(Path(repo_path), branch)
+        if not last_store:
+            raise HTTPException(status_code=404, detail="No previous review session found on this branch")
+        session = load_session(Path(repo_path), last_store.review_id)
+        if session is None:
+            raise HTTPException(status_code=404, detail="Could not load latest review session")
+        folder = session.folder_name or session.session_id
+
+    findings = load_findings(Path(repo_path), folder)
+    if not findings:
+        raise HTTPException(status_code=400, detail="No findings in this session")
+
+    # Filter: accepted + has code
+    to_apply = [
+        (i, f) for i, f in enumerate(findings)
+        if f.get("user_verdict") == "accepted"
+        and f.get("recommended_code")
+        and f.get("current_code")
+        and f.get("file_path")
+    ]
+
+    if not to_apply:
+        return {"applied": [], "failed": [], "total_accepted": 0}
+
+    applied: list[str] = []
+    failed: list[str] = []
+
+    for idx, finding in to_apply:
+        file_path = finding["file_path"]
+        old_code = finding["current_code"]
+        new_code = finding["recommended_code"]
+
+        # Path safety
+        full_path = os.path.join(repo_path, file_path)
+        resolved_repo = os.path.realpath(repo_path)
+        resolved_target = os.path.realpath(full_path)
+        if not resolved_target.startswith(resolved_repo + os.sep) and resolved_target != resolved_repo:
+            failed.append(f"#{idx} {file_path}: path traversal blocked")
+            continue
+
+        result = apply_fix_to_file(repo_path, file_path, old_code, new_code)
+        if result["ok"]:
+            applied.append(f"#{idx} {file_path}: {finding.get('title', 'applied')}")
+        else:
+            failed.append(f"#{idx} {file_path}: {result.get('error', 'unknown')}")
+
+    return {"applied": applied, "failed": failed, "total_accepted": len(to_apply)}
+
 
 # ─── POST /review/guidelines ─────────────────────────────────────────
 @app.post("/review/guidelines")
 def load_guidelines_endpoint(request: GuidelinesRequest):
-    """Load team coding guidelines for use in reviews."""
+    """Load project docs/standards for use in reviews."""
     try:
-        from src.codewalk.review.guidelines_loader import get_guidelines_store
         import os
+        from src.codewalk.doc_knowledge.doc_store import DocStore
 
         repo_path = _ensure_repo_path(request.repo_path)
 
@@ -1012,14 +1142,11 @@ def load_guidelines_endpoint(request: GuidelinesRequest):
         if not os.path.isdir(path):
             raise HTTPException(status_code=404, detail=f"Directory not found: {path}")
 
-        store = get_guidelines_store(
-            guidelines_path=path,
-            persist_dir=state.chroma_path(),
-        )
-        if not store:
-            raise HTTPException(status_code=400, detail=f"No guideline files found in {path}")
-
-        count = store.chunk_count()
+        col = f"{state.get_collection_name()}_docs"
+        store = DocStore(persist_dir=state.chroma_path(), collection_name=col)
+        store.create_collection()
+        store.clear()
+        count = store.index_docs(path)
         return {"status": "loaded", "chunks": count, "path": path}
     except HTTPException:
         raise
@@ -1122,6 +1249,7 @@ def get_architecture():
 # ─── POST /docs/index ────────────────────────────────────────────────
 @app.post("/docs/index")
 def docs_index(req: DocsIndexRequest):
+    """Index team docs/guidelines from docs_path into the doc store."""
     _ensure_repo_path(req.repo_path)
     store = state.get_doc_store()
     result = store.index_docs(req.docs_path)
@@ -1135,6 +1263,7 @@ def docs_index(req: DocsIndexRequest):
 # ─── POST /docs/search ──────────────────────────────────────────────
 @app.post("/docs/search")
 def docs_search(req: DocsSearchRequest):
+    """Semantic search over indexed team docs/guidelines."""
     _ensure_repo_path(req.repo_path)
     store = state.get_doc_store()
 

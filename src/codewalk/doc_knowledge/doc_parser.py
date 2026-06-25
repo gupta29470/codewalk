@@ -1,3 +1,4 @@
+"""Parse .md, .pdf, .txt, and .rst docs into plain text + metadata."""
 import os
 import re
 import logging
@@ -9,8 +10,8 @@ logger = logging.getLogger("codewalk")
 
 DOC_EXTENSIONS = {".md", ".pdf", ".txt", ".rst"}
 
-TXT_CHUNK_SIZE = 3000
-TXT_CHUNK_OVERLAP = 200
+TXT_CHUNK_SIZE = 5000
+TXT_CHUNK_OVERLAP = 400
 
 def discover_docs(docs_path: str) -> list[dict]:
     """Walk a directory and find all supported document files.

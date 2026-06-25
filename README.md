@@ -58,7 +58,7 @@ Three ways to use it locally, plus optional cloud indexing:
 | **LLM token costs are high** | Without RAG, the LLM needs your entire codebase in context — slow and expensive. Codewalk embeds code into a vector DB and retrieves only the relevant chunks per query. Faster answers, fraction of the tokens. |
 | **Senior dev switches modules** | You know the auth module but now need to work on payments. Get module info, blast radius, and execution flow without bugging the payments team. |
 | **Before a refactor** | Check blast radius before touching shared code. "If I change `base_model.py`, what breaks?" — get the answer before you break prod. |
-| **PR reviews** | Run `codewalk_review_diff` or `POST /review` — automated multi-stage review with OWASP security checks, test coverage detection, blast radius warnings, and team guidelines matching. MCP mode leverages the calling model (Claude/GPT) directly — no separate LLM needed. |
+| **PR reviews** | Run `codewalk_run_review` (MCP) or `POST /review` (API) — automated multi-stage review with OWASP security checks, blast radius warnings, and team guidelines matching. MCP mode returns enriched context so the calling model (Claude/GPT) performs the review directly — no separate LLM needed. |
 | **Documentation is outdated** | Codewalk analyzes the *actual code*, not stale wiki pages. Always up to date. |
 
 ---
@@ -76,7 +76,7 @@ Three ways to use it locally, plus optional cloud indexing:
 | 🔎 **Semantic Search** | ChromaDB vector search on embedded code chunks (RAG) |
 | 🔬 **Code Review** | Multi-stage review pipeline: test coverage, blast radius, guidelines RAG, context-enriched deep analysis |
 | 🔄 **Incremental Reindex** | Content hash comparison — only re-embeds changed files, skips unchanged |
-| 🧩 **MCP Server** | 33 MCP tools for VS Code Copilot / Claude Code / Cursor / Codex |
+| 🧩 **MCP Server** | 38 MCP tools for VS Code Copilot / Claude Code / Cursor / Codex |
 | 🎙️ **Voice Interface** | Talk to your codebase — mic recording, local STT (faster-whisper), agent-driven routing (MCP + API), TTS response |
 | 🔬 **Graph Intelligence** | DuckDB persistent graph + igraph C-speed traversal: cycle detection, centrality, import chain tracing |
 | 🧬 **Corrective RAG** | Distance-based chunk filtering (free) + LLM answer grading + query rewriting for reliable answers |
@@ -84,7 +84,7 @@ Three ways to use it locally, plus optional cloud indexing:
 | ⚡ **Parallel Embedding** | Producer-consumer pipeline — CPU chunking overlaps with GPU embedding |
 | 🏗️ **Multi-Provider LLM** | Ollama (local), OpenAI, Anthropic, Groq, Gemini, OpenRouter, DeepSeek |
 | 📚 **Doc Indexing** | Index team docs (.md, .pdf, .txt) — search and ask questions with source citations |
-| 🔄 **Reflection** | Actor→Critic→Improve loop for code reviews — catches missed issues, removes false positives |
+| 🔄 **Reflection** | Actor→Critic→Improve loop used by deep research to refine cross-cutting reports |
 | 🧑‍💻 **Human-in-the-Loop** | Approval gate before any code/file modification — LangGraph checkpoint + interrupt |
 | 🔬 **Deep Research** | Fan-out parallel search → merge → synthesize → reflect for complex cross-cutting questions |
 | 🏗️ **Architecture Health** | Graph stats, bottleneck files (betweenness centrality), PageRank, cycle detection with fix suggestions |
@@ -453,6 +453,8 @@ Run **`codewalk_connect_repo`** in Cursor or let analyze auto-download the index
 
 > Every MCP tool is wrapped with a workspace-change guard (`_refresh_state_if_moved`) that re-discovers the current working directory and resets state if the workspace changes.
 
+> ⚠️ **One repo per MCP server process.** Codewalk keeps runtime state (vector store, graph, repo path) in memory. Pointing the same running MCP server at multiple repos — or rapidly switching workspaces in the same process — can overwrite or corrupt that state. Use one editor window / one MCP connection per repo. The stdio transport is safe because each connection spawns a separate process, but do not route commands for different repos into the same server instance.
+
 ### Local-only MCP (index on your machine)
 
 No cloud — index runs locally via `codewalk_analyze_codebase`. After `rebuild_analysis_cache`, MCP embeds with **`index_from_paths_parallel`** (same pipeline helpers as the API, but MCP scans via `scan_repo_files` + `codewalk.yaml` excludes rather than calling `full_index_parallel` directly).
@@ -466,9 +468,9 @@ No cloud — index runs locally via `codewalk_analyze_codebase`. After `rebuild_
 
 You talk to your **IDE agent**; the agent calls **Codewalk MCP tools**. Codewalk does not render UI — each host has its own approve/reject experience (Cursor approval cards, Copilot chat, Claude Code prompts, etc.). The agent must present each fix and wait for your approval through that host UI (or yes/no in chat).
 
-1. Agent runs `codewalk_review_diff`
-2. Per fix: `codewalk_approve_action` → you approve/reject in **your host's UI**
-3. On approve: `codewalk_apply_fix(..., approval_token=<token>)` (enforced in code)
+1. Agent runs `codewalk_run_review` (returns enriched context for the host LLM to review) or `codewalk_review_file` (runs the full pipeline on one file)
+2. For each finding: `codewalk_finding_verdict` records whether you **accept** or **reject** it
+3. Apply accepted fixes: `codewalk_apply_accepted` applies every accepted finding with `recommended_code` in one call; or use `codewalk_approve_action` → `codewalk_apply_fix(..., approval_token=<token>)` for a single fix
 4. After edits: `codewalk_verify_fix` → `codewalk_incremental_reindex`
 
 Full agent rules: `src/codewalk/mcp/server.py` FastMCP `instructions` (sent on MCP connect).
@@ -485,13 +487,16 @@ Full agent rules: `src/codewalk/mcp/server.py` FastMCP `instructions` (sent on M
 | `codewalk_generate_config` | No | Creates starter `codewalk.yaml` |
 | Query tools (search, overview, modules, symbols, …) | Yes | `_require_index()` auto-loads disk |
 | `codewalk_find_circular_dependencies` | Yes | Uses graph data |
-| `codewalk_incremental_reindex`, `refresh_analysis` | Yes | |
-| `codewalk_review_diff`, `review_file`, `reflect_review`, `get_review_context` | Soft / Yes | Better with index |
-| `codewalk_approve_action` / `apply_fix` | No / edits files | Token required for apply |
+| `codewalk_get_architecture_health` | Yes | Graph stats + cycles |
+| `codewalk_incremental_reindex`, `codewalk_refresh_analysis` | Yes | |
+| `codewalk_run_review`, `codewalk_review_file`, `codewalk_get_stack_info` | Soft / Yes | Better with index; `run_review` returns context for the host LLM |
+| `codewalk_get_review_details`, `codewalk_finding_verdict` | Yes | Reads persisted session |
+| `codewalk_approve_action` / `codewalk_apply_fix` | No / edits files | Token required for `apply_fix` |
+| `codewalk_apply_accepted` | Yes | Applies all accepted findings from a session |
 | `codewalk_verify_fix` | No | Runs static analysis + tests |
 | `codewalk_run_static_analysis` | No | ruff/mypy/eslint/etc. |
 | `codewalk_run_tests` | No | pytest/npm test/etc. |
-| `codewalk_pull_index`, `connect_repo`, `index_status` | Cloud config | Replace `.codewalk/` on download |
+| `codewalk_pull_index`, `codewalk_connect_repo`, `codewalk_index_status` | Cloud config | Replace `.codewalk/` on download |
 | Docs / guidelines / voice / `check_version` / `show_knowledge_graph` | Varies | See MCP server `instructions` |
 
 ### Starting the MCP Server in VS Code
@@ -686,17 +691,32 @@ You just tell the AI to analyze — **the AI handles the rest automatically**.
 │  codewalk_lookup_symbol         → find symbols by name across repo  │
 │  codewalk_get_module_info       → inspect a specific module         │
 │  codewalk_explain_function      → AI-powered function explanation   │
+│  codewalk_explain_class         → AI-powered class explanation      │
 │  codewalk_get_blast_radius_map  → change risk analysis              │
 │  codewalk_find_circular_dependencies → detect import cycles         │
 │  codewalk_get_reading_order     → optimal file reading sequence     │
 │  codewalk_get_execution_flow    → module/file dependency flow       │
 │  codewalk_get_architecture_health → bottlenecks, cycles, key files  │
 │  codewalk_call_chain(source, target) → trace import path between    │
+│  codewalk_show_knowledge_graph  → export graph for visualization    │
 │  codewalk_index_docs(docs_path) → index .md/.pdf/.txt docs          │
 │  codewalk_search_docs(query)    → search indexed documents           │
 │  codewalk_ask_docs(question)    → RAG answer grounded in docs        │
-│  codewalk_approve_action(text)  → HITL gate (returns approval_token) │
-│  codewalk_apply_fix(..., token) → apply fix after user says yes      │
+└─────────────────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────────────┐
+│                   REVIEW & HITL TOOLS                               │
+│                                                                     │
+│  codewalk_run_review            → gather review context for host LLM│
+│  codewalk_review_file           → full pipeline review of one file  │
+│  codewalk_get_stack_info        → deterministic stack signals       │
+│  codewalk_get_review_details    → retrieve a persisted review       │
+│  codewalk_load_guidelines       → load team coding standards        │
+│  codewalk_finding_verdict       → accept/reject a finding           │
+│  codewalk_apply_accepted        → apply all accepted fixes          │
+│  codewalk_approve_action(text)  → HITL gate (returns approval_token)│
+│  codewalk_apply_fix(..., token) → apply one fix after approval      │
+│  codewalk_verify_fix            → static analysis + tests           │
 └─────────────────────────────────────────────────────────────────────┘
 
 ┌─────────────────────────────────────────────────────────────────────┐
@@ -705,16 +725,21 @@ You just tell the AI to analyze — **the AI handles the rest automatically**.
 │  codewalk_generate_config       → starter codewalk.yaml             │
 │  codewalk_incremental_reindex   → re-embed only changed files       │
 │  codewalk_refresh_analysis      → re-scan without re-embedding      │
-│  codewalk_review_diff           → review git diff (context + checks) │
-│  codewalk_reflect_review        → self-critique review (reflection)  │
-│  codewalk_review_file           → review file vs codebase patterns  │
-│  codewalk_load_guidelines       → load team coding standards        │
 │  codewalk_run_static_analysis   → ruff/mypy/eslint/etc. on files    │
 │  codewalk_run_tests             → pytest/npm test/etc. on files     │
 └─────────────────────────────────────────────────────────────────────┘
 
 ┌─────────────────────────────────────────────────────────────────────┐
-│                      VOICE (hands-free)                            │
+│                    CLOUD (when configured)                          │
+│                                                                     │
+│  codewalk_pull_index            → download latest server index      │
+│  codewalk_connect_repo          → one-step cloud setup              │
+│  codewalk_index_status          → local vs cloud version            │
+│  codewalk_check_version         → server health/version             │
+└─────────────────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────────────┐
+│                      VOICE (hands-free)                             │
 │                                                                     │
 │  MCP:  codewalk_voice_ask  → mic → transcribe                       │
 │        Copilot picks tool  → calls it → codewalk_speak(summary)     │
@@ -916,18 +941,18 @@ or
 
 #### "Review my changes for bugs"
 
-**Tool:** `codewalk_review_diff` — optional: `staged=true`, `target_branch="master"`
+**Tool:** `codewalk_run_review` — optional: `staged=true`, `target_branch="master"`
 
 You're about to push a PR and want an automated code review.
 
 ```
 @codewalk review my changes
 or
-@codewalk_review_diff
-@codewalk_review_diff staged=true target_branch="master"
+@codewalk_run_review
+@codewalk_run_review staged=true target_branch="master"
 ```
 
-**When to use:** Before pushing a PR. Catches security vulnerabilities (OWASP), bugs, missing test coverage, and style issues. In MCP mode, Copilot performs the review directly using enriched context (full file contents, dependency graph, vector store patterns) — no local LLM overhead, instant results.
+**When to use:** Before pushing a PR. `codewalk_run_review` gathers the full diff, neighborhood context, blast radius, and stack signals, then returns them to Copilot so it can perform the review directly using enriched context — no local LLM overhead, instant results.
 
 ---
 
@@ -959,7 +984,7 @@ or
 @codewalk_load_guidelines docs/standards
 ```
 
-**When to use:** Once per project. After loading, `codewalk_review_diff` automatically checks code against your team's standards.
+**When to use:** Once per project. After loading, `codewalk_run_review` and `codewalk_review_file` automatically include your team's standards in their context.
 
 ---
 
@@ -1118,9 +1143,9 @@ or
 | See dependency flow | `@codewalk show me the execution flow` or `@codewalk_get_execution_flow` |
 | After code changes | `@codewalk refresh the analysis` or `@codewalk_refresh_analysis` |
 | Update embeddings | `@codewalk reindex changed files` or `@codewalk_incremental_reindex` |
-| Review git diff | `@codewalk review my changes` or `@codewalk_review_diff` |
-| Self-critique review | `@codewalk reflect on this review` or `@codewalk_reflect_review` |
+| Review git diff | `@codewalk review my changes` or `@codewalk_run_review` |
 | Review a file | `@codewalk review src/auth.py` or `@codewalk_review_file src/auth.py` |
+| Get stack signals | `@codewalk what stack is this?` or `@codewalk_get_stack_info` |
 | Load guidelines | `@codewalk load guidelines from docs/` or `@codewalk_load_guidelines docs/` |
 | Architecture health | `@codewalk check architecture health` or `@codewalk_get_architecture_health` |
 | Trace import chain | `@codewalk trace chain from config.py to server.py` or `@codewalk_call_chain config.py server.py` |
@@ -1132,7 +1157,9 @@ or
 | Search team docs | `@codewalk search docs for deployment` or `@codewalk_search_docs deployment` |
 | Ask docs a question | `@codewalk how do we deploy?` or `@codewalk_ask_docs how do we deploy` |
 | Deep research | `@codewalk research how error handling works across the codebase` |
-| Approve then apply fix | `@codewalk review my diff` → per issue: approve → you say yes → apply with token |
+| Accept/reject findings | `@codewalk accept finding 3` → `@codewalk_finding_verdict` |
+| Apply accepted fixes | `@codewalk apply accepted fixes` or `@codewalk_apply_accepted` |
+| Approve then apply one fix | `@codewalk approve apply fix to auth.py` → `@codewalk_approve_action` → `@codewalk_apply_fix` |
 | Ask by speaking (hands-free) | `@codewalk_voice_ask` → Copilot calls tool → `@codewalk_speak` |
 
 ---
@@ -1269,11 +1296,16 @@ All query endpoints call `state.require_index()` — auto-loads `.codewalk/` fro
 | `GET /staleness` | Yes | — | Local vs cloud index staleness |
 | `POST /refresh` | Yes | `codewalk_refresh_analysis` | No re-embed |
 | `POST /incremental-reindex` | Yes | `codewalk_incremental_reindex` | `team_config` + manifest collection |
-| `POST /review` | Soft (better with index) | `codewalk_review_diff` | Works with partial context |
+| `POST /review` | Soft (better with index) | `codewalk_run_review` | Works with partial context |
+| `POST /review/stream` | Soft (better with index) | — | SSE progress events |
+| `POST /review/cancel` | Yes | — | Cancel a running review |
 | `POST /review/file` | Yes | `codewalk_review_file` | |
 | `POST /review/guidelines` | No | `codewalk_load_guidelines` | Guidelines Chroma only |
+| `POST /review/verdict` | Yes | `codewalk_finding_verdict` | Accept/reject a finding |
+| `POST /review/apply-accepted` | Yes | `codewalk_apply_accepted` | Apply all accepted fixes |
 | `POST /review/apply` | No (repo path only) | `codewalk_apply_fix` | Caller approves in UI; no token gate |
 | `POST /docs/index`, `/docs/search`, `/docs/ask` | Doc index only | `codewalk_index_docs` etc. | |
+| `POST /chat/approve` | Yes | — | Resume/reject interrupted agent |
 | `POST /voice/ask` | Yes | `codewalk_voice_ask` | |
 | `POST /research` | Yes | deep research | |
 | `GET /health` | No | — | |
@@ -1517,18 +1549,31 @@ curl -X POST http://localhost:8000/review \
       "title": "JWT secret hardcoded",
       "explanation": "The JWT signing secret is hardcoded in the source file.",
       "suggestion": "Move the secret to an environment variable.",
-      "code_snippet": "SECRET = 'my-secret-key'"
+      "code_snippet": "SECRET = 'my-secret-key'",
+      "blocking": true,
+      "confidence": "high"
     }
   ],
   "summary": "Found 1 critical issue in 3 files (+45 / -12 lines)",
+  "narrative_summary": "",
   "files_reviewed": 3,
   "lines_added": 45,
-  "lines_removed": 12
+  "lines_removed": 12,
+  "session_id": "25-June-2026-143052-feature-x-to-main",
+  "architecture_flags": {},
+  "schema_version": "2.0",
+  "merge_blockers": ["JWT secret hardcoded"],
+  "clusters": [],
+  "fixed_count": 0,
+  "new_count": 1,
+  "still_present_count": 0
 }
 ```
 
 - `staged`: If `true`, review only staged changes (`--staged`). Default: `false`.
 - `target_branch`: Diff against a branch (e.g. `"master"` for full PR review). Default: `null` (unstaged changes).
+- `incremental`: Carry forward previous findings when `true`. Default: `false`.
+- `narrative_summary`: Set `true` for an LLM-written narrative summary (slower). Default: `false`.
 
 #### `POST /review/file` — Review a single file
 
@@ -1766,24 +1811,31 @@ Push to `master` → build image → GHCR → deploy to Hetzner (`deploy-server.
 │   LangGraph StateGraph ─── LLM (bind_tools) ───┐        │
 │          │                                      │        │
 │          ▼                                      ▼        │
-│   ┌─ 13 Agent Tools ─────────────────────────────┐       │
+│   ┌─ 11 Agent Tools ─────────────────────────────┐       │
 │   │ search_codebase     get_overview             │       │
 │   │ get_module_info     get_blast_radius_map     │       │
 │   │ explain_function    get_reading_order        │       │
-│   │ review_diff         get_execution_flow       │       │
-│   │ review_file         get_architecture_health  │       │
+│   │ get_execution_flow  get_architecture_health  │       │
 │   │ load_guidelines     apply_fix                │       │
-│   │ verify_fix                                     │       │
+│   │ verify_fix                                   │       │
 │   └──────────────────────────────────────────────┘       │
+├──────────────────────────────────────────────────────────┤
+│                   INGESTION LAYER                         │
+│                                                          │
+│   scanner.py ──► file_filter.py ──► tech_detect.py       │
+│   (file enum         (skip rules       (language/        │
+│    & hashing)         & safety net)     framework id)     │
 ├──────────────────────────────────────────────────────────┤
 │                    ANALYSIS LAYER                         │
 │                                                          │
-│   scanner.py ──► dependency_graph.py ──► module_detector │
+│   code_parser.py ──► dependency_graph.py ──► module_     │
+│   (tree-sitter       (import extraction    detector      │
+│    15+ langs)         → graph)                            │
 │                         │                                │
 │                         ▼                                │
-│   blast_radius.py   reading_order.py   code_parser.py    │
-│   (BFS reverse       (topological      (tree-sitter      │
-│    graph)             sort)              15+ langs)       │
+│   blast_radius.py   reading_order.py                     │
+│   (BFS reverse       (topological                         │
+│    graph)             sort)                                │
 ├──────────────────────────────────────────────────────────┤
 │                    GRAPH LAYER                           │
 │                                                          │
@@ -1798,13 +1850,12 @@ Push to `master` → build image → GHCR → deploy to Hetzner (`deploy-server.
 ├──────────────────────────────────────────────────────────┤
 │                    REVIEW LAYER                          │
 │                                                          │
-│   diff_parser.py → test_coverage.py → reviewer.py        │
-│   (git diff         (11-lang test       (8-step          │
-│    parsing)          detection)          pipeline)        │
+│   diff_parser.py → reviewers/ → pipeline/ → engine.py    │
+│   (git diff         (pluggable         (cluster/rank/    │
+│    parsing)          reviewers)         verify/summary)   │
 │                                                          │
-│   guidelines_loader.py → review_prompts.py               │
-│   (team standards       (OWASP security                  │
-│    RAG search)           checklist)                       │
+│   report.py ────────► fix_applier.py                     │
+│   (Finding dataclasses)  (approved fix application)       │
 ├──────────────────────────────────────────────────────────┤
 │                   EMBEDDING LAYER                        │
 │                                                          │
@@ -1842,8 +1893,8 @@ Push to `master` → build image → GHCR → deploy to Hetzner (`deploy-server.
 │   core/hitl.py      → LangGraph interrupts + checkpoint │
 │   core/fanout.py    → Parallel fan-out/fan-in graphs    │
 │                                                          │
-│   Used by: review (reflect), agent (hitl), research     │
-│   (fanout) — generic, composable, zero duplication       │
+│   Used by: agent (hitl), research (reflect + fanout)    │
+│   — generic, composable, zero duplication                │
 ├──────────────────────────────────────────────────────────┤
 │                     LLM LAYER                            │
 │                                                          │
@@ -1878,7 +1929,7 @@ codewalk/
 │   │   └── vector_store.py        #   ChromaDB storage
 │   ├── agent/                     # LangGraph chat agent
 │   │   ├── graph.py               #   StateGraph + fallback parser
-│   │   ├── tools.py               #   7 tool functions
+│   │   ├── tools.py               #   11 tool functions
 │   │   └── prompts.py             #   System prompt
 │   ├── rag/                       # RAG pipeline
 │   │   ├── chain.py               #   ask() + ask_corrective() (corrective RAG)
@@ -1886,14 +1937,17 @@ codewalk/
 │   │   ├── answer_grader.py       #   LLM answer quality grading
 │   │   └── query_rewriter.py      #   LLM query reformulation
 │   ├── review/                    # Code review pipeline
-│   │   ├── models.py              #   Issue, ReviewResult, Severity, Category
+│   │   ├── engine.py              #   Main review orchestrator (run_review)
+│   │   ├── report.py              #   Finding, ReviewReport, Severity, Category
 │   │   ├── diff_parser.py         #   git diff → parsed DiffFile objects
-│   │   ├── test_coverage.py       #   Missing test detection (11 languages)
-│   │   ├── guidelines_loader.py   #   Load team coding standards (RAG)
-│   │   ├── review_prompts.py      #   System + user prompts (OWASP checklist)
-│   │   └── reviewer.py            #   8-step review pipeline orchestrator
+│   │   ├── fix_applier.py         #   Apply approved fixes safely
+│   │   ├── finding_store.py       #   Persist review findings
+│   │   ├── session_store.py       #   Persist review sessions
+│   │   ├── reviewers/             #   Pluggable reviewers (generic, security, …)
+│   │   ├── pipeline/              #   Post-processing (cluster/rank/verify/summary)
+│   │   └── renderers/             #   Output formatters (markdown/cli/api)
 │   ├── api/                       # FastAPI REST
-│   │   ├── main.py                #   30+ endpoints
+│   │   ├── main.py                #   35+ endpoints
 │   │   ├── models.py              #   Pydantic schemas
 │   │   ├── state.py               #   Singleton app state + restart resilience
 │   │   └── cloud.py               #   Cloud mode (GitHub App + webhooks)
@@ -1903,19 +1957,43 @@ codewalk/
 │   │   ├── router.py              #   LLM-based tool routing (via get_llm)
 │   │   ├── backends.py            #   Tool execution bridge
 │   │   └── companion.py           #   Standalone voice loop
-│   ├── core/                      # Reusable LangGraph patterns (v2.4–v2.7)
+│   ├── core/                      # Reusable LangGraph patterns
 │   │   ├── reflect.py             #   Actor→Critic→Improve loop
 │   │   ├── hitl.py                #   Human-in-the-loop interrupts
 │   │   └── fanout.py              #   Parallel fan-out/fan-in graphs
-│   ├── research/                  # Deep research mode (v2.7)
+│   ├── research/                  # Deep research mode
+│   │   ├── deep_research.py       #   End-to-end deep research entry point
+│   │   ├── researcher.py          #   Parallel search + synthesis
 │   │   ├── planner.py             #   Decompose question into sub-questions
 │   │   └── synthesizer.py         #   Merge parallel findings into report
-│   ├── worker/                    # Background job worker
-│   │   ├── indexer.py             #   Async repo indexing
-│   │   └── github_app.py          #   GitHub App webhook handler
+│   ├── generation/                # Explanation / diagram generation
+│   │   ├── overview_generator.py  #   Project overview text
+│   │   ├── module_explainer.py    #   Module-level explanations
+│   │   ├── diagram_generator.py   #   Mermaid diagrams
+│   │   └── flow_generator.py      #   Execution flow diagrams
+│   ├── doc_knowledge/             # Docs & guidelines indexing
+│   │   ├── doc_parser.py          #   Parse .md/.pdf/.txt/.rst
+│   │   └── doc_store.py           #   ChromaDB doc collection wrapper
+│   ├── services/                  # Deterministic service wrappers
+│   │   ├── search_service.py      #   retrieval pipeline wrapper
+│   │   └── symbol_service.py      #   symbol lookup wrapper
+│   ├── tools/                     # Agent / MCP tool implementations
+│   │   ├── static_analysis.py     #   Static analysis runner
+│   │   ├── test_runner.py         #   Test execution runner
+│   │   └── tool_runner.py         #   Generic tool dispatch
+│   ├── worker/                    # Background cloud indexing worker
+│   │   ├── indexer.py             #   Poll Postgres jobs, build indexes
+│   │   ├── github_app.py          #   GitHub App token retrieval
+│   │   └── atomic_store.py        #   Atomic index directory swap
+│   ├── eval/                      # Evaluation & benchmarking
+│   │   ├── evaluator.py           #   RAGAS RAG evaluation
+│   │   ├── experiments.py         #   A/B parameter sweeps
+│   │   └── generate_multilang_review_fixtures.py # Review eval fixtures
+│   ├── debug/                     # Development/debug utilities
+│   │   └── fanout_agent.py        #   Fan-out graph experiments
 │   ├── cli.py                     #   Command-line interface
 │   └── mcp/                       # Model Context Protocol
-│       └── server.py              #   33 MCP tools (stdio)
+│       └── server.py              #   38 MCP tools (stdio)
 │
 ├── frontend/                      # Next.js 14 web UI
 │   └── src/app/
@@ -1923,10 +2001,11 @@ codewalk/
 │       ├── chat/page.tsx          #   AI chat interface
 │       ├── overview/page.tsx      #   Project overview
 │       ├── modules/page.tsx       #   Module browser
-│       ├── module/page.tsx        #   Single module detail
+│       ├── modules/[name]/page.tsx#   Single module detail
 │       ├── blast-radius/page.tsx  #   Change impact viewer
 │       ├── reading-order/page.tsx #   Reading order viewer
 │       ├── execution-flow/page.tsx#   Flow diagram viewer
+│       ├── knowledge-graph/page.tsx#  Interactive graph explorer
 │       ├── review/page.tsx        #   Code review (diff/file/guidelines)
 │       ├── voice/page.tsx         #   Voice assistant (mic → transcribe → speak)
 │       ├── admin/page.tsx         #   Admin dashboard
@@ -2063,17 +2142,17 @@ Add this to each target repo's `.gitignore`:
 
 ### Single-repo state (no concurrent multi-repo)
 
-Codewalk holds **one repo's state in memory at a time** (vector store, dependency graph, module map, repo path). This means:
+Codewalk holds **one repo's state in memory at a time** (vector store, dependency graph, module map, repo path). Using more than one repo in the same process can override and corrupt that state — index files, cached graph handles, and the active repo path can end up pointing at the wrong workspace.
 
 | Interface | Multi-repo behavior |
 |-----------|-------------------|
-| **MCP (stdio)** | ✅ **Safe.** Each MCP connection spawns a separate Python process. Two repos = two processes = completely isolated memory. No conflicts. |
+| **MCP (stdio)** | ✅ **Safe *per connection*.** Each MCP connection spawns a separate Python process, so two repos in two editor windows are isolated. However, do **not** point the same running MCP server at multiple repos or switch workspaces rapidly within the same process — that will corrupt in-memory state. |
 | **FastAPI (REST)** | ⚠️ **Not safe.** Two concurrent `/analyze` calls for different repos will race — whoever finishes last overwrites the shared globals. Only one repo at a time. |
 | **Web UI** | ⚠️ **Same as REST.** The browser hits the FastAPI backend. Analyze one repo, explore it, then analyze another. Don't run two analyses in parallel from different browser tabs. |
 
 **This is by design, not a bug.** Codewalk is optimized for the common case: one developer, one repo at a time. If you need concurrent multi-repo support on the API side, it would require a `dict[repo_path, SessionState]` architecture — contributions welcome.
 
-> **MCP users:** You're already safe. Each VS Code window / Claude Code session / Cursor instance gets its own MCP server process via stdio transport. Analyze as many repos as you want across different windows — they never share state.
+> **MCP users:** You're already safe as long as each repo gets its own MCP server process (one VS Code window / Claude Code session / Cursor instance per repo). Do not route commands for different repos into the same stdio connection or reuse one server process across workspaces.
 
 ---
 

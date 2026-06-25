@@ -1,8 +1,9 @@
+"""Retrieval Quality utilities for Codewalk."""
 from src.codewalk.log import log as _log
 
-HARD_CUTOFF = 0.7    # above this = definitely noise
-SOFT_CUTOFF = 0.4    # above this = questionable relevance
-MIN_GOOD_CHUNKS = 2  # need at least this many good chunks
+HARD_CUTOFF = 0.75   # above this = definitely noise
+SOFT_CUTOFF = 0.55   # above this = questionable relevance; lowered to improve recall
+MIN_GOOD_CHUNKS = 1  # need at least this many good chunks; lowered for large codebases
 
 def filter_by_distance(results: list[dict]) -> tuple[list[dict], float]:
     """Filter retrieved chunks by cosine distance. Returns (filtered, confidence).
@@ -60,7 +61,7 @@ def is_retreival_good(confidence: float, filtered_count: int) -> bool:
     """
     if filtered_count < MIN_GOOD_CHUNKS:
         return False
-    if confidence < 0.3:
+    if confidence < 0.25:
         return False
     
     return True

@@ -8,6 +8,7 @@ from pathlib import Path
 
 @dataclass
 class EvalSample:
+    """One evaluation sample with question, expected answer, and expected contexts."""
     question: str
     ground_truth: str
     ground_truth_contexts: list[str]

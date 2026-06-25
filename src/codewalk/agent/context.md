@@ -1,14 +1,14 @@
 # `src/codewalk/agent/` — Conversational Coding Agent
 
-This package implements a LangGraph agent that can answer questions about the codebase and propose/apply code changes with human approval.
+This package implements a LangGraph agent that can answer questions about the codebase and propose/apply code changes with human approval. It is used by the API flow only; MCP does not use this agent — it exposes equivalent tools directly to the host IDE.
 
 ## Modules
 
 | File | Role |
 |------|------|
-| `graph.py` | `create_agent()` — compiles the LangGraph state graph with tools, memory (SQLite checkpointer), and interrupt logic for human-in-the-loop. |
-| `tools.py` | 13 agent tool definitions: search, explain function, module info, overview, blast radius, reading order, execution flow, architecture health, review diff/file, apply fix, verify fix, load guidelines. |
-| `core/hitl.py` | Shared human-in-the-loop interrupt helpers; `proposed_write_action()` extracts a pending file edit from agent messages. |
+| `graph.py` | `create_agent()` — compiles the LangGraph state graph with tools, memory (SQLite checkpointer via `core/hitl`), and interrupt logic for human-in-the-loop. Also exposes `proposed_write_action()` to extract pending file edits from agent messages. |
+| `tools.py` | Agent tool definitions: search codebase, explain function, module info, overview, blast radius, reading order, execution flow, architecture health, review diff/file, apply fix, verify fix, run static analysis, run tests, load guidelines. |
+| `prompts.py` | System prompts and prompt templates for the agent. |
 
 ## Data flow
 
@@ -27,11 +27,11 @@ apply_fix tool writes file
 ## Connections
 
 - `graph.py` is built by `api/state.py` after analysis and cached in `state._agent`.
-- `tools.py` imports from `rag/`, `query/`, `review/`, `embeddings/`, `graph/`, and `doc_knowledge/`.
-- Used by API `/chat` and `/chat/approve`. The tools defined here mirror the capabilities exposed by the standalone MCP tools, but the agent composes them itself.
-- `core/hitl.py` provides shared HITL utilities (there is no `agent/hitl.py`).
+- `tools.py` imports from `rag/`, `query/`, `review/`, `embeddings/`, `graph/`, `tools/`, and `doc_knowledge/`.
+- Used by API `/chat` and `/chat/approve`. The tools defined here mirror capabilities exposed by standalone MCP tools, but the agent composes them itself.
+- Human-in-the-loop compilation is provided by `core/hitl.py` (`compile_with_hitl()`); there is no `agent/hitl.py`.
 
-## Recent fixes
+## Notes
 
-- `graph.py` compiles agents via `core/hitl.compile_with_hitl()`, which now wraps the compiled graph in `_ThreadSafeGraph` to serialize access to the SQLite checkpointer across API worker threads.
-- `/chat/approve` now preserves `HTTPException` statuses and maps `RuntimeError` to 400 instead of swallowing everything as 500.
+- `graph.py` compiles agents via `core/hitl.compile_with_hitl()`, which wraps the compiled graph in `_ThreadSafeGraph` to serialize access to the SQLite checkpointer across API worker threads.
+- Per `AGENTS.md` / architecture rules: the agent lives in the API flow and may call `get_llm()`. MCP tools do not use this agent.

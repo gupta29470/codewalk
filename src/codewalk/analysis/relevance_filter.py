@@ -1,3 +1,4 @@
+"""LLM-based relevance filtering for retrieved code chunks."""
 import json
 import logging
 from src.codewalk.config import get_llm
@@ -7,88 +8,44 @@ from src.codewalk.log import log as _log
 
 logger = logging.getLogger("codewalk")
 
-FILTER_SYSTEM_PROMPT = """You are a code analysis tool. Given a list of file paths
-from a software project in ANY programming language, decide which files should be
-indexed for code search and understanding.
+FILTER_SYSTEM_PROMPT = """You are a code analysis tool. Given a list of file paths from a software project in ANY language, decide which files should be indexed for code search.
 
-Your goal is HIGH RECALL. It is far worse to exclude important code than to
-include extra files. When uncertain, return "yes".
+## Priority Rule (MOST IMPORTANT)
+When uncertain, return "yes". High recall is critical — it is far worse to exclude important code than to include extra files.
 
-For each file path, return "yes" or "no".
+## Conflict Resolution
+If a file matches both a yes and a no rule, return "yes" UNLESS clearly: auto-generated, lock file, binary asset, or dependency directory.
 
-CONFLICT RESOLUTION: If a file matches both a yes and a no rule, return "yes"
-UNLESS the file is clearly: auto-generated code, a lock file, a binary/media
-asset, or inside a dependency/vendor directory. In all other ambiguous cases,
-return "yes".
+## Return "yes" for (indexed):
+1. Source code with business logic in ANY language (.py, .dart, .ts, .js, .java, .kt, .swift, .go, .rs, .cs, .rb, .php, .scala, .c, .cpp, .h, .m, .lua, .r, .zig, .hs, .ex, .exs, .clj)
+2. Platform-specific source: android/app/src/**, ios/Runner/**, Gradle files, AppDelegate, MainActivity
+3. Test files in ANY language: test_*, *_test.*, *_spec.*, *Test.java, *_test.go, spec/*, __tests__/*, cypress/*, e2e/*
+4. Schema/API definitions: *.proto, *.graphql, *.gql, *.thrift
+5. Entry points: main.*, app.*, index.*, server.*, manage.py, Program.cs
+6. Config with logic: settings.py, urls.py, routes.rb, router.go, build.gradle.kts
+7. ORM models, controllers, services, handlers, middleware, repositories, state management
+8. UI logic: widgets, components, views, pages, screens
+9. Build scripts with logic: Makefile, Dockerfile, CMakeLists.txt, docker-compose*, setup.py
+10. SQL files with procedures, functions, views, triggers, or business logic
+11. __init__.py files: "yes" unless certain it's empty (you can't verify contents from path)
 
-Return "yes" for:
-- Source code with business logic, features, or app behavior in ANY language:
-  .py, .dart, .ts, .js, .jsx, .tsx, .java, .kt, .swift, .go, .rs, .cs,
-  .rb, .php, .ex, .exs, .scala, .clj, .c, .cpp, .h, .hpp, .m, .mm, .lua,
-  .r, .jl, .zig, .nim, .v, .cr, .fs, .fsx, .erl, .hrl, .hs
-- Platform-specific source code in android/, ios/, windows/, macos/, linux/, web/:
-  Kotlin/Java files in android/app/src/**, Swift/ObjC files in ios/Runner/**,
-  Gradle build files (build.gradle, build.gradle.kts, settings.gradle),
-  AppDelegate, MainActivity, native plugin code, platform channels
-  NOTE: Do NOT skip entire android/ or ios/ folders — they contain real source code
-- Test files in ANY language — tests are valuable for understanding expected
-  behavior, inputs/outputs, edge cases, and usage patterns:
-  test_*, *_test.*, *_spec.*, *Test.java, *Tests.cs, *_test.go,
-  *_test.dart, *_test.rs, spec/*, tests/*, __tests__/*, t/*,
-  *Spec.scala, *_spec.rb, *Test.kt, *Tests.swift, test/*, cypress/*,
-  *.test.ts, *.test.js, *.cy.ts, vitest/*, jest/*, integration_test/*, e2e/*
-- SQL files (.sql) containing procedures, functions, views, queries,
-  triggers, or business logic
-- Schema/API definition files: *.proto, *.graphql, *.gql, *.thrift
-- Entry points: main.*, app.*, index.*, server.*, manage.py, Program.cs,
-  Main.java, main.go, lib.rs, application.rb, artisan, bin/console
-- Configuration WITH logic: settings.py, config.ts, urls.py, routes.rb,
-  Startup.cs, AppModule.java, router.go, mod.rs, mix.exs, build.gradle.kts
-- ORM models, DB schemas, API schema definitions
-- Services, controllers, handlers, middleware, repositories, use cases
-- State management: stores, reducers, blocs, providers, signals, atoms
-- UI logic: widgets, components, views, pages, screens, templates with code
-- Build scripts with real logic: Makefile, Dockerfile, CMakeLists.txt,
-  setup.py, build.gradle, Package.swift, Cargo.toml, mix.exs,
-  docker-compose*, nginx.conf, .env.example
-- Migration files with business logic: return "yes" for migrations containing
-  custom SQL, triggers, stored procedures, RLS policies, data transformations,
-  or application logic. Only return "no" for simple schema-only migrations
-- __init__.py files: return "yes" unless you are certain the file is an empty
-  package marker (you cannot verify file contents from path alone, so default "yes")
+## Return "no" for (excluded):
+1. Generated code: *.g.dart, *.freezed.dart, *.gen.*, *.generated.*, *.pb.go, *_pb2.py, R.java, Pods/*, DerivedData/*
+2. Translation/localization: *.arb, *.xliff, *.po, *.mo, l10n/*, locales/*, *.lproj/*
+3. Lock files: *.lock, package-lock.json, yarn.lock, Podfile.lock, go.sum, pnpm-lock.yaml
+4. Documentation: *.md, *.rst, *.txt, docs/*, doc/*
+5. CI/CD: .github/*, .circleci/*, .gitlab-ci.yml, Jenkinsfile, .travis.yml
+6. IDE configs: .vscode/*, .idea/*, .settings/*, *.iml
+7. Dependencies: vendor/*, node_modules/*, Pods/*, .gradle/*, build/*, dist/*, target/*
+8. Assets: *.svg, *.png, *.jpg, *.gif, *.ico, *.woff, *.ttf, *.mp3, *.mp4, fonts/*, images/*
+9. Minified/bundled: *.min.js, *.min.css, *.bundle.js, *.chunk.js
+10. Snapshots/fixtures: __snapshots__/*
 
-Return "no" for:
-- Generated/auto-generated code:
-  *.g.dart, *.freezed.dart, *.gen.*, *.generated.*, generated/*,
-  .dart_tool/*, __generated__/*, *.pb.go, *_pb2.py, *.swagger.json,
-  *.designer.cs, *.g.cs, R.java, BuildConfig.java, Pods/*,
-  *.xcodeproj/*.pbxproj, *.xcworkspace/*, DerivedData/*
-- Translation/localization data:
-  *.arb, *.xliff, *.xlf, *.po, *.pot, *.mo, l10n/*, locales/*, i18n/*,
-  *.lproj/*, *.strings, *.stringsdict
-- Lock files and auto-generated manifests:
-  *.lock, package-lock.json, yarn.lock, Podfile.lock, Gemfile.lock,
-  composer.lock, Cargo.lock, pubspec.lock, go.sum, pnpm-lock.yaml
-- Fixture/seed/mock data: __snapshots__/*
-- Pure schema dump SQL files (no logic, just CREATE TABLE/ALTER TABLE)
-- Documentation: *.md, *.rst, *.txt, *.adoc, docs/*, doc/*
-- CI/CD configs: .github/*, .circleci/*, .gitlab-ci.yml, Jenkinsfile,
-  .travis.yml, azure-pipelines.yml, .buildkite/*
-- IDE/editor configs: .vscode/*, .idea/*, .settings/*, .classpath,
-  .project, *.iml
-- Dependency directories: vendor/*, node_modules/*, Pods/*,
-  .gradle/*, build/*, dist/*, target/*, _build/*, deps/*
-- Asset files: *.svg, *.png, *.jpg, *.gif, *.ico, *.woff, *.ttf,
-  *.eot, *.mp3, *.mp4, *.pdf, fonts/*, images/*, assets/images/*
-- Minified/bundled files: *.min.js, *.min.css, *.bundle.js, *.chunk.js
-
-IMPORTANT:
-- When in doubt, return "yes" — better to index too much than miss real code
-- Use the FULL file path to decide, not just the extension
-- The project could be in ANY language — do NOT assume Python or JavaScript
-- Evaluate each file path independently — do not infer repo-wide patterns
+## Final reminders
+- Evaluate each path independently — do not infer repo-wide patterns
+- The project could be in ANY language
 - Every input path MUST appear exactly once in the output JSON
-- Return valid JSON only — no markdown fences, no explanation, no extra text"""
+- Return valid JSON only — no markdown, no explanation"""
 
 
 FILTER_HUMAN_PROMPT = """Decide which of these {total_files} files should be indexed.

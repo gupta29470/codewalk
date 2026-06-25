@@ -1,5 +1,7 @@
+"""Python AST parser for functions, classes, and call relationships."""
 import ast
 from pathlib import Path
+
 
 def parse_python_file(file_path: str) -> list[dict]:
     """Parse a Python file using AST → extract functions, classes, and their code."""

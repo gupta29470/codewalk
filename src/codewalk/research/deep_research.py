@@ -1,3 +1,4 @@
+"""Deep research fan-out orchestrator: plan, search, synthesize, reflect."""
 from __future__ import annotations
 from typing import TypedDict, Any, Annotated
 import operator
@@ -15,6 +16,7 @@ from src.codewalk.embeddings.vector_store import VectorStore
 from src.codewalk.graph.graph_store import GraphStore
 
 class ResearchState(TypedDict):
+    """LangGraph state for deep research."""
     question: str
     results: Annotated[list, operator.add]  # all researchers append SubFindings here
     merged_findings: list
@@ -34,7 +36,23 @@ def _improve_report(report: StructuredReport, critique: str) -> StructuredReport
         f"ORIGINAL REPORT:\n{report.markdown}"
     )
 
-    response = llm.invoke(prompt)
+    messages = [
+        {
+            "role": "system",
+            "content": (
+                "You are a senior engineer improving a codebase research report.\n\n"
+                "Rules:\n"
+                "- Keep all existing file path citations — do not remove them.\n"
+                "- Fix issues raised in the critique (missing files, uncited claims, gaps).\n"
+                "- Do not remove valid findings from the original report.\n"
+                "- Maintain the markdown structure (headers, code blocks, bullet points).\n"
+                "- If the critique mentions missing context, add a note rather than inventing code."
+            ),
+        },
+        {"role": "user", "content": prompt},
+    ]
+
+    response = llm.invoke(messages)
     return StructuredReport(
         question=report.question,
         markdown=response.content.strip(),

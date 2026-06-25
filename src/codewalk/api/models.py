@@ -1,3 +1,6 @@
+"""Pydantic request/response models for the FastAPI server."""
+from typing import Any
+
 from pydantic import BaseModel
 
 # ─── REQUEST MODELS ──────────────────────────────────────────────────
@@ -63,14 +66,27 @@ class ReviewRequest(BaseModel):
     staged: bool = False
     target_branch: str | None = None
     commit: str | None = None
-    reflect: bool = False  # if True, run reflection pass after initial review
-    iterations: int = 1    # reflection iterations (only used when reflect=True)
+    incremental: bool = False
+    force_full_review: bool = False
+    narrative_summary: bool = False
 
-class ReviewFileRequest(BaseModel):
-    """POST /review/file — request body."""
-    file_path: str
-    repo_path: str | None = None
-    guidelines_path: str | None = None
+class CancelReviewRequest(BaseModel):
+    """POST /review/cancel — request body."""
+    review_id: str
+
+class CancelReviewResponse(BaseModel):
+    """POST /review/cancel — response body."""
+    cancelled: bool
+    message: str
+
+class ReviewStreamRequest(BaseModel):
+    """POST /review/stream — request body."""
+    staged: bool = False
+    target_branch: str | None = None
+    commit: str | None = None
+    incremental: bool = False
+    force_full_review: bool = False
+    narrative_summary: bool = False
 
 class ReviewResponse(BaseModel):
     """POST /review — response body."""
@@ -78,17 +94,40 @@ class ReviewResponse(BaseModel):
     verdict_reason: str
     issues: list[dict]
     summary: str
+    narrative_summary: str = ""
     files_reviewed: int
     lines_added: int
     lines_removed: int
+    session_id: str | None = None
+    architecture_flags: dict[str, Any] | None = None
+    schema_version: str = "2.0"
+    merge_blockers: list[str] = []
+    clusters: list[dict] = []
+    fixed_count: int = 0
+    new_count: int = 0
+    still_present_count: int = 0
 
-class ReviewFileResponse(BaseModel):
-    """POST /review/file — response body."""
-    verdict: str
-    verdict_reason: str
-    issues: list[dict]
-    summary: str
-    file_path: str
+class ReviewVerdictRequest(BaseModel):
+    """POST /review/verdict — record user verdict on a finding."""
+    session_id: str
+    finding_index: int
+    verdict: str  # "accepted" | "rejected"
+    reason: str = ""
+
+class ReviewVerdictResponse(BaseModel):
+    """POST /review/verdict — response."""
+    success: bool
+    message: str
+
+class ApplyAcceptedRequest(BaseModel):
+    """POST /review/apply-accepted — apply all accepted fixes."""
+    session_id: str = ""  # empty = use latest session on branch
+
+class ApplyAcceptedResponse(BaseModel):
+    """POST /review/apply-accepted — response."""
+    applied: list[str]
+    failed: list[str]
+    total_accepted: int
 
 class GuidelinesRequest(BaseModel):
     """POST /review/guidelines — request body."""
@@ -101,15 +140,18 @@ class ErrorResponse(BaseModel):
     detail: str = ""
 
 class DocsIndexRequest(BaseModel):
+    """Request body for POST /docs/index."""
     docs_path: str
     repo_path: str | None = None
 
 class DocsSearchRequest(BaseModel):
+    """Request body for POST /docs/search."""
     query: str
     n_results: int = 5
     repo_path: str | None = None
 
 class DocsAskRequest(BaseModel):
+    """Request body for POST /docs/ask."""
     question: str
     n_results: int = 5
     repo_path: str | None = None
@@ -133,10 +175,12 @@ class SemanticSearchResponse(BaseModel):
     results: list[SemanticSearchResult]
 
 class ApproveRequest(BaseModel):
-    thread_id: str         
+    """Request body for POST /chat/approve."""
+    thread_id: str
     action: str = "approve"
 
 class ResearchRequest(BaseModel):
+    """Request body for POST /research."""
     question: str
     depth: str = "standard"   # quick | standard | deep
 

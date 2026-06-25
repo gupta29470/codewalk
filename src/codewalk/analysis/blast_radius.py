@@ -1,3 +1,4 @@
+"""Blast-radius analysis: BFS over reversed dependency graph to find change impact."""
 from collections import deque
 import math
 

@@ -1,3 +1,4 @@
+"""DuckDB-backed graph store: schema, file/symbol/import tables, and graph queries."""
 import logging
 import hashlib
 import time

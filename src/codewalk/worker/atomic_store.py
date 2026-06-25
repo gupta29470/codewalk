@@ -1,3 +1,4 @@
+"""Atomic index directory swap for safe cloud index publishing."""
 import shutil
 from pathlib import Path as _P
 

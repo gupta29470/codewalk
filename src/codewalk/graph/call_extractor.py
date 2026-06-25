@@ -1,3 +1,4 @@
+"""Extract symbol calls from source files to build the call graph."""
 import logging
 
 from src.codewalk.analysis.code_parser import (

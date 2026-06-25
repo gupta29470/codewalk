@@ -6,6 +6,7 @@ This package indexes Markdown/text/PDF documentation and team coding guidelines 
 
 | File | Role |
 |------|------|
+| `doc_parser.py` | `parse_doc()`, `parse_all_docs()`, `discover_docs()` — parses `.md`, `.txt`, `.pdf`, `.rst` files into plain text + metadata. |
 | `doc_store.py` | `DocStore` — ChromaDB wrapper for docs with section-aware chunking and metadata (`doc_path`, `section`). |
 | `prompts.py` | Prompt template for grounded doc Q&A. |
 
@@ -14,9 +15,11 @@ This package indexes Markdown/text/PDF documentation and team coding guidelines 
 ```
 folder of .md/.txt/.pdf/.rst
     ↓
+doc_parser.parse_all_docs() → parsed docs
+    ↓
 DocStore.index_docs() → chunks with metadata
     ↓
-ChromaDB collection {repo_name}_docs
+ChromaDB collection {collection_name}_docs
     ↓
 DocStore.search() → results for /docs/ask or review context
 ```
@@ -26,7 +29,7 @@ DocStore.search() → results for /docs/ask or review context
 - Called by `pipeline.build_full_analysis()` when `docs_path` is provided.
 - Called by API `/docs/index`, `/docs/search`, `/docs/ask`.
 - Called by MCP `codewalk_index_docs`, `codewalk_search_docs`, `codewalk_ask_docs`.
-- `review/guidelines_loader.py` uses a similar ChromaDB pattern for coding-standard files.
+- Guidelines for reviews are loaded via `review/utils.py` (`load_code_guidelines_text`) and `embeddings/vector_store.py`; the old `review/guidelines_loader.py` no longer exists.
 
 ## Recent fixes
 
