@@ -119,6 +119,23 @@ Three ways to use it locally, plus optional cloud indexing:
 
 ---
 
+## 🆚 Codewalk vs. alternatives
+
+Codewalk is **not another AI autocomplete**. It is a codebase intelligence layer: it builds a persistent dependency graph, embeds your code, indexes your docs, and exposes that intelligence through a UI, an MCP server, and an API.
+
+If you need deep cross-file reasoning, blast-radius analysis, or AI review inside your existing IDE agent, Codewalk fits where general-purpose assistants stop.
+
+| Use case | Typical approach | What Codewalk does differently |
+|---|---|---|
+| **Explain this codebase** | Ask a generic chat model and paste files | Builds a live graph + RAG so answers are grounded and cite real files |
+| **PR review** | Lint + human review | LLM review with blast-radius, architecture, and custom guidelines |
+| **Refactor shared code** | Grep for imports | Dependency graph + blast radius showing transitive impact |
+| **Onboard a new developer** | Read wiki pages | Reading order + module map generated from actual code |
+| **Team knowledge** | Search Confluence/Notion | Index docs alongside code and ask with citations |
+| **AI agent tooling** | Write custom scripts or prompts | 38 MCP tools the agent can call directly |
+
+---
+
 ## 🎬 Demo
 
 ### Web UI
