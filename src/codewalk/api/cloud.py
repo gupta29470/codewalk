@@ -372,17 +372,31 @@ def _clone_or_pull_repo(repo: dict, branch: str) -> Path:
     repo_path = Path(storage_path)
 
     if repo_path.exists() and (repo_path / ".git").exists():
-        # Pull latest
-        pull_result = subprocess.run(
-            ["git", "pull", "origin", branch],
+        # Sync with the remote branch. Use fetch + reset --hard so force-pushes
+        # and rewritten history are handled deterministically. The server-side
+        # clone is a cache, not a user workspace, so discarding local changes is
+        # acceptable and preferred over a failing merge.
+        fetch_result = subprocess.run(
+            ["git", "fetch", "origin", branch],
             cwd=str(repo_path),
             check=False,
             capture_output=True,
             text=True,
         )
-        if pull_result.returncode != 0:
+        if fetch_result.returncode != 0:
             raise RuntimeError(
-                f"git pull failed for {repo['full_name']}: {pull_result.stderr.strip()}"
+                f"git fetch failed for {repo['full_name']}: {fetch_result.stderr.strip()}"
+            )
+        reset_result = subprocess.run(
+            ["git", "reset", "--hard", f"origin/{branch}"],
+            cwd=str(repo_path),
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        if reset_result.returncode != 0:
+            raise RuntimeError(
+                f"git reset failed for {repo['full_name']}: {reset_result.stderr.strip()}"
             )
     else:
         # Clone fresh
