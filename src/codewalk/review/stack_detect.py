@@ -1,12 +1,23 @@
-"""Stack detection via LLM for specialist rubric loading.
+"""Stack detection for specialist rubric loading.
 
 Flow:
-  1. Send file tree + changed files to LLM
-  2. LLM responds: {"languages": [...], "frameworks": [...], "architecture": "...", ...}
-  3. Match response against rubric filenames on disk
-  4. Load ALL matched rubrics into the review prompt
+  MCP path:
+    1. Check .codewalk/stack_context.json (persistent, survives across commits)
+    2. If missing → deterministic fallback (languages/frameworks only, NOT written to disk)
+    3. If fallback is weak → return prompt for host LLM
+    4. Host fills JSON → codewalk_save_stack_context writes the file
+    5. All subsequent reviews read the file directly — no re-prompt
 
-Cached per HEAD SHA — one LLM call per repo state.
+  API path:
+    1. detect_stack(llm=llm) → check file first, if missing call LLM
+    2. LLM responds: {"languages": [...], "frameworks": [...], "architecture": "...", ...}
+    3. Result saved to .codewalk/stack_context.json
+
+  Shared:
+    - .codewalk/stack_context.json is persistent config, NOT an ephemeral cache
+    - It does NOT invalidate on new commits (architecture rarely changes)
+    - To refresh: call codewalk_save_stack_context again, or use refresh_stack=True
+
 Falls back to deterministic detection if LLM is unavailable.
 """
 from __future__ import annotations
@@ -19,7 +30,9 @@ from typing import Any
 
 logger = logging.getLogger("codewalk")
 
-_CACHE_FILE = ".codewalk/cache/stack_context.json"
+# Persistent stack context file — NOT keyed by HEAD SHA.
+# Survives across commits. Only overwritten by explicit save_stack_context or API LLM call.
+_STACK_CONTEXT_FILE = ".codewalk/stack_context.json"
 
 # Rubric names available on disk (language + framework)
 AVAILABLE_RUBRICS = {
@@ -76,32 +89,26 @@ Rules:
 {changed_files}"""
 
 
-def _cache_path(repo_path: Path) -> Path:
-    path = repo_path / _CACHE_FILE
+def _stack_context_path(repo_path: Path) -> Path:
+    """Path to the persistent stack context file."""
+    path = repo_path / _STACK_CONTEXT_FILE
     path.parent.mkdir(parents=True, exist_ok=True)
     return path
 
 
-def _repo_state_key(repo_path: Path) -> str:
-    """HEAD SHA for cache invalidation."""
-    try:
-        result = subprocess.run(
-            ["git", "rev-parse", "HEAD"],
-            cwd=repo_path, capture_output=True, text=True, check=True, timeout=10,
-        )
-        return result.stdout.strip()
-    except Exception:
-        return "unknown"
-
-
 def _load_cached(repo_path: Path) -> dict[str, Any] | None:
-    """Load cached stack context if still valid for current HEAD."""
-    cache = _cache_path(repo_path)
-    if not cache.exists():
+    """Load persistent stack context from .codewalk/stack_context.json.
+
+    This file persists across commits — no SHA invalidation.
+    Returns None only if the file doesn't exist or is malformed.
+    """
+    path = _stack_context_path(repo_path)
+    if not path.exists():
         return None
+
     try:
-        data = json.loads(cache.read_text(encoding="utf-8"))
-        if data.get("_cache_key") == _repo_state_key(repo_path):
+        data = json.loads(path.read_text(encoding="utf-8"))
+        if isinstance(data, dict):
             return data
     except Exception:
         pass
@@ -109,10 +116,16 @@ def _load_cached(repo_path: Path) -> dict[str, Any] | None:
 
 
 def _save_cache(repo_path: Path, data: dict[str, Any]) -> None:
-    """Persist stack context to cache."""
-    data["_cache_key"] = _repo_state_key(repo_path)
+    """Write stack context to .codewalk/stack_context.json (persistent).
+
+    Does NOT add a _cache_key — the file survives across commits.
+    """
+    # Remove any legacy _cache_key if present
+    clean = {k: v for k, v in data.items() if k != "_cache_key"}
     try:
-        _cache_path(repo_path).write_text(json.dumps(data, indent=2), encoding="utf-8")
+        _stack_context_path(repo_path).write_text(
+            json.dumps(clean, indent=2), encoding="utf-8"
+        )
     except Exception:
         pass
 
@@ -241,7 +254,11 @@ def detect_stack(
     changed_files: list[str],
     llm: Any | None = None,
 ) -> dict[str, Any]:
-    """Detect project stack — LLM-first with deterministic fallback. Cached per HEAD.
+    """Detect project stack — LLM-first with deterministic fallback.
+
+    Checks .codewalk/stack_context.json first (persistent across commits).
+    If missing and LLM is provided, calls LLM and saves result.
+    If missing and no LLM, uses deterministic fallback and saves result.
 
     Returns dict with keys: languages, frameworks, architecture,
     state_management, data_layer, testing, api_style.

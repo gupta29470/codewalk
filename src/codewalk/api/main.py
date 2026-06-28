@@ -125,10 +125,10 @@ def _ensure_repo_path(repo_path: str | None = None) -> str:
     return _resolve_repo_path(repo_path)
 
 
-def _resolve_extras_paths(repo_path: str, team_config) -> tuple[str, str]:
+def _resolve_extras_paths(repo_path: str, codewalk_config) -> tuple[str, str]:
     """Resolve guidelines/docs paths from codewalk.yaml, relative to repo_path."""
-    guidelines_path = team_config.guidelines_path
-    docs_path = team_config.docs_path
+    guidelines_path = codewalk_config.guidelines_path
+    docs_path = codewalk_config.docs_path
     if guidelines_path and not os.path.isabs(guidelines_path):
         guidelines_path = os.path.join(repo_path, guidelines_path)
     if docs_path and not os.path.isabs(docs_path):
@@ -272,15 +272,15 @@ def analyze(request: AnalyzeRequest):
         full    — nuke everything and re-embed from scratch
     """
     try:
-        from src.codewalk.team_config import load_codewalk_yaml
+        from src.codewalk.codewalk_config import load_codewalk_yaml
 
         request.repo_path = _require_repo_path(request.repo_path)
         state.set_repo_path(request.repo_path)
         if not request.collection_name:
             request.collection_name = state.get_collection_name()
         persist_dir = f"{request.repo_path.rstrip('/')}/.codewalk/chroma"
-        team_config = load_codewalk_yaml(request.repo_path)
-        guidelines_path, docs_path = _resolve_extras_paths(request.repo_path, team_config)
+        codewalk_config = load_codewalk_yaml(request.repo_path)
+        guidelines_path, docs_path = _resolve_extras_paths(request.repo_path, codewalk_config)
 
         # ── Index on disk + auto mode → load only (no re-embed) ──
         if request.index_mode == "auto" and state.index_on_disk(request.repo_path):
@@ -303,13 +303,13 @@ def analyze(request: AnalyzeRequest):
         if request.index_mode == "full" or existing_count == 0:
             index_result = full_index_parallel(
                 request.repo_path, request.collection_name, persist_dir=persist_dir,
-                team_config=team_config,
+                codewalk_config=codewalk_config,
             )
             files = index_result.get("files")
         elif request.index_mode == "reindex":
             index_result = reindex(
                 request.repo_path, request.collection_name, persist_dir=persist_dir,
-                team_config=team_config,
+                codewalk_config=codewalk_config,
             )
         else:
             index_result = {
@@ -357,14 +357,14 @@ def analyze_stream(request: AnalyzeRequest):
         """Async generator that yields SSE events at each pipeline step.
         Blocking operations run in thread pool so events stream in real time."""
         try:
-            from src.codewalk.team_config import load_codewalk_yaml
+            from src.codewalk.codewalk_config import load_codewalk_yaml
 
             request.repo_path = _require_repo_path(request.repo_path)
             state.set_repo_path(request.repo_path)
             if not request.collection_name:
                 request.collection_name = state.get_collection_name()
-            team_config = load_codewalk_yaml(request.repo_path)
-            guidelines_path, docs_path = _resolve_extras_paths(request.repo_path, team_config)
+            codewalk_config = load_codewalk_yaml(request.repo_path)
+            guidelines_path, docs_path = _resolve_extras_paths(request.repo_path, codewalk_config)
 
             # Step 1: Check existing data
             yield f"data: {json.dumps({'step': 'init', 'message': 'Checking existing index...'})}\n\n"
@@ -422,7 +422,7 @@ def analyze_stream(request: AnalyzeRequest):
                 yield f"data: {json.dumps({'step': 'scan', 'message': 'Scanning for changes...'})}\n\n"
                 index_result = await asyncio.to_thread(
                     reindex, request.repo_path, request.collection_name,
-                    persist_dir=persist_dir, team_config=team_config,
+                    persist_dir=persist_dir, codewalk_config=codewalk_config,
                 )
                 new = index_result['new_files']
                 changed = index_result['changed_files']
@@ -822,14 +822,14 @@ def refresh_analysis():
 def incremental_reindex_endpoint():
     """Re-embed only files that changed since last indexing."""
     try:
-        from src.codewalk.team_config import load_codewalk_yaml
+        from src.codewalk.codewalk_config import load_codewalk_yaml
 
         state.require_index()
         store = state.get_store()
         repo_path = state.get_repo_path()
         collection_name = state.get_collection_name()
         persist_dir = state.chroma_path()
-        team_config = load_codewalk_yaml(repo_path)
+        codewalk_config = load_codewalk_yaml(repo_path)
         if store.chunk_count() == 0:
             raise HTTPException(status_code=400, detail="No files indexed yet. Run /analyze first.")
 
@@ -838,7 +838,7 @@ def incremental_reindex_endpoint():
         # the existing indexed file set inside incremental_reindex.
         result = incremental_reindex(
             [repo_path], repo_path, collection_name,
-            persist_dir=persist_dir, team_config=team_config,
+            persist_dir=persist_dir, codewalk_config=codewalk_config,
         )
 
         # Full rebuild of DuckDB + knowledge graph so they reflect every chunk
@@ -846,7 +846,7 @@ def incremental_reindex_endpoint():
         all_chunks = store.get_all_chunks()
 
         # Refresh analysis cache + re-index docs/guidelines from codewalk.yaml
-        guidelines_path, docs_path = _resolve_extras_paths(repo_path, team_config)
+        guidelines_path, docs_path = _resolve_extras_paths(repo_path, codewalk_config)
         state.rebuild_analysis_cache(
             embedded_chunks=all_chunks,
             guidelines_path=guidelines_path,

@@ -7,7 +7,7 @@ import threading
 from src.codewalk.embeddings.vector_store import VectorStore
 from src.codewalk.agent.graph import create_agent
 from src.codewalk.ingestion.scanner import scan_directory
-from src.codewalk.team_config import load_codewalk_yaml, team_scan_directory
+from src.codewalk.codewalk_config import load_codewalk_yaml, codewalk_scan_directory
 from src.codewalk.analysis.dependency_graph import build_dependency_graph
 from src.codewalk.analysis.module_detector import detect_modules
 from src.codewalk.config import settings
@@ -329,13 +329,13 @@ def chroma_path() -> str:
 def scan_repo_files(repo_path: str | None = None) -> list[dict]:
     """Scan repo respecting codewalk.yaml (same as cloud indexer).
 
-    Always uses team_scan_directory so both indexing.exclude and indexing.include
+    Always uses codewalk_scan_directory so both indexing.exclude and indexing.include
     are honored, while the core file_filter.py safety net is still applied.
     """
     path = _resolve_repo_path(repo_path).rstrip("/")
     config = load_codewalk_yaml(path)
-    files = team_scan_directory(path, config)
-    _log(f"[scan] team_scan: {len(files)} files (codewalk.yaml applied)")
+    files = codewalk_scan_directory(path, config)
+    _log(f"[scan] codewalk_scan: {len(files)} files (codewalk.yaml applied)")
     return files
 
 

@@ -27,7 +27,7 @@ def clear_tool_cache() -> None:
 def _load_config(repo_path: str) -> dict:
     """Load codewalk.yaml tool overrides if present."""
     try:
-        from src.codewalk.team_config import load_codewalk_yaml
+        from src.codewalk.codewalk_config import load_codewalk_yaml
         config = load_codewalk_yaml(repo_path)
         return config.tools or {}
     except Exception:

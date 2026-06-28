@@ -11,7 +11,7 @@ import psycopg2.extras
 
 from src.codewalk.worker.github_app import get_installation_token
 from src.codewalk.worker.atomic_store import atomic_swap
-from src.codewalk.team_config import load_codewalk_yaml, team_scan_directory
+from src.codewalk.codewalk_config import load_codewalk_yaml, codewalk_scan_directory
 from src.codewalk.pipeline import full_index_parallel, build_full_analysis, write_manifest
 from src.codewalk.api.state import _PgHelper
 
@@ -41,7 +41,7 @@ def build_index(
             check=True, capture_output=True,
         )
 
-        # 2. Read team's codewalk.yaml (exclude patterns)
+        # 2. Read codewalk.yaml (exclude patterns)
         config = load_codewalk_yaml(work_dir)
 
         # 3. Index into incoming/
@@ -52,11 +52,11 @@ def build_index(
             repo_path=work_dir,
             collection_name="codebase",
             persist_dir=os.path.join(incoming, "chroma"),
-            team_config=config,
+            codewalk_config=config,
         )
 
         # 4. Analysis + DuckDB + docs + guidelines — one shared call
-        files = team_scan_directory(work_dir, config)
+        files = codewalk_scan_directory(work_dir, config)
         guidelines_path = os.path.join(work_dir, config.guidelines_path) if config.guidelines_path else ""
         docs_path = os.path.join(work_dir, config.docs_path) if config.docs_path else ""
         build_full_analysis(

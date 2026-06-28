@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import Optional
 
 from src.codewalk.pipeline import full_index_parallel, incremental_reindex, build_full_analysis
-from src.codewalk.team_config import team_scan_directory, load_codewalk_yaml
+from src.codewalk.codewalk_config import codewalk_scan_directory, load_codewalk_yaml
 from src.codewalk.ingestion.tech_detect import detect_tech_stack
 from src.codewalk.ingestion.config_generator import generate_codewalk_yaml
 from src.codewalk.embeddings.vector_store import VectorStore
@@ -33,7 +33,7 @@ def analyze(
     repo = _resolve_repo(repo)
     typer.echo(f"Analyzing {repo} ...")
 
-    # 1. Load team's codewalk.yaml (exclude patterns)
+    # 1. Load codewalk.yaml (exclude patterns)
     config = load_codewalk_yaml(repo)
     if config.exclude:
         typer.echo(f"Exclude: {config.exclude}")
@@ -48,13 +48,13 @@ def analyze(
         repo_path=repo,
         collection_name=collection,
         persist_dir=chroma_dir,
-        team_config=config,
+        codewalk_config=config,
     )
     typer.echo(f"Indexed {result['chunks_embedded']} chunks from {result['files_scanned']} files")
 
     # 4. Analysis + DuckDB + docs + guidelines — one call, no duplication
     db_path = os.path.join(repo.rstrip("/"), ".codewalk", "graph.duckdb")
-    files = team_scan_directory(repo, config)
+    files = codewalk_scan_directory(repo, config)
     gl_path = os.path.join(repo, config.guidelines_path) if config.guidelines_path else ""
     docs_p = os.path.join(repo, config.docs_path) if config.docs_path else ""
     analysis = build_full_analysis(
@@ -99,14 +99,14 @@ def reindex(
         typer.echo("No existing index. Run `codewalk analyze` first.")
         raise typer.Exit(1)
 
-    # 3. Load team's codewalk.yaml
+    # 3. Load codewalk.yaml
     config = load_codewalk_yaml(repo)
 
     typer.echo(f"Incremental reindex: {repo} ({len(paths)} files in index)")
 
-    # 4. Hash-based incremental reindex → ChromaDB (team_config filtering)
+    # 4. Hash-based incremental reindex → ChromaDB (codewalk_config filtering)
     result = incremental_reindex(
-        paths, repo, collection, persist_dir=chroma_dir, team_config=config,
+        paths, repo, collection, persist_dir=chroma_dir, codewalk_config=config,
     )
     typer.echo(
         f"  Skipped (same): {result['files_skipped']}\n"
@@ -117,7 +117,7 @@ def reindex(
 
     # 5. Rebuild analysis + DuckDB + re-index docs/guidelines
     db_path = os.path.join(repo.rstrip("/"), ".codewalk", "graph.duckdb")
-    files = team_scan_directory(repo, config)
+    files = codewalk_scan_directory(repo, config)
     gl_path = os.path.join(repo, config.guidelines_path) if config.guidelines_path else ""
     docs_p = os.path.join(repo, config.docs_path) if config.docs_path else ""
     analysis = build_full_analysis(
@@ -146,7 +146,7 @@ def refresh(
     typer.echo(f"Refreshing analysis: {repo}")
 
     db_path = os.path.join(repo.rstrip("/"), ".codewalk", "graph.duckdb")
-    files = team_scan_directory(repo, config)
+    files = codewalk_scan_directory(repo, config)
     analysis = build_full_analysis(db_path=db_path, files=files)
     module_names = list(analysis["modules_result"]["modules"].keys())
 

@@ -140,7 +140,7 @@ def _detect_formatter(repo_path: str, file_path: str) -> list[str] | None:
 
     # Look for explicit formatter config in codewalk.yaml
     try:
-        from src.codewalk.team_config import load_codewalk_yaml
+        from src.codewalk.codewalk_config import load_codewalk_yaml
         config = load_codewalk_yaml(repo_path)
         fmt = config.get("tools", {}).get("formatter")
         if fmt:
@@ -205,7 +205,7 @@ def _validate_file(file_path: Path) -> dict | None:
 def _load_codewalk_yaml_tools(repo_path: str) -> dict:
     """Load tool overrides from codewalk.yaml if present."""
     try:
-        from src.codewalk.team_config import load_codewalk_yaml
+        from src.codewalk.codewalk_config import load_codewalk_yaml
         config = load_codewalk_yaml(repo_path)
         return config.get("tools", {})
     except Exception:

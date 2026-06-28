@@ -15,7 +15,7 @@
 6. [Phase 4 — First deploy & cloud mode](#6-phase-4--first-deploy--cloud-mode)
 7. [Phase 5 — GitHub App (auto-indexing)](#7-phase-5--github-app-auto-indexing)
 8. [Phase 6 — First push & verify index](#8-phase-6--first-push--verify-index)
-9. [Phase 7 — Team config (`codewalk.yaml`)](#9-phase-7--team-config-codewalkyaml)
+9. [Phase 7 — Codewalk config (`codewalk.yaml`)](#9-phase-7--codewalk-config-codewalkyaml)
 10. [Phase 8 — Local MCP (download index)](#10-phase-8--local-mcp-download-index)
 11. [Phase 9 — Ongoing deploys](#11-phase-9--ongoing-deploys)
 12. [Admin commands](#12-admin-commands)
@@ -441,7 +441,7 @@ docker compose exec postgres psql -U codewalk -d codewalk -c \
 
 ---
 
-## 9. Phase 7 — Team config (`codewalk.yaml`)
+## 9. Phase 7 — Codewalk config (`codewalk.yaml`)
 
 Each **indexed repo** can have a `codewalk.yaml` at its root. Cloud reads it on every index.
 
@@ -543,16 +543,18 @@ curl -s https://api.codewalk.xyz/indexes/gupta29470/codewalk/manifest \
 
 Codewalk does not ship its own approve/reject UI. You talk to your **IDE agent** (Cursor, Copilot, Claude Code, etc.); the agent calls **Codewalk MCP tools**. Each host shows its own approval experience (Cursor approval cards, chat yes/no, etc.).
 
-The MCP server exposes **38 tools**. Every tool is wrapped with a workspace-change guard that re-discovers the cwd and resets state when you switch workspaces. Cloud-specific tools include `codewalk_pull_index`, `codewalk_connect_repo`, `codewalk_index_status`, `codewalk_check_version`, and `codewalk_show_knowledge_graph`. Recently added local tools include `codewalk_lookup_symbol`, `codewalk_find_circular_dependencies`, `codewalk_run_static_analysis`, `codewalk_run_tests`, `codewalk_generate_config`, `codewalk_explain_class`, `codewalk_get_stack_info`, `codewalk_get_review_details`, `codewalk_finding_verdict`, and `codewalk_apply_accepted`.
+The MCP server exposes **42 tools**. Every tool is wrapped with a workspace-change guard that re-discovers the cwd and resets state when you switch workspaces. Cloud-specific tools include `codewalk_pull_index`, `codewalk_connect_repo`, `codewalk_index_status`, `codewalk_check_version`, and `codewalk_show_knowledge_graph`. Recently added local tools include `codewalk_lookup_symbol`, `codewalk_find_circular_dependencies`, `codewalk_run_static_analysis`, `codewalk_run_tests`, `codewalk_generate_config`, `codewalk_explain_class`, `codewalk_get_stack_info`, `codewalk_get_review_details`, `codewalk_review_next_batch`, `codewalk_submit_batch_findings`, `codewalk_get_review_summary`, `codewalk_finding_verdict`, and `codewalk_apply_accepted`.
 
 **Canonical review flow:**
 
 1. Ask the agent to review — e.g. `@codewalk review my changes`
-2. Agent: `codewalk_run_review` (returns enriched context for the host LLM to review)
-3. For each finding: accept/reject via `codewalk_finding_verdict`
-4. Apply accepted fixes: `codewalk_apply_accepted` (or per-fix: `codewalk_approve_action` → `codewalk_apply_fix(..., approval_token=<token>)`)
-5. Verify: `codewalk_verify_fix`
-6. After edits: `codewalk_incremental_reindex`
+2. Agent: `codewalk_run_review` (returns session + first batch context for the host LLM to review)
+3. For each batch: review files, then `codewalk_submit_batch_findings(session_id, findings=[...])` → `codewalk_review_next_batch(session_id)` until all batches are done
+4. Agent: `codewalk_get_review_summary(session_id)` to produce the final verdict
+5. For each finding: accept/reject via `codewalk_finding_verdict`
+6. Apply accepted fixes: `codewalk_apply_accepted` (or per-fix: `codewalk_approve_action` → `codewalk_apply_fix(..., approval_token=<token>)`)
+7. Verify: `codewalk_verify_fix`
+8. After edits: `codewalk_incremental_reindex`
 
 **Local-ahead safety:** `codewalk_pull_index` and `codewalk_connect_repo` warn and require `force=True` when the local `.codewalk/manifest.json` `index_version` is ahead of the cloud Postgres row.
 

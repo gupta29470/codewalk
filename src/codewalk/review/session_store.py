@@ -198,6 +198,46 @@ def _session_index_path(repo_path: Path) -> Path:
     return Path(repo_path) / REVIEW_SESSION_DIR / "index.json"
 
 
+def find_active_batch_session(
+    repo_path: Path,
+    target_branch: str | None,
+    commit: str | None,
+    staged: bool,
+) -> tuple[str, dict[str, Any]] | None:
+    """Find an existing active batch session for the same diff parameters.
+
+    Returns (session_id, batch_state) if found, else None.
+    Only matches sessions that:
+      - Have a batch_state.json (MCP batched flow)
+      - Match the same target_branch, commit, staged params
+      - Are not fully consumed (current_batch_index < total_batches)
+    """
+    for folder in _session_folders(repo_path):
+        batch_state_path = folder / "batch_state.json"
+        if not batch_state_path.exists():
+            continue
+        try:
+            batch_state = json.loads(batch_state_path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            continue
+
+        # Match same diff parameters
+        if (batch_state.get("target_branch") != target_branch or
+                batch_state.get("commit") != commit or
+                batch_state.get("staged", False) != staged):
+            continue
+
+        # Not fully consumed
+        if batch_state.get("current_batch_index", 0) >= batch_state.get("total_batches", 0):
+            continue
+
+        session_id = batch_state.get("session_id")
+        if session_id:
+            return session_id, batch_state
+
+    return None
+
+
 def _update_session_index(repo_path: Path, session_id: str, folder_name: str) -> None:
     """Append session_id → folder_name mapping to index file."""
     index_path = _session_index_path(repo_path)

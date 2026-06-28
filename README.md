@@ -1,5 +1,8 @@
 <p align="center">
   <h1 align="center">CODEWALK</h1>
+   <p align="center" style="font-size:1.5em; font-weight:700;">
+     <a href="https://www.codewalk.xyz/">Landing page & docs →</a>
+   </p>
   <p align="center">
     <strong>AI-powered codebase intelligence tool</strong><br>
     Point it at any repo → understand the entire codebase in hours, not weeks
@@ -63,6 +66,74 @@ Three ways to use it locally, plus optional cloud indexing:
 
 ---
 
+## 🔬 Code Review — Powered by the Intelligence Layer
+
+Codewalk's review engine is built on top of the codebase intelligence layer. It doesn't just lint — it understands your architecture, knows what files are risky, and reviews with full context.
+
+### How it works
+
+```
+git diff → Static Analysis (graph risk, PageRank, cycles, blast radius)
+         → Batch files (3-5 per batch, grouped by feature)
+         → Host LLM reviews each batch with full context
+         → Submit findings to disk per batch (context stays clean)
+         → Final summary: all findings + verdict
+```
+
+### What makes it different
+
+| Capability | CodeRabbit / GitHub Copilot Review | Codewalk Review |
+|---|---|---|
+| **Architecture awareness** | ❌ No dependency graph | ✅ DuckDB + igraph: PageRank, fan-in, cycles, bottlenecks |
+| **Blast radius** | ❌ | ✅ "This file has 23 callers — review with extra care" |
+| **Works without indexing** | — | ✅ Just needs a git repo (graph enhances but isn't required) |
+| **Batched for large PRs** | Dumps everything at once | ✅ 3-5 files per batch, sorted by risk, host LLM stays focused |
+| **Custom rubrics** | Limited | ✅ Per-language + per-framework + team guidelines |
+| **Fix application** | Suggests only | ✅ Accept/reject → apply atomically → verify with tests |
+| **Severity levels** | varies | `blocker` · `error` · `suggestion` |
+
+### Works without indexing
+
+Review runs on **any git repo** — no `codewalk_analyze_codebase` needed. The intelligence layer enhances it when available:
+
+| Component | Without index | With index (after analyze) |
+|-----------|--------------|---------------------------|
+| Git diff + file content | ✅ | ✅ |
+| Rubrics + team guidelines | ✅ | ✅ |
+| Stack detection | ✅ (from file extensions) | ✅ (cached) |
+| Risk annotations | ⚠️ Diff-size proxy | ✅ PageRank, fan-in, cycles |
+| Neighborhood (callers, tests) | ⚠️ Empty | ✅ From DuckDB graph |
+| Blast radius warnings | ⚠️ Not available | ✅ Transitive impact |
+
+### Severity levels
+
+| Level | Value | Meaning |
+|-------|-------|---------|
+| **Blocker** | `"blocker"` | Must fix before merge — blocks the PR |
+| **Error** | `"error"` | Should fix — real bugs, logic errors, security risks |
+| **Suggestion** | `"suggestion"` | Nice to have — style, naming, minor improvements |
+
+### MCP review flow
+
+1. `codewalk_run_review(target_branch='main')` → session + first batch
+2. Host reviews batch → `codewalk_submit_batch_findings(session_id, [...])` → saved to disk
+3. `codewalk_review_next_batch(session_id)` → next batch (context window is clean)
+4. Repeat until all batches done
+5. `codewalk_get_review_summary(session_id)` → structured summary for final verdict
+6. User accepts/rejects → `codewalk_finding_verdict` → `codewalk_apply_accepted`
+
+### API review flow
+
+```bash
+curl -X POST http://localhost:8000/review \
+  -H "Content-Type: application/json" \
+  -d '{"target_branch": "master"}'
+```
+
+Runs: static analysis → batch review (parallel LLM) → dedup → verify → cluster → rank → verdict.
+
+---
+
 ## ✨ Features
 
 | Feature | Description |
@@ -76,7 +147,7 @@ Three ways to use it locally, plus optional cloud indexing:
 | 🔎 **Semantic Search** | ChromaDB vector search on embedded code chunks (RAG) |
 | 🔬 **Code Review** | Multi-stage review pipeline: test coverage, blast radius, guidelines RAG, context-enriched deep analysis |
 | 🔄 **Incremental Reindex** | Content hash comparison — only re-embeds changed files, skips unchanged |
-| 🧩 **MCP Server** | 38 MCP tools for VS Code Copilot / Claude Code / Cursor / Codex |
+| 🧩 **MCP Server** | 42 MCP tools for VS Code Copilot / Claude Code / Cursor / Codex |
 | 🎙️ **Voice Interface** | Talk to your codebase — mic recording, local STT (faster-whisper), agent-driven routing (MCP + API), TTS response |
 | 🔬 **Graph Intelligence** | DuckDB persistent graph + igraph C-speed traversal: cycle detection, centrality, import chain tracing |
 | 🧬 **Corrective RAG** | Distance-based chunk filtering (free) + LLM answer grading + query rewriting for reliable answers |
@@ -132,7 +203,7 @@ If you need deep cross-file reasoning, blast-radius analysis, or AI review insid
 | **Refactor shared code** | Grep for imports | Dependency graph + blast radius showing transitive impact |
 | **Onboard a new developer** | Read wiki pages | Reading order + module map generated from actual code |
 | **Team knowledge** | Search Confluence/Notion | Index docs alongside code and ask with citations |
-| **AI agent tooling** | Write custom scripts or prompts | 38 MCP tools the agent can call directly |
+| **AI agent tooling** | Write custom scripts or prompts | 42 MCP tools the agent can call directly |
 
 ---
 
@@ -563,7 +634,7 @@ Add to `.vscode/mcp.json` in your desired project:
 }
 ```
 
-> **Team config (`codewalk.yaml`):** Put repo-specific settings in the repo root:
+> **Codewalk config (`codewalk.yaml`):** Put repo-specific settings in the repo root:
 >
 > ```yaml
 > guidelines_path: contributing-docs
@@ -1312,7 +1383,7 @@ All query endpoints call `state.require_index()` — auto-loads `.codewalk/` fro
 | `GET /version` | No | `codewalk_check_version` | Codewalk version + commit info |
 | `GET /staleness` | Yes | — | Local vs cloud index staleness |
 | `POST /refresh` | Yes | `codewalk_refresh_analysis` | No re-embed |
-| `POST /incremental-reindex` | Yes | `codewalk_incremental_reindex` | `team_config` + manifest collection |
+| `POST /incremental-reindex` | Yes | `codewalk_incremental_reindex` | `codewalk_config` + manifest collection |
 | `POST /review` | Soft (better with index) | `codewalk_run_review` | Works with partial context |
 | `POST /review/stream` | Soft (better with index) | — | SSE progress events |
 | `POST /review/cancel` | Yes | — | Cancel a running review |
@@ -1559,7 +1630,7 @@ curl -X POST http://localhost:8000/review \
   "verdict_reason": "Critical security issue found that must be fixed before merge.",
   "issues": [
     {
-      "severity": "critical",
+      "severity": "blocker",
       "category": "security",
       "file_path": "src/auth/jwt.py",
       "line_number": 42,
@@ -1755,7 +1826,7 @@ Local MCP → GET /indexes/{owner}/{repo} → query locally
 
 > GitHub Actions **deploys the server**. **Indexing** is triggered by **GitHub App `push` webhooks**, not Actions.
 
-### Per-repo team config (`codewalk.yaml`)
+### Per-repo codewalk config (`codewalk.yaml`)
 
 Each indexed repo can have a `codewalk.yaml` at its root:
 
@@ -1782,7 +1853,7 @@ python -m src.codewalk.cli generate-config
 
 Or via MCP: `@codewalk Run codewalk_generate_config`.
 
-Cloud reads `codewalk.yaml` on every index. Pushes to other branches are ignored. See [FULL_SETUP_GUIDE.md § Phase 7](FULL_SETUP_GUIDE.md#9-phase-7--team-config-codewalkyaml).
+Cloud reads `codewalk.yaml` on every index. Pushes to other branches are ignored. See [FULL_SETUP_GUIDE.md § Phase 7](FULL_SETUP_GUIDE.md#9-phase-7--codewalk-config-codewalkyaml).
 
 ### Config templates
 
@@ -2010,7 +2081,7 @@ codewalk/
 │   │   └── fanout_agent.py        #   Fan-out graph experiments
 │   ├── cli.py                     #   Command-line interface
 │   └── mcp/                       # Model Context Protocol
-│       └── server.py              #   38 MCP tools (stdio)
+│       └── server.py              #   42 MCP tools (stdio)
 │
 ├── frontend/                      # Next.js 14 web UI
 │   └── src/app/

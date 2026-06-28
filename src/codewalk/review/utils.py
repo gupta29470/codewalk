@@ -289,14 +289,23 @@ def get_current_branch(repo_path: Path) -> str | None:
         return None
 
 
-def get_full_file_tree(repo_path: Path) -> list[str]:
-    """Return the full repository file tree as relative paths.
+def get_full_file_tree(repo_path: Path, codewalk_config: Any | None = None) -> list[str]:
+    """Return the repository file tree as relative paths, respecting codewalk.yaml.
+
+    If ``codewalk_config`` is provided, files and directories matching
+    codewalk.yaml exclude patterns are filtered out. This applies to both
+    the ``git ls-files`` path and the ``os.walk`` fallback.
 
     Uses ``git ls-files`` when inside a git repo, otherwise falls back to
     ``os.walk``. Hidden files and common dependency/build directories are
-    skipped.
+    always skipped via the core safety net.
     """
     import subprocess
+
+    # Lazy-import exclusion helpers only when codewalk_config is provided
+    _is_excluded_file = None
+    if codewalk_config is not None:
+        from src.codewalk.codewalk_config import is_excluded_file as _is_excluded_file
 
     try:
         result = subprocess.run(
@@ -308,6 +317,17 @@ def get_full_file_tree(repo_path: Path) -> list[str]:
         )
         paths = [line.strip() for line in result.stdout.splitlines() if line.strip()]
         if paths:
+            if _is_excluded_file is not None:
+                repo_str = str(repo_path)
+                paths = [
+                    p for p in paths
+                    if not _is_excluded_file(
+                        p.rsplit("/", 1)[-1],  # filename
+                        p,                      # relative path
+                        codewalk_config,
+                        repo_path=repo_str,
+                    )
+                ]
             return paths
     except Exception:
         pass
@@ -317,15 +337,34 @@ def get_full_file_tree(repo_path: Path) -> list[str]:
         ".git", ".codewalk", "node_modules", "__pycache__", ".venv",
         "venv", "dist", "build", ".next", ".turbo", ".nx",
     }
+
+    if codewalk_config is not None:
+        from src.codewalk.codewalk_config import is_excluded_dir
+
     for root, dirs, files in os.walk(repo_path):
-        dirs[:] = [d for d in dirs if d not in skip_dirs]
+        rel_dir = os.path.relpath(root, repo_path)
+
+        # Prune directories
+        if codewalk_config is not None:
+            dirs[:] = [
+                d for d in dirs
+                if d not in skip_dirs and not is_excluded_dir(d, rel_dir, codewalk_config)
+            ]
+        else:
+            dirs[:] = [d for d in dirs if d not in skip_dirs]
+
         for f in files:
             full = Path(root) / f
             try:
                 rel = full.relative_to(repo_path).as_posix()
-                paths.append(rel)
             except ValueError:
                 continue
+
+            if _is_excluded_file is not None:
+                if _is_excluded_file(f, rel, codewalk_config, repo_path=str(repo_path)):
+                    continue
+
+            paths.append(rel)
     return paths
 
 

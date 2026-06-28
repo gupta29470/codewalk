@@ -93,7 +93,7 @@ print('edge types', {e['type'] for e in g['edges']})
 | Export on index | `build_full_analysis()` → `knowledge_graph_export.py` |
 | Output path | `{repo}/.codewalk/knowledge-graph.json` |
 | Frontend API route | `GET /api/knowledge-graph?repoPath=...` (Next.js; local frontend only) |
-| MCP tool | `codewalk_show_knowledge_graph(repo_path="", port=3000)` (one of 38 MCP tools) |
+| MCP tool | `codewalk_show_knowledge_graph(repo_path="", port=3000)` (one of 42 MCP tools) |
 | Graph runtime | `igraph` (C-speed traversal built from DuckDB) |
 | Embedding model | `jinaai/jina-code-embeddings-1.5b` via Ollama/MPS — 768-dimensional vectors |
 | Tests | `.codewalk-env/bin/python -m pytest tests/test_knowledge_graph_export.py tests/test_mcp_show_knowledge_graph.py -v` |

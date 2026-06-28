@@ -192,11 +192,44 @@ Review a single file against conventions.
 ```
 
 ### `codewalk_get_stack_info`
-Get deterministic stack signals (changed files, imports, build/config files) for the current diff.
+Get the repository file tree and a structured prompt for stack detection. Use this when `codewalk_run_review` returns "Stack Context Required".
 
 ```text
 @codewalk What stack is this repo using?
 @codewalk Show me stack info for the current diff.
+@codewalk Run codewalk_get_stack_info.
+```
+
+### `codewalk_save_stack_context`
+Save the project's stack context to `.codewalk/stack_context.json` after analyzing the file tree from `codewalk_get_stack_info`. This persists across commits.
+
+```text
+@codewalk Save stack context: {"languages": ["typescript"], "frameworks": ["typescript_nextjs"], "architecture": "layered feature modules", "state_management": "zustand", "data_layer": "prisma", "testing": "jest + RTL", "api_style": "REST with zod"}.
+@codewalk Run codewalk_save_stack_context with the JSON above.
+```
+
+### `codewalk_review_next_batch`
+Get the next batch of files from an active review session after submitting findings for the current batch.
+
+```text
+@codewalk Get the next review batch.
+@codewalk Run codewalk_review_next_batch('abc123...').
+```
+
+### `codewalk_submit_batch_findings`
+Save the host LLM's findings for the current batch to disk. Call this before `codewalk_review_next_batch`.
+
+```text
+@codewalk Submit these findings for batch 1.
+@codewalk Run codewalk_submit_batch_findings('abc123...', findings=[...]).
+```
+
+### `codewalk_get_review_summary`
+Combine Layer 0 architectural warnings and all submitted LLM findings into a final summary after all batches are done.
+
+```text
+@codewalk Show me the review summary.
+@codewalk Run codewalk_get_review_summary('abc123...').
 ```
 
 ### Review fixes / human-in-the-loop

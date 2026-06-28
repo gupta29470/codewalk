@@ -1,5 +1,5 @@
-# Team config for gupta29470/codewalk — read on cloud index (load_codewalk_yaml).
-# team_scan_directory() uses ONLY this list (it does NOT apply file_filter.py's
+# Codewalk config for gupta29470/codewalk — read on cloud index (load_codewalk_yaml).
+# codewalk_scan_directory() uses ONLY this list (it does NOT apply file_filter.py's
 # built-in skips), so include common local environments, build caches, and
 # dependency folders here.
 

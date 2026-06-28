@@ -25,10 +25,10 @@ update job status to done/failed
 
 ## Connections
 
-- Uses `pipeline.py`, `team_config.py`, `graph/graph_store.py`, `embeddings/vector_store.py`.
+- Uses `pipeline.py`, `codewalk_config.py`, `graph/graph_store.py`, `embeddings/vector_store.py`.
 - The API server's `api/cloud.py` provides an alternate webhook-driven path; `worker/indexer.py` is the polling worker.
 - Uses its own Postgres connection (thread-safe, unlike `api/cloud.py` webhook threads).
 
 ## Known issues
 
-- `build_index()` uses `team_scan_directory()` for the analysis pass, which applies the core `file_filter.py` safety net plus `codewalk.yaml` excludes. `.codewalk/` and other generated directories are handled by the core net.
+- `build_index()` uses `codewalk_scan_directory()` for the analysis pass, which applies the core `file_filter.py` safety net plus `codewalk.yaml` excludes. `.codewalk/` and other generated directories are handled by the core net.

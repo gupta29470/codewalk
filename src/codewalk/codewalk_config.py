@@ -1,4 +1,4 @@
-"""Load and validate codewalk.yaml team configuration."""
+"""Load and validate codewalk.yaml configuration."""
 from dataclasses import dataclass, field
 from pathlib import Path
 import fnmatch
@@ -9,7 +9,7 @@ from src.codewalk.ingestion.file_filter import should_skip, should_skip_dir
 
 
 @dataclass
-class TeamConfig:
+class CodewalkConfig:
     """Per-repo configuration extracted from codewalk.yaml."""
     exclude: list[str] = field(default_factory=list)
     include: list[str] = field(default_factory=list)  # override exclude + core filter
@@ -19,7 +19,7 @@ class TeamConfig:
     tools: dict = field(default_factory=dict)  # tool command overrides (e.g. static_analysis, test_command)
 
 
-def index_branches(config: TeamConfig) -> list[str]:
+def index_branches(config: CodewalkConfig) -> list[str]:
     """Branches that may trigger cloud indexing. Defaults to master if unset."""
     return config.branches if config.branches else ["master"]
 
@@ -29,17 +29,17 @@ def branch_allowed(branch: str, allowed: list[str]) -> bool:
     return any(fnmatch.fnmatch(branch, pattern) for pattern in allowed)
 
 
-def load_codewalk_yaml(repo_root: str) -> TeamConfig:
-    """Load codewalk.yaml from repo root. Returns empty TeamConfig if missing."""
+def load_codewalk_yaml(repo_root: str) -> CodewalkConfig:
+    """Load codewalk.yaml from repo root. Returns empty CodewalkConfig if missing."""
     path = Path(repo_root) / "codewalk.yaml"
     if not path.exists():
-        return TeamConfig()
+        return CodewalkConfig()
     
     with open(path) as file:
         data = yaml.safe_load(file) or {}
 
     indexing = data.get("indexing", {})
-    return TeamConfig(
+    return CodewalkConfig(
         exclude=indexing.get("exclude", []),
         include=indexing.get("include", []),
         branches=indexing.get("branches") or [],
@@ -86,13 +86,13 @@ def _include_keeps_file(pattern: str, relative_path: str, filename: str) -> bool
     return relative_path == pattern or relative_path.startswith(pattern + "/") or filename == pattern
 
 
-def is_excluded_dir(dir_name: str, rel_dir: str, config: TeamConfig) -> bool:
+def is_excluded_dir(dir_name: str, rel_dir: str, config: CodewalkConfig) -> bool:
     """Check if a directory should be pruned during os.walk.
 
     Order:
       1. include patterns override everything (keep the dir).
       2. core safety net (file_filter.should_skip_dir).
-      3. team codewalk.yaml exclude patterns.
+      3. codewalk.yaml exclude patterns.
     """
     full_dir = f"{rel_dir}/{dir_name}" if rel_dir != "." else dir_name
 
@@ -104,7 +104,7 @@ def is_excluded_dir(dir_name: str, rel_dir: str, config: TeamConfig) -> bool:
     if should_skip_dir(dir_name):
         return True
 
-    # 3. Team excludes.
+    # 3. Codewalk excludes.
     for part in config.exclude:
         # Plain name → match dir name directly (e.g. "node_modules", "vendor")
         if "*" not in part and "?" not in part and "/" not in part:
@@ -123,7 +123,7 @@ def is_excluded_dir(dir_name: str, rel_dir: str, config: TeamConfig) -> bool:
 
 
 def _exclude_matches_file(pattern: str, filename: str, relative_path: str) -> bool:
-    """Check if a team exclude pattern matches a file."""
+    """Check if a codewalk.yaml exclude pattern matches a file."""
     # Glob → match against filename or full relative path.
     if "*" in pattern or "?" in pattern:
         return fnmatch.fnmatch(filename, pattern) or fnmatch.fnmatch(relative_path, pattern)
@@ -138,13 +138,13 @@ def _exclude_matches_file(pattern: str, filename: str, relative_path: str) -> bo
     return pattern in relative_path.split("/")
 
 
-def is_excluded_file(filename: str, relative_path: str, config: TeamConfig, repo_path: str | None = None) -> bool:
+def is_excluded_file(filename: str, relative_path: str, config: CodewalkConfig, repo_path: str | None = None) -> bool:
     """Check if a file should be excluded after directory pruning.
 
     Order:
       1. include patterns override everything (keep the file).
       2. core safety net (file_filter.should_skip).
-      3. team codewalk.yaml exclude patterns.
+      3. codewalk.yaml exclude patterns.
     """
     # 1. Explicit include wins.
     if config.include and any(_include_keeps_file(p, relative_path, filename) for p in config.include):
@@ -154,15 +154,15 @@ def is_excluded_file(filename: str, relative_path: str, config: TeamConfig, repo
     if should_skip(relative_path, repo_path=repo_path):
         return True
 
-    # 3. Team excludes.
+    # 3. Codewalk excludes.
     for part in config.exclude:
         if _exclude_matches_file(part, filename, relative_path):
             return True
     return False
 
 
-def team_scan_directory(directory: str, config: TeamConfig) -> list[dict]:
-    """Walk a directory and filter using the core safety net + team config.
+def codewalk_scan_directory(directory: str, config: CodewalkConfig) -> list[dict]:
+    """Walk a directory and filter using the core safety net + codewalk config.
 
     Returns same format as scanner.scan_directory: list of file dicts.
 

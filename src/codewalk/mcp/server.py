@@ -1,4 +1,4 @@
-"""Codewalk MCP server — 38 tools for codebase onboarding, search, review,
+"""Codewalk MCP server — 42 tools for codebase onboarding, search, review,
 docs, voice, visualization, and cloud index management.
 
 Tool categories:
@@ -7,8 +7,10 @@ Tool categories:
                  lookup_symbol, get_overview, get_blast_radius_map,
                  find_circular_dependencies, get_reading_order, get_execution_flow
   ARCHITECTURE:  get_architecture_health, call_chain
-  REVIEW:        run_review, review_file, get_review_details,
-                 get_stack_info, finding_verdict, apply_accepted
+  REVIEW:        run_review, review_next_batch, submit_batch_findings,
+                 get_review_summary, review_file, get_review_details,
+                 get_stack_info, save_stack_context, finding_verdict,
+                 apply_accepted
   MAINTENANCE:   incremental_reindex, refresh_analysis,
                  load_guidelines, run_static_analysis, run_tests
   VOICE:         voice_ask, speak
@@ -17,18 +19,42 @@ Tool categories:
   CLOUD:         pull_index, index_status, connect_repo, check_version
   VISUALIZATION: show_knowledge_graph
 
-Review architecture (no external LLM calls inside Codewalk):
+Review architecture (batched, no external LLM calls):
   The MCP review path NEVER calls an LLM. It returns raw context to the host LLM.
-  `codewalk_run_review` assembles a `ReviewContextPackage` (diff, neighborhood,
-  blast radius, static-analysis risk annotations, architecture flags, stack info,
-  rubrics, guidelines) for the host to write the review.
-  `codewalk_review_file` runs the full local-LLM review pipeline end-to-end.
+  Files are grouped into batches of 3-5, the host reviews each batch, submits
+  findings to disk via submit_batch_findings, then moves to the next batch.
+  After all batches, get_review_summary reads the persisted JSONs and returns
+  a structured summary for the host to produce the final verdict.
+
+  If codewalk_run_review is called again for the same diff (same target_branch,
+  commit, staged), it reuses the existing active session instead of creating a
+  new one — preventing duplicate session folders.
+
+  Stack detection flow (MCP path — NO LLM calls):
+    1. Any tool that needs stack checks .codewalk/stack_context.json
+    2. If file exists → use it (persists across ALL commits)
+    3. If file missing → return "Stack Context Required" with instructions
+    4. Host calls codewalk_get_stack_info → gets file tree + prompt
+    5. Host fills JSON, calls codewalk_save_stack_context → writes file
+    6. Host re-calls the original tool → reads file → proceed
+    7. To refresh: refresh_stack=True or call get_stack_info + save again
+
+  Tools that require stack context:
+    codewalk_run_review, codewalk_review_file,
+    codewalk_get_overview, codewalk_get_architecture_health
+
+  codewalk_analyze_codebase also prompts for stack setup after indexing
+  so the file is ready before the user calls any other tool.
+
+  IMPORTANT: No MCP tool calls detect_stack() or any external LLM.
+  Stack context comes purely from the persistent file on disk.
 
   Session directory layout:
-    .codewalk/reviews/<session>/
+    .codewalk/review_session/<session>/
     ├── session.json          # session metadata
+    ├── batch_state.json      # batch queue, rubrics, index pointer
     ├── static_findings.json  # deterministic findings (written once at start)
-    └── findings.json         # LLM findings
+    └── llm_findings.json     # host LLM findings (appended per batch)
 """
 
 import inspect
@@ -69,7 +95,7 @@ from src.codewalk.services.search_service import search as deterministic_search
 from src.codewalk.services.symbol_service import lookup as deterministic_symbol_lookup
 
 from src.codewalk.pipeline import index_from_paths_parallel, incremental_reindex
-from src.codewalk.team_config import load_codewalk_yaml
+from src.codewalk.codewalk_config import load_codewalk_yaml
 from src.codewalk.ingestion.config_generator import generate_codewalk_yaml
 from src.codewalk.config import settings
 from src.codewalk.voice.stt import record_audio, transcribe
@@ -82,7 +108,6 @@ from src.codewalk.query import (
     reading_order_text, execution_flow_text,
 )
 from src.codewalk.doc_knowledge.prompts import DOC_ASK_PROMPT
-from src.codewalk.review.engine import run_review_context
 from src.codewalk.review.report import ReviewContextPackage
 from src.codewalk.review.session_store import load_session
 
@@ -149,6 +174,20 @@ mcp = FastMCP(
         "The review uses a batched approach: files are grouped into small batches so you can\n"
         "review each thoroughly without context overflow. Findings are persisted to disk\n"
         "between batches so your context window stays clean.\n"
+        "\n"
+        "Step 0: STACK CONTEXT (one-time setup per repo).\n"
+        "        Several tools (run_review, review_file, get_overview,\n"
+        "        get_architecture_health) require `.codewalk/stack_context.json`.\n"
+        "        If ANY tool returns 'Stack Context Required', follow the steps:\n"
+        "          1. Call `codewalk_get_stack_info()` — returns file tree + prompt\n"
+        "          2. Analyze it and produce the JSON describing the stack\n"
+        "          3. Call `codewalk_save_stack_context(your_json)` to persist it\n"
+        "          4. Re-call the tool that blocked — it will now proceed\n"
+        "        This happens ONCE per repo — the file persists across all commits.\n"
+        "        To refresh: `codewalk_run_review(refresh_stack=True)` or call\n"
+        "        `codewalk_get_stack_info()` + `codewalk_save_stack_context()` again.\n"
+        "        NOTE: codewalk_analyze_codebase also prompts you to do this after\n"
+        "        indexing — so if you follow that prompt, you're already set.\n"
         "\n"
         "Step 1: START — call codewalk_run_review(target_branch='main') once.\n"
         "        Returns: session_id + first batch of 3-5 files with full context.\n"
@@ -428,6 +467,8 @@ def download_cloud_index_if_missing():
 
 
 def _download_index(server_url: str, repo_name: str, repo_token: str):
+    import tempfile
+
     repo_root = _target_repo_root()
     print(f"⏳ Downloading index for {repo_name} → {repo_root}/.codewalk/ ...")
     request = requests.get(
@@ -437,15 +478,19 @@ def _download_index(server_url: str, repo_name: str, repo_token: str):
     )
 
     request.raise_for_status()
-    tarball = Path("/tmp/codewalk-index.tar.gz")
-    with open(tarball, "wb") as file:
+    # Use a secure temp file instead of a predictable /tmp path
+    with tempfile.NamedTemporaryFile(suffix=".tar.gz", delete=False) as tmp:
         for chunk in request.iter_content(chunk_size=8192):
-            file.write(chunk)
+            tmp.write(chunk)
+        tarball = Path(tmp.name)
 
-    codewalk_dir = repo_root / ".codewalk"
-    if codewalk_dir.exists():
-        shutil.rmtree(codewalk_dir)
-    subprocess.run(["tar", "-xzf", str(tarball), "-C", str(repo_root)], check=True)
+    try:
+        codewalk_dir = repo_root / ".codewalk"
+        if codewalk_dir.exists():
+            shutil.rmtree(codewalk_dir)
+        subprocess.run(["tar", "-xzf", str(tarball), "-C", str(repo_root)], check=True)
+    finally:
+        tarball.unlink(missing_ok=True)
     print(f"✅ Index ready ({repo_name})")
 
 # ══════════════════════════════════════════════════════════════════════
@@ -457,6 +502,41 @@ def _require_index() -> str | None:
     if state.ensure_initialized():
         return None
     return state.INDEX_REQUIRED_MCP
+
+
+def _require_stack(tool_name: str = "") -> str | None:
+    """Return error message if .codewalk/stack_context.json is missing, else None.
+
+    Call this from any MCP tool that needs stack context to produce quality output.
+    Returns a structured message telling the host how to set up stack context.
+    The host follows the steps, then re-calls the original tool.
+    """
+    from src.codewalk.review.stack_detect import _load_cached
+
+    try:
+        repo_path = state.get_repo_path()
+    except Exception:
+        return None  # Can't check — let the tool handle repo errors itself
+
+    if _load_cached(Path(repo_path)):
+        return None  # Stack file exists — proceed
+
+    resume_hint = f"Then re-call `{tool_name}` — it will proceed normally." if tool_name else "Then re-call the tool you were trying to use."
+
+    return (
+        f"## Stack Context Required\n\n"
+        f"No `.codewalk/stack_context.json` found. Codewalk needs to know the "
+        f"project's architecture, state management, and frameworks to produce "
+        f"high-quality results.\n\n"
+        f"**Steps:**\n"
+        f"1. Call `codewalk_get_stack_info()` to get the file tree + detection prompt\n"
+        f"2. Analyze it and produce a JSON describing the stack\n"
+        f"3. Call `codewalk_save_stack_context(your_json)` to save it\n"
+        f"4. {resume_hint}\n\n"
+        f"This only happens **once per repo** — the file persists across all commits.\n"
+        f"To refresh later: `codewalk_run_review(refresh_stack=True)` or call "
+        f"`codewalk_get_stack_info()` + `codewalk_save_stack_context()` again."
+    )
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -555,7 +635,7 @@ def codewalk_analyze_codebase() -> str:
                 docs_msg = f"Docs: {dc} chunks embedded\n"
 
         if built and embed_result:
-            return (
+            result_msg = (
                 f"Codebase analyzed and indexed successfully.\n"
                 + f"Files found: {len(state._files)}\n"
                 + f"Files indexed: {embed_result.get('files_scanned', len(state._files))}\n"
@@ -565,15 +645,32 @@ def codewalk_analyze_codebase() -> str:
                 + f"Modules found: {', '.join(modules)}\n\n"
                 + f"✅ Local embedding complete — use query tools directly."
             )
-        return (
-            f"Codebase analyzed successfully.\n"
-            + f"Files found: {len(state._files)}\n"
-            + f"Modules found: {', '.join(modules)}\n"
-            + f"Search index: INDEX READY — {existing} chunks available.\n"
-            + f"{docs_msg}\n"
-            + f"✅ Loaded existing index.\n"
-            + f"Ready to answer questions — use query tools directly."
-        )
+        else:
+            result_msg = (
+                f"Codebase analyzed successfully.\n"
+                + f"Files found: {len(state._files)}\n"
+                + f"Modules found: {', '.join(modules)}\n"
+                + f"Search index: INDEX READY — {existing} chunks available.\n"
+                + f"{docs_msg}\n"
+                + f"✅ Loaded existing index.\n"
+                + f"Ready to answer questions — use query tools directly."
+            )
+
+        # If stack context file is missing, prompt the host to set it up now.
+        # This ensures the first tool call on a new repo triggers stack detection.
+        from src.codewalk.review.stack_detect import _load_cached
+        if not _load_cached(Path(repo_path)):
+            result_msg += (
+                "\n\n---\n\n"
+                "## ⏩ Stack Context Setup Required\n\n"
+                "To enable architecture-aware reviews and overview:\n"
+                "1. Call `codewalk_get_stack_info()` to get the file tree + detection prompt\n"
+                "2. Analyze it and produce the JSON describing the stack\n"
+                "3. Call `codewalk_save_stack_context(your_json)` to save it\n\n"
+                "This only happens **once per repo**."
+            )
+
+        return result_msg
 
     return (
         f"⚠️ Indexing produced 0 chunks.\n"
@@ -874,16 +971,28 @@ def codewalk_get_overview() -> str:
     """Get the project overview from Codewalk's computed analysis.
 
     Returns:
-    - Tech stack detection results
+    - Architecture context (from .codewalk/stack_context.json)
     - Module list with file counts and languages
     - Module dependency flow (entry points → core modules)
     - Top 30 riskiest files by blast radius with break chains
+
+    Requires .codewalk/stack_context.json for full output. If missing, returns
+    instructions to set it up (one-time per repo).
     """
     if err := _require_index():
         return err
+    if err := _require_stack("codewalk_get_overview()"):
+        return err
 
     _log("[codewalk_get_overview] Generating overview...")
-    return overview_text(state.get_repo_path(), state._modules_result, state._deps, state._graph_runtime)
+    from src.codewalk.review.stack_detect import _load_cached, format_stack_context_header
+    repo = Path(state.get_repo_path())
+    cached_stack = _load_cached(repo) or {}
+    stack_header = format_stack_context_header(cached_stack)
+    overview = overview_text(state.get_repo_path(), state._modules_result, state._deps, state._graph_runtime)
+    if stack_header:
+        return stack_header + "\n" + overview
+    return overview
 
 # ─── TOOL 6 [QUERY · user+AI]: codewalk_get_blast_radius_map ─────────
 @mcp.tool()
@@ -1002,7 +1111,7 @@ def codewalk_incremental_reindex() -> str:
         return err
 
     repo_path = state.get_repo_path()
-    team_config = load_codewalk_yaml(repo_path)
+    codewalk_config = load_codewalk_yaml(repo_path)
 
     if state._store.chunk_count() == 0:
         return "❌ No files to reindex. Run codewalk_analyze_codebase first."
@@ -1010,7 +1119,7 @@ def codewalk_incremental_reindex() -> str:
     # Pass the repo root so the scanner considers every file, including new ones.
     result = incremental_reindex(
         [repo_path], repo_path, state.get_collection_name(),
-        persist_dir=state.chroma_path(), team_config=team_config,
+        persist_dir=state.chroma_path(), codewalk_config=codewalk_config,
     )
 
     # Full rebuild of DuckDB + KG from every chunk in ChromaDB, not just changed ones.
@@ -1066,6 +1175,7 @@ def codewalk_run_review(
     target_branch: str | None = None,
     staged: bool = False,
     commit: str | None = None,
+    refresh_stack: bool = False,
 ) -> str:
     """Start a batched review and return the first batch of files for review.
 
@@ -1080,6 +1190,9 @@ def codewalk_run_review(
         target_branch: Diff against a branch (e.g. "main"). If None, reviews working-tree changes.
         staged: If True, review only staged changes. Default: unstaged/uncommitted.
         commit: Review a specific commit by SHA or ref.
+        refresh_stack: If True, ignore the existing .codewalk/stack_context.json
+            and re-prompt for stack detection. Use when the project's tech stack
+            has changed (e.g. new framework added).
 
     Returns:
         Session info + first batch context (diff + file content + risk + rubric).
@@ -1111,18 +1224,37 @@ def codewalk_run_review(
         )
         from src.codewalk.review.rubric_loader import build_rubrics
         from src.codewalk.review.stack_detect import (
-            detect_stack,
             format_stack_context_header,
             get_rubric_names_from_stack,
         )
         from src.codewalk.review.utils import get_full_file_tree
         from src.codewalk.review.session import ReviewSession, SessionStatus
-        from src.codewalk.review.session_store import save_session
-        from src.codewalk.team_config import load_codewalk_yaml
+        from src.codewalk.review.session_store import save_session, find_active_batch_session
+        from src.codewalk.codewalk_config import load_codewalk_yaml
         from datetime import datetime, timezone
         import json as _json
 
         repo = Path(repo_path)
+
+        # Check for an existing active session with the same diff parameters.
+        # Skip reuse if refresh_stack=True — the user wants to re-detect the stack,
+        # which requires creating a new session with fresh rubrics.
+        existing = None if refresh_stack else find_active_batch_session(repo, target_branch, commit, staged)
+        if existing:
+            existing_session_id, existing_batch_state = existing
+            current_idx = existing_batch_state.get("current_batch_index", 0)
+            total = existing_batch_state.get("total_batches", 0)
+            remaining = total - current_idx - 1
+            return (
+                f"{warning}"
+                f"**Active review session found: `{existing_session_id}`**\n\n"
+                f"- {existing_batch_state.get('total_files', 0)} files in {total} batches\n"
+                f"- Currently on batch {current_idx + 1}/{total}\n"
+                f"- {remaining} batches remaining\n\n"
+                f"Call `codewalk_review_next_batch('{existing_session_id}')` to continue reviewing.\n"
+                f"Or call `codewalk_get_review_summary('{existing_session_id}')` if you're done."
+            )
+
         codewalk_yaml = load_codewalk_yaml(str(repo))
 
         # Layer 0: deterministic context (once for all files)
@@ -1133,9 +1265,37 @@ def codewalk_run_review(
         if not diff_files:
             return warning + "✅ No changes found to review."
 
-        # Stack detection (cached)
-        changed_paths = [df.file_path for df in diff_files]
-        stack = detect_stack(repo, file_tree, changed_paths, llm=None)
+        # Stack detection for MCP path:
+        # 1. Check .codewalk/stack_context.json (persistent across commits)
+        # 2. If missing (or refresh_stack=True), tell host to call
+        #    codewalk_get_stack_info → codewalk_save_stack_context → re-call us
+        from src.codewalk.review.stack_detect import _load_cached
+
+        cached_stack = None if refresh_stack else _load_cached(repo)
+        if not cached_stack:
+            # No stack context file — host must fill it before we can proceed
+            review_args = f"target_branch='{target_branch or ''}'"
+            if staged:
+                review_args += ", staged=True"
+            if commit:
+                review_args += f', commit="{commit}"'
+
+            return (
+                f"{warning}"
+                f"## Stack Context Required\n\n"
+                f"No `.codewalk/stack_context.json` found. Codewalk needs to know the "
+                f"project's architecture, state management, and frameworks to load the "
+                f"correct review rubrics.\n\n"
+                f"**Steps:**\n"
+                f"1. Call `codewalk_get_stack_info()` to get the file tree + prompt\n"
+                f"2. Analyze it and produce a JSON describing the stack\n"
+                f"3. Call `codewalk_save_stack_context(your_json)` to save it\n"
+                f"4. Call `codewalk_run_review({review_args})` again to start the review\n\n"
+                f"This only happens **once per repo** — the file persists across all commits.\n"
+                f"To refresh later: `codewalk_run_review({review_args}, refresh_stack=True)`"
+            )
+
+        stack = {k: v for k, v in cached_stack.items() if not k.startswith("_")}
         stack_header = format_stack_context_header(stack)
         rubric_names = get_rubric_names_from_stack(stack)
         rubrics = build_rubrics(repo, {df.file_path for df in diff_files}, detected_rubric_names=rubric_names)
@@ -1207,7 +1367,7 @@ def codewalk_run_review(
 
         # Build first batch context
         first_batch_context = _build_batch_context_for_host(
-            repo, batches[0], static_result, stack_header, rubrics, file_tree,
+            repo, batches[0], static_result, stack_header, rubrics,
         )
 
         lines = [warning]
@@ -1240,7 +1400,6 @@ def _build_batch_context_for_host(
     static_result,
     stack_header: str,
     rubrics,
-    file_tree: list[str],
 ) -> str:
     """Build review context markdown for a batch of files."""
     from src.codewalk.review.neighborhood import expand_neighborhood
@@ -1406,11 +1565,10 @@ def codewalk_review_next_batch(session_id: str) -> str:
     )
 
     stack_header = batch_state.get("stack_header", "")
-    file_tree = []  # Not needed per batch — host already has it from first call
 
     # Build context for this batch
     batch_context = _build_batch_context_for_host(
-        repo, batch_diff_files, static_result, stack_header, rubrics, file_tree,
+        repo, batch_diff_files, static_result, stack_header, rubrics,
     )
 
     # Update batch index
@@ -1496,7 +1654,7 @@ def codewalk_submit_batch_findings(session_id: str, findings: list[dict]) -> str
 
     existing.extend(findings)
 
-    # Write back atomically
+    # Write back
     llm_findings_path.write_text(
         _json.dumps(existing, indent=2), encoding="utf-8"
     )
@@ -1644,11 +1802,13 @@ def codewalk_review_file(
     target_branch: str | None = None,
     staged: bool = False,
 ) -> str:
-    """Review a single file with the full pipeline (rubrics + verify + verdict).
+    """Review a single file and return full context for the host LLM to review.
 
-    Use this after codewalk_run_review when you want to drill deeper into a
-    specific file. Runs the complete pipeline (batch review → dedup → verify →
-    cluster → rank → verdict) focused on just this one file.
+    Returns the file's content, diff hunks, risk annotations, neighborhood
+    context (callers, tests), and rubrics. The host LLM (you) performs the
+    actual review using this enriched context.
+
+    No external LLM is called — this tool only returns raw context.
 
     Args:
         file_path: Relative path to the file to review (e.g. "src/auth/login.py").
@@ -1656,15 +1816,15 @@ def codewalk_review_file(
         staged: If True, review only staged changes for this file.
 
     Returns:
-        Markdown review report for the single file with findings and verdict.
+        Markdown context package for the host LLM to review.
     """
-    from src.codewalk.review.engine import run_review
-    from src.codewalk.review.renderers import render_review_report
-    from src.codewalk.config import get_llm
-
     repo_path = state.get_repo_path()
     if not repo_path:
         return "❌ No repository path available. Run codewalk_analyze_codebase first."
+
+    # Stack context required for correct rubric loading
+    if err := _require_stack(f"codewalk_review_file('{file_path}')"):
+        return err
 
     try:
         state.ensure_initialized()
@@ -1672,17 +1832,72 @@ def codewalk_review_file(
         pass
 
     try:
-        llm = get_llm(temperature=0)
-        report = run_review(
-            repo_path=Path(repo_path),
-            target_branch=target_branch,
-            staged=staged,
-            llm=llm,
-            file_filter=[file_path],
+        from src.codewalk.review.engine import _build_common_context
+        from src.codewalk.review.rubric_loader import build_rubrics
+        from src.codewalk.review.stack_detect import (
+            _load_cached,
+            format_stack_context_header,
+            get_rubric_names_from_stack,
         )
-        if not report.findings:
-            return f"✅ No issues found in `{file_path}`."
-        return render_review_report(report)
+        from src.codewalk.review.utils import get_full_file_tree
+        from src.codewalk.codewalk_config import load_codewalk_yaml
+
+        repo = Path(repo_path)
+        codewalk_yaml = load_codewalk_yaml(str(repo))
+
+        # Run deterministic analysis for this file only
+        static_result, diff_files, neighborhood, static_findings, architecture_flags, file_tree = _build_common_context(
+            repo, target_branch, None, staged, codewalk_yaml,
+        )
+
+        # Stack detection: read persistent file if it exists, else empty (no prompt for single-file)
+        cached_stack = _load_cached(repo)
+        stack = {k: v for k, v in cached_stack.items() if not k.startswith("_")} if cached_stack else {}
+        stack_header = format_stack_context_header(stack)
+        rubric_names = get_rubric_names_from_stack(stack)
+        rubrics = build_rubrics(repo, {file_path}, detected_rubric_names=rubric_names)
+
+        # Filter to the requested file
+        target_diff_files = [df for df in diff_files if df.file_path == file_path]
+
+        # If file has no diff, still provide its content for review
+        if not target_diff_files:
+            full_path = repo / file_path
+            if not full_path.exists():
+                return f"❌ File not found: `{file_path}`"
+
+            content = full_path.read_text(encoding="utf-8")
+
+            parts = [f"# Single File Review: `{file_path}`\n"]
+            parts.append("No diff found for this file — reviewing current content.\n")
+            if stack_header:
+                parts.append(stack_header)
+            parts.append("## Review Rubric\n")
+            if rubrics.core:
+                parts.append(rubrics.core)
+            parts.append(f"\n## File Content\n```\n{content[:15000]}\n```\n")
+            parts.append("---\n**Review this file for bugs, security issues, and style problems.**")
+            return "\n".join(parts)
+
+        # Build context using the same helper as batched review
+        batch_context = _build_batch_context_for_host(
+            repo, target_diff_files, static_result, stack_header, rubrics,
+        )
+
+        lines = [f"# Single File Review: `{file_path}`\n"]
+
+        # Static findings for this file
+        file_static = [f for f in static_findings if f.file_path == file_path]
+        if file_static:
+            lines.append(f"**{len(file_static)} architectural warning(s)**\n")
+
+        lines.append(batch_context)
+        lines.append("\n---")
+        lines.append("**Review this file for bugs, security issues, logic errors, and style.**")
+        lines.append("Report findings with: file_path, line_number, severity (blocker/error/suggestion), title, explanation, current_code, recommended_code.")
+
+        return "\n".join(lines)
+
     except Exception as e:
         _log(f"[codewalk_review_file] error: {e}")
         return f"❌ Review failed for `{file_path}`: {e}"
@@ -1873,68 +2088,131 @@ def codewalk_apply_accepted(session_id: str = "") -> str:
 
 # ─── TOOL 11c [MAINT · AI]: codewalk_get_stack_info ────────────────
 @mcp.tool()
-def codewalk_get_stack_info(
-    target_branch: str | None = None,
-    staged: bool = False,
-    commit: str | None = None,
-) -> str:
-    """Gather deterministic stack signals for the current diff.
+def codewalk_get_stack_info() -> str:
+    """Return the repository file tree and a structured prompt for stack detection.
 
-    Reads the diff, changed files, imports, build/config files, and folder
-    structure, then returns a markdown summary for the host LLM to interpret.
+    Scans the repo's folder structure (config files, package manifests, folder
+    names) and returns a prompt asking the host LLM to produce a JSON describing
+    the project's tech stack.
 
-    Call this before codewalk_run_review if you want to understand the stack
-    before reviewing, or use the signals included automatically in
-    codewalk_run_review's context package.
-
-    Args:
-        target_branch: Diff against a branch (e.g. "main"). If None, uses working tree.
-        staged: If True, review only staged changes.
-        commit: Review a specific commit by SHA or ref.
+    No git diff, no static analysis — just the file tree. Stack detection is
+    about the project's overall architecture, not about what changed in a PR.
 
     Returns:
-        Markdown summary of the repository file tree and changed files.
-        The host LLM should infer language, framework, architecture, state
-        management, data layer, and testing approach from this raw context.
+        A prompt containing the file tree + instructions for the host LLM to
+        produce a JSON and call `codewalk_save_stack_context(your_json)`.
     """
     repo_path = state.get_repo_path()
     if not repo_path:
         return "❌ No repository path available. Run codewalk_analyze_codebase first."
 
     try:
-        from src.codewalk.review.static_analysis import run_static_analysis
         from src.codewalk.review.utils import get_full_file_tree
+        from src.codewalk.review.stack_detect import _STACK_DETECT_PROMPT, AVAILABLE_RUBRICS
 
         repo = Path(repo_path)
-        static_result = run_static_analysis(
-            repo_path=repo,
-            target_branch=target_branch,
-            commit=commit,
-            staged=staged,
-        )
-        file_tree = get_full_file_tree(repo)
-        diff_files = [df.file_path for df in static_result.diff_files]
+        codewalk_cfg = load_codewalk_yaml(str(repo))
+        file_tree = get_full_file_tree(repo, codewalk_config=codewalk_cfg)
 
-        lines = [
-            "# Stack Info (raw signals)",
-            "",
-            f"- Files changed: {len(diff_files)}",
-            "",
-            "## Changed files",
-        ]
-        for fp in diff_files:
-            lines.append(f"- `{fp}`")
-        lines.extend(["", "## Repository file tree"])
-        for path in file_tree[:200]:
-            lines.append(f"- `{path}`")
+        tree_text = "\n".join(f"- {p}" for p in file_tree[:200])
         if len(file_tree) > 200:
-            lines.append(f"- ... and {len(file_tree) - 200} more files")
-        lines.append("")
+            tree_text += f"\n- ... and {len(file_tree) - 200} more files"
 
-        return "\n".join(lines)
+        prompt = _STACK_DETECT_PROMPT.format(
+            available_rubrics=", ".join(sorted(AVAILABLE_RUBRICS)),
+            file_tree=tree_text,
+            changed_files="(not applicable — detecting overall project stack)",
+        )
+
+        return (
+            f"{prompt}\n\n"
+            f"---\n\n"
+            f"**After analyzing the above**, respond with the JSON object and call "
+            f"`codewalk_save_stack_context(your_json)` to save it."
+        )
     except Exception as e:
         _log(f"[codewalk_get_stack_info] error: {e}")
         return f"❌ Stack info gathering failed: {e}"
+
+
+# ─── TOOL 11j [REVIEW · AI]: codewalk_save_stack_context ────────────
+@mcp.tool()
+def codewalk_save_stack_context(stack_json: str) -> str:
+    """Save the project's stack context (architecture, state management, etc.).
+
+    Call this when codewalk_run_review returns a 'Stack Detection Required' prompt,
+    OR when the user wants to update their project's stack info (e.g. after adding
+    a new framework).
+
+    You (the host LLM) analyze the file tree and respond with a JSON object
+    describing the project's stack. This tool saves it to
+    .codewalk/stack_context.json — a persistent file that survives across commits.
+    All future reviews use it automatically until explicitly refreshed.
+
+    To refresh: call codewalk_run_review(refresh_stack=True) or call this tool
+    again with updated JSON.
+
+    Args:
+        stack_json: JSON string with the detected stack. Must include:
+            {
+              "languages": ["dart"],
+              "frameworks": ["dart_flutter"],
+              "architecture": "clean architecture with BLoC pattern",
+              "state_management": "BLoC + Freezed",
+              "data_layer": "Dio + Retrofit, Hive for local",
+              "testing": "widget tests + bloc_test",
+              "api_style": "REST with Dio"
+            }
+
+    Returns:
+        Confirmation message. Call codewalk_run_review again to start the review.
+    """
+    try:
+        repo_path = state.get_repo_path()
+    except Exception:
+        return "❌ No repository path available. Run codewalk_analyze_codebase first."
+
+    from src.codewalk.review.stack_detect import (
+        _parse_llm_response,
+        _save_cache,
+        AVAILABLE_RUBRICS,
+    )
+
+    repo = Path(repo_path)
+
+    # Parse the JSON (handles markdown fences too)
+    parsed = _parse_llm_response(stack_json)
+    if not parsed:
+        return (
+            "❌ Invalid JSON. Respond with a valid JSON object:\n"
+            '{"languages": [...], "frameworks": [...], "architecture": "...", ...}'
+        )
+
+    # Validate framework/language names against available rubrics
+    parsed["frameworks"] = [
+        f for f in parsed.get("frameworks", [])
+        if f in AVAILABLE_RUBRICS
+    ]
+    parsed["languages"] = [
+        l for l in parsed.get("languages", [])
+        if l in AVAILABLE_RUBRICS
+    ]
+
+    # Save to .codewalk/stack_context.json (persistent, survives across commits)
+    _save_cache(repo, parsed)
+
+    arch = parsed.get("architecture", "")
+    langs = ", ".join(parsed.get("languages", []))
+    frameworks = ", ".join(parsed.get("frameworks", []))
+
+    return (
+        f"✅ Stack context saved to `.codewalk/stack_context.json`.\n"
+        f"- Languages: {langs}\n"
+        f"- Frameworks: {frameworks}\n"
+        f"- Architecture: {arch}\n\n"
+        f"This persists across commits — no need to re-detect on every review.\n"
+        f"Now call `codewalk_run_review(target_branch='...')` to start the review."
+    )
 
 
 # ─── TOOL 12 [MAINT · user+AI]: codewalk_load_guidelines ────────────
@@ -2249,6 +2527,7 @@ def codewalk_get_architecture_health() -> str:
     """Architecture health report: bottlenecks, key files, circular dependencies.
 
     Returns:
+    - Declared architecture (from .codewalk/stack_context.json)
     - Graph stats (files, import edges, DAG status)
     - Bottleneck files (betweenness centrality — most import paths pass through these)
     - Most important files (PageRank — transitively depended on by the most code)
@@ -2256,12 +2535,28 @@ def codewalk_get_architecture_health() -> str:
 
     Use when asked about code health, architecture quality, refactoring
     priorities, circular imports, or "what should I fix first?"
+
+    Requires .codewalk/stack_context.json for full output.
     """
     if err := _require_index():
+        return err
+    if err := _require_stack("codewalk_get_architecture_health()"):
         return err
 
     runtime = state.get_graph_runtime()
     sections = []
+
+    # ── Declared architecture from stack context ──
+    from src.codewalk.review.stack_detect import _load_cached
+    repo = Path(state.get_repo_path())
+    cached_stack = _load_cached(repo) or {}
+    if cached_stack.get("architecture"):
+        sections.append(
+            f"## Declared Architecture\n\n"
+            f"- **Architecture:** {cached_stack['architecture']}\n"
+            + (f"- **State management:** {cached_stack['state_management']}\n" if cached_stack.get("state_management") else "")
+            + (f"- **Data layer:** {cached_stack['data_layer']}\n" if cached_stack.get("data_layer") else "")
+        )
 
     # ── Graph stats ──
     stats = runtime.get_graph_stats()
@@ -2872,12 +3167,10 @@ def codewalk_connect_repo(repo_name: str, repo_token: str, force: bool = False) 
         except Exception:
             pass
 
-    # Step 4: Remove stale local index (same as codewalk_pull_index / _download_index)
-    codewalk_dir = Path(git_root) / ".codewalk"
-    if codewalk_dir.exists():
-        shutil.rmtree(codewalk_dir)
+    # Step 4+5: Download to temp file FIRST, then replace local index.
+    # This avoids losing the local index if the download fails.
+    import tempfile
 
-    # Step 5: Download and extract index tarball
     try:
         dl_resp = requests.get(
             f"{server_url}/indexes/{repo_name}",
@@ -2885,28 +3178,35 @@ def codewalk_connect_repo(repo_name: str, repo_token: str, force: bool = False) 
             stream=True, timeout=300,
         )
         dl_resp.raise_for_status()
-        tarball = Path("/tmp/codewalk-connect-index.tar.gz")
-        with open(tarball, "wb") as fh:
+        with tempfile.NamedTemporaryFile(suffix=".tar.gz", delete=False) as tmp:
             for chunk in dl_resp.iter_content(chunk_size=8192):
-                fh.write(chunk)
+                tmp.write(chunk)
+            tarball = Path(tmp.name)
     except Exception as exc:
         return f"❌ Download failed: {exc}"
 
     try:
+        # Only delete the old index AFTER a successful download
+        codewalk_dir = Path(git_root) / ".codewalk"
+        if codewalk_dir.exists():
+            shutil.rmtree(codewalk_dir)
         subprocess.run(
             ["tar", "-xzf", str(tarball), "-C", git_root],
             check=True,
         )
-        tarball.unlink(missing_ok=True)
     except Exception as exc:
         return f"❌ Extraction failed: {exc}"
+    finally:
+        tarball.unlink(missing_ok=True)
 
     # Point in-memory state at the connected repo and clear stale caches so the
     # next tool call reloads from the freshly downloaded index.
     state.set_repo_path(git_root)
     _reset_state()
 
-    # Write CODEWALK_REPO_NAME and CODEWALK_REPO_TOKEN into local mcp.json if found
+    # Write CODEWALK_REPO_NAME into mcp.json (NOT the token — tokens must
+    # stay in environment variables or a user-scoped secret store to avoid
+    # accidental commits to version control).
     mcp_json_path = Path(git_root) / "mcp.json"
     mcp_hint = ""
     if mcp_json_path.exists():
@@ -2914,16 +3214,19 @@ def codewalk_connect_repo(repo_name: str, repo_token: str, force: bool = False) 
             mcp_cfg = json.loads(mcp_json_path.read_text())
             env = mcp_cfg.setdefault("env", {})
             env["CODEWALK_REPO_NAME"] = repo_name
-            env["CODEWALK_REPO_TOKEN"] = repo_token
             mcp_json_path.write_text(json.dumps(mcp_cfg, indent=2))
-            mcp_hint = "\n  mcp.json updated with repo credentials."
+            mcp_hint = (
+                "\n  mcp.json updated with CODEWALK_REPO_NAME."
+                "\n  Set CODEWALK_REPO_TOKEN as an environment variable "
+                "(do NOT commit tokens to mcp.json)."
+            )
         except Exception:
-            mcp_hint = "\n  ⚠️  Could not update mcp.json — update CODEWALK_REPO_NAME and CODEWALK_REPO_TOKEN manually."
+            mcp_hint = "\n  ⚠️  Could not update mcp.json."
     else:
         mcp_hint = (
             "\n  Add to mcp.json env:\n"
-            f'    "CODEWALK_REPO_NAME": "{repo_name}",\n'
-            f'    "CODEWALK_REPO_TOKEN": "{repo_token}"'
+            f'    "CODEWALK_REPO_NAME": "{repo_name}"\n'
+            "  Set CODEWALK_REPO_TOKEN as an environment variable."
         )
 
     index_version = manifest.get("index_version", "?")
@@ -2954,16 +3257,28 @@ def codewalk_check_version() -> str:
 
 
 def _kill_process_on_port(port: int) -> None:
-    """Best-effort kill any process listening on the given port."""
+    """Kill Codewalk/Next.js processes on the given port (safe — checks command name)."""
     if sys.platform == "darwin":
         try:
-            pids = subprocess.run(
+            # Get PIDs and their commands to avoid killing unrelated services
+            result = subprocess.run(
                 ["lsof", "-ti", f":{port}"],
                 capture_output=True, text=True, check=False,
-            ).stdout.strip()
+            )
+            pids = result.stdout.strip()
             if pids:
                 for pid in pids.splitlines():
-                    subprocess.run(["kill", "-9", pid], capture_output=True, check=False)
+                    pid = pid.strip()
+                    if not pid:
+                        continue
+                    # Check if it's a node/next process before killing
+                    cmd_result = subprocess.run(
+                        ["ps", "-p", pid, "-o", "command="],
+                        capture_output=True, text=True, check=False,
+                    )
+                    cmd = cmd_result.stdout.strip().lower()
+                    if any(name in cmd for name in ("node", "next", "npm", "codewalk")):
+                        subprocess.run(["kill", "-9", pid], capture_output=True, check=False)
         except Exception:
             pass
     else:

@@ -14,7 +14,7 @@ This package decides which files enter the Codewalk pipeline and tags them with 
 ## How it connects
 
 - `scanner.scan_directory()` is the **default** filtered scan used by `pipeline.py`, `api/state.py`, and `index_from_paths_parallel()`.
-- `team_config.team_scan_directory()` (in `src/codewalk/team_config.py`) merges three layers:
+- `codewalk_config.codewalk_scan_directory()` (in `src/codewalk/codewalk_config.py`) merges three layers:
   1. `codewalk.yaml` `indexing.include` — overrides exclusions for specific paths.
   2. `file_filter.py` core safety net — always excludes dependencies, build artifacts, binaries, secrets, etc.
   3. `codewalk.yaml` `indexing.exclude` — repo- and stack-specific patterns.

@@ -6,7 +6,7 @@ This package exposes Codewalk as an MCP server that IDE agents (Cursor, Copilot,
 
 | File | Role |
 |------|------|
-| `server.py` | FastMCP server with 33 tools: analyze, search, explain, symbol lookup, module info, blast radius, circular dependencies, reading order, execution flow, architecture health, call chain, review, reflection, verify fix, static analysis, test runner, voice, docs, HITL, cloud index sync, config generation, version check, and knowledge-graph launch. |
+| `server.py` | FastMCP server with 42 tools: setup, query, architecture, review (including batched review: run_review, review_next_batch, submit_batch_findings, get_review_summary), docs, maintenance, voice, HITL, cloud index sync, config generation, version check, and knowledge-graph launch. |
 
 ## Data flow
 
@@ -25,7 +25,7 @@ query/review/voice/docs/cloud tools read from state
 ## Connections
 
 - Uses `api/state.py` as the single source of truth.
-- Imports from `embeddings/`, `rag/`, `query/`, `review/`, `agent/`, `generation/`, `doc_knowledge/`, `pipeline/`, `team_config/`.
+- Imports from `embeddings/`, `rag/`, `query/`, `review/`, `agent/`, `generation/`, `doc_knowledge/`, `pipeline/`, `codewalk_config/`.
 - Cloud index tools (`codewalk_pull_index`, `codewalk_connect_repo`) talk to `CODEWALK_SERVER_URL`.
 - HITL flow: `codewalk_approve_action()` sets `_pending_approval_token`; `codewalk_apply_fix()` requires the token.
 

@@ -321,7 +321,7 @@ def _allowed_index_branches(repo: dict) -> list[str]:
     Before the repo has been cloned we fall back to the default branch list so we
     do not create a non-empty directory that would break the subsequent git clone.
     """
-    from src.codewalk.team_config import load_codewalk_yaml, index_branches
+    from src.codewalk.codewalk_config import load_codewalk_yaml, index_branches
     from src.codewalk.repo_discovery import ensure_codewalk_yaml
 
     storage = repo.get("storage_path") or f"/var/codewalk/repos/{repo['full_name']}"
@@ -724,7 +724,7 @@ def _collection_name(repo_full_name: str) -> str:
 
 def _analyze_repo(repo_path: Path, repo_full_name: str, run_id: str) -> dict:
     """Run the FULL /analyze pipeline into incoming/, then caller publishes via atomic_swap."""
-    from src.codewalk.team_config import load_codewalk_yaml
+    from src.codewalk.codewalk_config import load_codewalk_yaml
     from src.codewalk.pipeline import full_index_parallel, build_full_analysis
 
     try:
@@ -739,7 +739,7 @@ def _analyze_repo(repo_path: Path, repo_full_name: str, run_id: str) -> dict:
             repo_path=str(repo_path),
             collection_name=col,
             persist_dir=persist_dir,
-            team_config=config,
+            codewalk_config=config,
         )
 
         guidelines_path = ""
@@ -774,7 +774,7 @@ def _analyze_repo(repo_path: Path, repo_full_name: str, run_id: str) -> dict:
 
 def _run_incremental_index(repo_path: Path, repo_full_name: str, run_id: str) -> dict:
     """Incremental re-index into incoming/ (seeded from latest), then caller publishes."""
-    from src.codewalk.team_config import load_codewalk_yaml, team_scan_directory
+    from src.codewalk.codewalk_config import load_codewalk_yaml, codewalk_scan_directory
     from src.codewalk.pipeline import reindex, build_full_analysis
 
     try:
@@ -791,10 +791,10 @@ def _run_incremental_index(repo_path: Path, repo_full_name: str, run_id: str) ->
             repo_path=str(repo_path),
             collection_name=col,
             persist_dir=persist_dir,
-            team_config=config,
+            codewalk_config=config,
         )
 
-        files = team_scan_directory(str(repo_path), config)
+        files = codewalk_scan_directory(str(repo_path), config)
 
         # Rebuild DuckDB + KG from every chunk currently in ChromaDB, not just
         # the changed ones, so the graph store stays consistent.
@@ -901,7 +901,7 @@ async def github_webhook(request: Request):
         raise HTTPException(500, "Failed to register repository")
 
     # ── Branch allowlist (codewalk.yaml indexing.branches) ────────────
-    from src.codewalk.team_config import branch_allowed
+    from src.codewalk.codewalk_config import branch_allowed
 
     allowed = _allowed_index_branches(repo)
     if not branch_allowed(branch, allowed):

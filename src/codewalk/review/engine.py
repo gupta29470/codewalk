@@ -83,7 +83,7 @@ from src.codewalk.review.utils import (
     get_full_file_tree,
     load_code_guidelines_text,
 )
-from src.codewalk.team_config import load_codewalk_yaml
+from src.codewalk.codewalk_config import load_codewalk_yaml
 
 
 @dataclass

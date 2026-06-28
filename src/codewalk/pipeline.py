@@ -113,11 +113,11 @@ def chunk_and_embed_parallel(files: list[dict]) -> tuple[list[dict], int]:
     return all_embedded, chunk_count[0]
 
 def full_index_parallel(repo_path: str = "", collection_name: str = "codebase",
-                        persist_dir: str = "./data/chroma", team_config=None) -> dict:
+                        persist_dir: str = "./data/chroma", codewalk_config=None) -> dict:
     """Full pipeline: scan → chunk → embed → store. Nukes old data first.
 
     Args:
-        team_config: If provided, uses team_scan_directory (exclude-only).
+        codewalk_config: If provided, uses codewalk_scan_directory (exclude-only).
                      If None, uses scan_directory (file_filter defaults).
     """
     if not repo_path:
@@ -128,9 +128,9 @@ def full_index_parallel(repo_path: str = "", collection_name: str = "codebase",
     tech_stack = detect_tech_stack(repo_path)
     _log(f"[parallel] Tech stack: {tech_stack}")
 
-    if team_config:
-        from src.codewalk.team_config import team_scan_directory
-        files = team_scan_directory(repo_path, team_config)
+    if codewalk_config:
+        from src.codewalk.codewalk_config import codewalk_scan_directory
+        files = codewalk_scan_directory(repo_path, codewalk_config)
     else:
         files = scan_directory(repo_path)
     _log(f"[parallel] Scanned {len(files)} files")
@@ -268,7 +268,7 @@ def index_from_paths_parallel(paths: list[str], repo_path: str = "",
 
 
 def reindex(repo_path: str = "", collection_name: str = "codebase",
-            persist_dir: str = "./data/chroma", team_config=None) -> dict:
+            persist_dir: str = "./data/chroma", codewalk_config=None) -> dict:
     """Smart re-index: only re-embed files that changed, add new, remove deleted.
 
     Thin wrapper around incremental_reindex() that processes ALL indexed files.
@@ -282,14 +282,14 @@ def reindex(repo_path: str = "", collection_name: str = "codebase",
 
     # If nothing indexed yet, scan disk for all files
     if not indexed_files:
-        if team_config:
-            from src.codewalk.team_config import team_scan_directory
-            all_files = team_scan_directory(repo_path, team_config)
+        if codewalk_config:
+            from src.codewalk.codewalk_config import codewalk_scan_directory
+            all_files = codewalk_scan_directory(repo_path, codewalk_config)
         else:
             all_files = scan_directory(repo_path)
         indexed_files = [f["file_path"] for f in all_files]
 
-    result = incremental_reindex(indexed_files, repo_path, collection_name, persist_dir=persist_dir, team_config=team_config)
+    result = incremental_reindex(indexed_files, repo_path, collection_name, persist_dir=persist_dir, codewalk_config=codewalk_config)
 
     # Map to return format for /analyze callers
     return {
@@ -310,7 +310,7 @@ def incremental_reindex(
     repo_path: str = "",
     collection_name: str = "codebase",
     persist_dir: str = "./data/chroma",
-    team_config=None,
+    codewalk_config=None,
 ) -> dict:
     """Incremental reindex — only re-embeds files whose content changed.
 
@@ -323,7 +323,7 @@ def incremental_reindex(
         repo_path: Root of the repository (required).
         collection_name: ChromaDB collection name (default "codebase").
         persist_dir: ChromaDB directory.
-        team_config: If provided, uses team_scan_directory instead of scan_directory.
+        codewalk_config: If provided, uses codewalk_scan_directory instead of scan_directory.
 
     Returns:
         dict with keys: repo_path, files_on_disk, files_skipped,
@@ -334,9 +334,9 @@ def incremental_reindex(
     pipeline_start = time.time()
 
     # Step 1: Scan disk → match against selected paths
-    if team_config:
-        from src.codewalk.team_config import team_scan_directory
-        all_files = team_scan_directory(repo_path, team_config)
+    if codewalk_config:
+        from src.codewalk.codewalk_config import codewalk_scan_directory
+        all_files = codewalk_scan_directory(repo_path, codewalk_config)
     else:
         all_files = scan_directory(repo_path)
 
@@ -496,7 +496,7 @@ def build_full_analysis(
 ) -> dict:
     """Stateless analysis: deps → modules → DuckDB → knowledge-graph → docs → guidelines.
 
-    Caller must scan first (scan_directory or team_scan_directory) and pass files.
+    Caller must scan first (scan_directory or codewalk_scan_directory) and pass files.
     Shared by CLI, worker, MCP, and API — zero duplication.
 
     Args:
