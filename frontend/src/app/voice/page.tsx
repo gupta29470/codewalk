@@ -131,11 +131,11 @@ export default function VoicePage() {
     }
 
     return (
-        <div className="flex flex-col h-[calc(100vh-3rem)]">
-            <h1 className="text-2xl font-bold mb-4">Voice Assistant</h1>
+        <div className="flex flex-col h-full p-6">
+            <h1 className="text-2xl font-bold mb-4 text-kinetic-on-surface">Voice Assistant</h1>
 
             {/* Messages */}
-            <Card className="flex-1 overflow-hidden">
+            <Card className="flex-1 overflow-hidden border-kinetic-border bg-kinetic-surface-container-low">
                 <ScrollArea className="h-full p-4" ref={scrollRef}>
                     <div className="space-y-4">
                         {messages.map((msg, idx) => (
@@ -145,29 +145,29 @@ export default function VoicePage() {
                                     }`}
                             >
                                 {msg.role === "assistant" && (
-                                    <div className="h-8 w-8 rounded-full bg-primary flex items-center justify-center flex-shrink-0">
-                                        <Bot className="h-4 w-4 text-primary-foreground" />
+                                    <div className="h-8 w-8 rounded-full bg-kinetic-primary flex items-center justify-center flex-shrink-0">
+                                        <Bot className="h-4 w-4 text-kinetic-on-primary" />
                                     </div>
                                 )}
                                 <div
-                                    className={`max-w-[75%] rounded-lg px-4 py-2 text-sm ${msg.role === "user"
-                                        ? "bg-primary text-primary-foreground"
-                                        : "bg-muted"
+                                    className={`max-w-[75%] rounded-md px-4 py-2 text-sm ${msg.role === "user"
+                                        ? "bg-kinetic-primary text-kinetic-on-primary"
+                                        : "bg-kinetic-surface-container text-kinetic-on-surface border border-kinetic-border"
                                         }`}
                                 >
                                     {msg.role === "assistant" ? (
                                         <div>
                                             {msg.tool && (
-                                                <span className="text-xs text-muted-foreground block mb-1">
+                                                <span className="text-xs text-kinetic-on-surface-variant block mb-1">
                                                     🔧 {msg.tool}
                                                 </span>
                                             )}
                                             {msg.speech && msg.speech !== msg.content && (
-                                                <div className="mb-3 p-3 bg-primary/5 rounded-md border border-primary/10">
-                                                    <span className="text-xs font-medium text-primary block mb-1">
+                                                <div className="mb-3 p-3 rounded-md border border-kinetic-primary/20 bg-kinetic-primary/10">
+                                                    <span className="text-xs font-medium text-kinetic-primary block mb-1">
                                                         🔊 Voice
                                                     </span>
-                                                    <p className="text-sm">{msg.speech}</p>
+                                                    <p className="text-sm text-kinetic-on-surface">{msg.speech}</p>
                                                 </div>
                                             )}
                                             <div className="prose prose-sm dark:prose-invert max-w-none">
@@ -176,7 +176,7 @@ export default function VoicePage() {
                                             {msg.audioBase64 && (
                                                 <button
                                                     onClick={() => playAudio(msg.audioBase64!)}
-                                                    className="mt-2 text-xs text-muted-foreground hover:text-foreground flex items-center gap-1"
+                                                    className="mt-2 text-xs text-kinetic-on-surface-variant hover:text-kinetic-on-surface flex items-center gap-1"
                                                 >
                                                     <Volume2 className="h-3 w-3" />
                                                     Replay
@@ -188,8 +188,8 @@ export default function VoicePage() {
                                     )}
                                 </div>
                                 {msg.role === "user" && (
-                                    <div className="h-8 w-8 rounded-full bg-muted flex items-center justify-center flex-shrink-0">
-                                        <User className="h-4 w-4" />
+                                    <div className="h-8 w-8 rounded-full bg-kinetic-surface-container flex items-center justify-center flex-shrink-0 border border-kinetic-border">
+                                        <User className="h-4 w-4 text-kinetic-on-surface" />
                                     </div>
                                 )}
                             </div>
@@ -197,11 +197,11 @@ export default function VoicePage() {
 
                         {processing && (
                             <div className="flex gap-3 justify-start">
-                                <div className="h-8 w-8 rounded-full bg-primary flex items-center justify-center flex-shrink-0">
-                                    <Bot className="h-4 w-4 text-primary-foreground" />
+                                <div className="h-8 w-8 rounded-full bg-kinetic-primary flex items-center justify-center flex-shrink-0">
+                                    <Bot className="h-4 w-4 text-kinetic-on-primary" />
                                 </div>
-                                <div className="bg-muted rounded-lg px-4 py-2 text-sm flex items-center gap-2">
-                                    <Loader2 className="h-4 w-4 animate-spin" />
+                                <div className="bg-kinetic-surface-container border border-kinetic-border rounded-md px-4 py-2 text-sm flex items-center gap-2 text-kinetic-on-surface">
+                                    <Loader2 className="h-4 w-4 animate-spin text-kinetic-primary" />
                                     Transcribing & thinking...
                                 </div>
                             </div>
@@ -215,7 +215,7 @@ export default function VoicePage() {
                 <Button
                     size="lg"
                     variant={recording ? "destructive" : "default"}
-                    className="rounded-full h-16 w-16"
+                    className={`rounded-full h-16 w-16 ${recording ? "" : "bg-kinetic-primary text-kinetic-on-primary hover:bg-kinetic-primary/90"}`}
                     onClick={recording ? stopRecording : startRecording}
                     disabled={processing}
                 >
@@ -228,7 +228,7 @@ export default function VoicePage() {
                     )}
                 </Button>
             </div>
-            <p className="text-center text-xs text-muted-foreground mt-2 mb-4">
+            <p className="text-center text-xs text-kinetic-on-surface-variant mt-2 mb-4">
                 {recording
                     ? "Recording... click to stop"
                     : processing

@@ -142,7 +142,7 @@ Runs: static analysis → batch review (parallel LLM) → dedup → verify → c
 | 🕸️ **Dependency Graph** | Parses imports across 15+ languages via tree-sitter |
 | 💥 **Blast Radius** | BFS on reversed dependency graph → shows transitive impact of any change |
 | 📖 **Reading Order** | Topological sort → "read config.py before embedder.py because embedder imports config" |
-| 🔄 **Execution Flow** | Entry points, module/file dependency chains, Mermaid diagrams |
+| 🔄 **Execution Flow** | Entry points, module/file dependency chains, D3/ELK diagrams |
 | 🤖 **AI Chat** | LangGraph agent with 7 tools, multi-turn conversation with memory |
 | 🔎 **Semantic Search** | ChromaDB vector search on embedded code chunks (RAG) |
 | 🔬 **Code Review** | Multi-stage review pipeline: test coverage, blast radius, guidelines RAG, context-enriched deep analysis |
@@ -240,10 +240,22 @@ Codewalk ships with a Next.js frontend for visual codebase exploration.
 - **Blast Radius / Diff mode** — visually highlight changed and affected nodes.
 - **Themes** — switch between presets (Dark Gold, Dark Ocean, Dark Forest, Dark Rose, Light Minimal), accent colors, and heading fonts; your choice is saved locally.
 - **Info Panel** — unified node details, metrics, source preview, and project overview.
-- **Sidebar tab lock** — index-dependent tabs stay locked until `GET /index-status` reports `indexed: true`.
+- **KineticShell navigation** — index-dependent tabs stay locked until `GET /index-status` reports `indexed: true`.
 - **Cloud Admin** — visit `/admin` to register repos, list repos, trigger indexing, copy tokens, and check server health/version.
 
 ### Run it
+
+#### Quick start from a target repo
+
+If you already have the Codewalk repo cloned elsewhere, run the combined launcher from the repo you want to explore:
+
+```bash
+/path/to/codewalk/scripts/run-ui-for-repo.sh
+```
+
+This starts the API from your current directory (discovering `codewalk.yaml`) and the frontend from the Codewalk checkout, automatically setting `CODEWALK_REPO_PATH` so the UI reads `.codewalk/` from your repo.
+
+#### Frontend-only development
 
 ```bash
 cd frontend
@@ -386,6 +398,18 @@ ollama pull qwen2.5-coder:7b
 
 ### Option 1: Web UI
 
+**Quick launch from a target repo (recommended for exploration):**
+
+From the repo you want to explore, run the combined launcher in the Codewalk checkout:
+
+```bash
+/path/to/codewalk/scripts/run-ui-for-repo.sh
+```
+
+It kills any process on ports 8000/3000, starts the API from the target repo, starts the frontend from the Codewalk checkout, and sets `CODEWALK_REPO_PATH` automatically. Then open **http://localhost:3000**.
+
+**Manual two-terminal setup (for frontend/backend development):**
+
 Open **two terminals** in **codewalk**:
 
 **Terminal 1 — Backend API**
@@ -416,11 +440,12 @@ Then explore:
 - **Modules** — browse all modules, click one for file list + dependencies
 - **Blast Radius** — which files break if you change each file
 - **Reading Order** — optimal file reading sequence with risk levels
-- **Execution Flow** — Mermaid diagram of module/file dependencies
+- **Execution Flow** — D3/ELK diagram of module/file dependencies
 - **Chat** — ask any question ("explain the authentication flow", "what does scanner.py do?")
 - **Code Review** — review git diffs, review single files, load team guidelines
 - **Voice** — click the mic, ask a question by speaking, hear the answer read aloud
 - **Smart Reindex** — incremental re-embed with stats (skipped, changed, deleted)
+- **Research** — deep cross-cutting reports with a structured architecture diagram card
 - **Cloud Admin** — `/admin` page for repo registration, token management, and server health
 
 ### Option 2: MCP Server (VS Code Copilot / Claude Code / Cursor)
@@ -862,7 +887,7 @@ or
 
 > **Note:** After indexing, the AI agent should automatically call these tools. If it doesn't, you can invoke them manually — the hints above tell you exactly which tools to run.
 
-> **Note:** This only happens once. Next time you say `@codewalk analyze this codebase`, it detects the existing index and skips straight to "ready."
+> **Note:** This only happens once. Next time you say `@codewalk analyze this codebase`, it detects a complete existing index and skips straight to "ready." If the index is partial (e.g., indexing was interrupted), it warns that the index is behind and tells you to run `codewalk_incremental_reindex`.
 
 ### ⚠️ If the AI Stops Mid-Workflow
 
@@ -870,7 +895,8 @@ The setup is now a single call — `codewalk_analyze_codebase` does everything. 
 
 | AI stopped after... | You call next |
 |---|---|
-| `codewalk_analyze_codebase` | Any query tool — `codewalk_get_overview`, `codewalk_search_codebase`, etc. |
+| `codewalk_analyze_codebase` (complete) | Any query tool — `codewalk_get_overview`, `codewalk_search_codebase`, etc. |
+| `codewalk_analyze_codebase` (interrupted / partial index) | `codewalk_incremental_reindex` to resume/sync |
 
 > **Tip:** Look for the **⏩ NEXT STEP** line at the bottom of each tool's output — it tells you exactly what to do.
 
@@ -1282,14 +1308,28 @@ curl -X POST http://localhost:8000/analyze \
   "repo_path": "/Users/you/projects/my-app",
   "files_scanned": 142,
   "chunks_created": 380,
-  "modules": ["api", "auth", "models", "utils", "frontend"]
+  "modules": ["api", "auth", "models", "utils", "frontend"],
+  "message": ""
 }
 ```
 
-- The repo is discovered from the current working directory via `codewalk.yaml` (auto-created if missing). `repo_path` is no longer accepted in the request body.
-- `index_mode`: `"auto"` (skip if indexed), `"reindex"` (smart update), `"full"` (wipe & rebuild)
+- The repo is discovered from the current working directory via `codewalk.yaml` (auto-created if missing). `repo_path` is optional in the request body and falls back to cwd discovery.
+- `index_mode`: `"auto"` (full build if no index; load if complete; `status="behind"` if partial), `"reindex"` (smart update/resume), `"full"` (wipe & rebuild)
 - `collection_name`: leave empty — reads `manifest.collection_name` if present, else repo folder name
-- **`auto` + index on disk** → load only (`load_scoped_analysis`), no re-embed — same idea as MCP `codewalk_analyze_codebase`
+- **`auto` + complete index** → load only (`load_scoped_analysis`), no re-embed — same idea as MCP `codewalk_analyze_codebase`
+- **`auto` + partial index** → returns `status="behind"` and a `message` telling you to run `POST /incremental-reindex` or `/analyze` with `index_mode="reindex"`
+
+**`status: "behind"` example:**
+```json
+{
+  "status": "behind",
+  "repo_path": "/Users/you/projects/my-app",
+  "files_scanned": 75,
+  "chunks_created": 210,
+  "modules": ["api", "auth", "models"],
+  "message": "Index is behind: 75/120 files indexed. Run incremental-reindex to sync."
+}
+```
 - **No index** → `full_index_parallel` with `codewalk.yaml` excludes (local embed on API server)
 
 #### `POST /analyze/stream` — Index with live progress (SSE)
@@ -1305,36 +1345,33 @@ curl -N -X POST http://localhost:8000/analyze/stream \
 | `step` | When |
 |--------|------|
 | `init` | Always first — checking existing index |
-| `skip` | `index_mode: auto` + `.codewalk/` on disk (load only), or non-full/reindex skip |
-| `scan` | Full index or reindex — file scan (`codewalk.yaml` excludes on full) |
-| `chunk` | Full index — parallel chunk + embed |
-| `embed` | Full index — embed count |
-| `store` | Full index — Chroma persist + manifest |
-| `reindex` | `index_mode: reindex` — new/changed/deleted counts |
+| `skip` | `index_mode: auto` + complete `.codewalk/` on disk (load only) |
+| `behind` | `index_mode: auto` + partial `.codewalk/` (missing files) |
+| `reindex` | `index_mode: reindex` — new/changed/deleted counts; also resumes a partial index |
+| `store` | Full index or reindex — Chroma persist + manifest write |
 | `analyze` | Dependency graph + module detection |
-| `agent` | `state.initialize` (DuckDB, docs, guidelines, agent) |
 | `done` | Success (`result` object on final event when complete) |
 | `error` | Exception message |
 
-**`index_mode: auto` + existing `.codewalk/`** (fast path):
+**`index_mode: auto` + complete `.codewalk/`** (fast path):
 ```
 data: {"step": "init", "message": "Checking existing index..."}
 data: {"step": "skip", "message": "Loaded existing index (380 chunks)"}
 data: {"step": "done", "message": "Analysis complete!", "result": {...}}
 ```
 
+**`index_mode: auto` + partial `.codewalk/`** (index behind):
+```
+data: {"step": "init", "message": "Checking existing index..."}
+data: {"step": "behind", "message": "Index is behind: 75/120 files indexed. Run incremental-reindex to sync."}
+data: {"step": "done", "message": "Analysis complete!", "result": {"status": "behind", ...}}
+```
+
 **`index_mode: full`** (or empty index):
 ```
 data: {"step": "init", "message": "Checking existing index..."}
-data: {"step": "scan", "message": "Scanning directory..."}
-data: {"step": "scan", "message": "Scanned 142 files (codewalk.yaml excludes applied)"}
-data: {"step": "chunk", "message": "Chunking + embedding in parallel..."}
-data: {"step": "chunk", "message": "Created 380 chunks"}
-data: {"step": "embed", "message": "Embedded 380 chunks"}
-data: {"step": "store", "message": "Storing in vector database..."}
-data: {"step": "store", "message": "Stored 380 chunks in ChromaDB"}
+data: {"step": "store", "message": "Indexed 142 files (380 chunks)"}
 data: {"step": "analyze", "message": "Building dependency graph..."}
-data: {"step": "agent", "message": "Creating AI agent..."}
 data: {"step": "analyze", "message": "Detected 5 modules"}
 data: {"step": "done", "message": "Analysis complete!", "result": {...}}
 ```
@@ -1357,7 +1394,7 @@ curl "http://localhost:8000/index-status?repo_path=/Users/you/projects/my-app" |
 }
 ```
 
-The frontend sidebar uses this endpoint to lock index-dependent tabs until `indexed: true`.
+The frontend `KineticShell` uses this endpoint to lock index-dependent tabs until `indexed: true`.
 
 ### API endpoints — index requirements (parity with MCP)
 
@@ -1366,7 +1403,7 @@ All query endpoints call `state.require_index()` — auto-loads `.codewalk/` fro
 | Endpoint | Index required? | MCP equivalent | Notes |
 |----------|-----------------|----------------|-------|
 | `POST /analyze` | Builds or loads | `codewalk_analyze_codebase` | API: `full_index_parallel`; MCP local: `index_from_paths_parallel` |
-| `POST /analyze/stream` | Builds or loads | same (SSE progress) | Steps: `init`→`skip`/`scan`→`chunk`→`embed`→`store`→`analyze`→`agent`→`done` |
+| `POST /analyze/stream` | Builds or loads | same (SSE progress) | Steps: `init`→`skip`/`behind`/`reindex`/`store`→`analyze`→`done` |
 | `POST /chat`, `/chat/stream` | Yes | agent + tools | API HITL via `POST /chat/approve` |
 | `GET /overview` | Yes | `codewalk_get_overview` | |
 | `GET /modules`, `/modules/{name}` | Yes | `codewalk_get_module_info` | |
@@ -1465,13 +1502,15 @@ curl http://localhost:8000/overview
     {"name": "api", "file_count": 12, "depends_on": ["auth", "models"]},
     {"name": "auth", "file_count": 5, "depends_on": ["models"]}
   ],
-  "diagram": "graph TD\n    api --> auth\n    api --> models\n    auth --> models",
+  "diagram": null,
   "overview_text": "## Project Overview\nTech stack: Python, FastAPI...",
   "riskiest_files": [
     {"file": "models/base.py", "risk_level": "high", "affected_files": 23}
   ]
 }
 ```
+
+`diagram` is optional (`str | None`) and currently always `null`.
 
 #### `GET /modules` — List all modules
 
@@ -1978,8 +2017,8 @@ Push to `master` → build image → GHCR → deploy to Hetzner (`deploy-server.
 │                     CORE LAYER (v2.4–v2.7)               │
 │                                                          │
 │   core/reflect.py   → Actor→Critic→Improve loop         │
-│   core/hitl.py      → LangGraph interrupts + checkpoint │
-│   core/fanout.py    → Parallel fan-out/fan-in graphs    │
+│   core/hitl.py      → LangGraph interrupts + SQLite/AsyncSqliteSaver checkpoint │
+│   core/fanout.py    → Parallel fan-out/fan-in graphs (`build_fanout_graph`)    │
 │                                                          │
 │   Used by: agent (hitl), research (reflect + fanout)    │
 │   — generic, composable, zero duplication                │
@@ -2053,11 +2092,11 @@ codewalk/
 │   │   ├── deep_research.py       #   End-to-end deep research entry point
 │   │   ├── researcher.py          #   Parallel search + synthesis
 │   │   ├── planner.py             #   Decompose question into sub-questions
-│   │   └── synthesizer.py         #   Merge parallel findings into report
+│   │   ├── synthesizer.py         #   Merge parallel findings into report
+│   │   └── diagram_generator.py   #   Structured research architecture diagrams
 │   ├── generation/                # Explanation / diagram generation
 │   │   ├── overview_generator.py  #   Project overview text
 │   │   ├── module_explainer.py    #   Module-level explanations
-│   │   ├── diagram_generator.py   #   Mermaid diagrams
 │   │   └── flow_generator.py      #   Execution flow diagrams
 │   ├── doc_knowledge/             # Docs & guidelines indexing
 │   │   ├── doc_parser.py          #   Parse .md/.pdf/.txt/.rst
@@ -2156,6 +2195,7 @@ codewalk/
 | `CODEWALK_SERVER_URL` | — | MCP: cloud API URL, e.g. `https://api.codewalk.xyz` |
 | `CODEWALK_REPO_NAME` | — | MCP: `owner/repo` slug |
 | `CODEWALK_REPO_TOKEN` | — | MCP: per-repo download token (`cw_repo_...`) |
+| `CODEWALK_REPO_PATH` | — | Frontend dev mode: path to the target repo for filesystem API routes (`/api/knowledge-graph`, `/api/file-content`, `/api/diff-overlay`). Set automatically by `scripts/run-ui-for-repo.sh` |
 
 ---
 
@@ -2220,8 +2260,8 @@ Add this to each target repo's `.gitignore`:
 | **Embeddings** | Jina Code Embeddings 1.5B (768-dim, Ollama/MPS) |
 | **Code Parsing** | Tree-sitter (15+ language grammars) |
 | **Frontend** | Next.js 14, React 18, TypeScript 5 |
-| **Styling** | Tailwind CSS, shadcn/ui |
-| **Diagrams** | Mermaid.js |
+| **Styling** | Tailwind CSS, shadcn/ui, Kinetic design system (`kinetic-*` CSS tokens, `KineticShell`, `StatusBadge`, `SegmentedControl`) |
+| **Diagrams** | D3 + ELK (execution flow / architecture), React Flow-style research diagram, custom SVG/canvas for knowledge graph |
 | **MCP** | Model Context Protocol (stdio transport) |
 
 ---

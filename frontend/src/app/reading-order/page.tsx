@@ -35,39 +35,47 @@ export default function ReadingOrderPage() {
 
     if (loading) {
         return (
-            <div className="flex items-center justify-center min-h-[60vh]">
-                <Loader2 className="h-8 w-8 animate-spin text-muted-foreground" />
+            <div className="flex items-center justify-center min-h-full p-6">
+                <Loader2 className="h-8 w-8 animate-spin text-kinetic-primary" />
             </div>
         );
     }
 
     if (error) {
         return (
-            <div className="p-4 bg-destructive/10 text-destructive rounded-md">
-                {error}
+            <div className="p-6">
+                <div className="p-4 bg-kinetic-error/10 text-kinetic-error rounded-md border border-kinetic-error/20">
+                    {error}
+                </div>
             </div>
         );
     }
 
     return (
-        <div className="space-y-6">
+        <div className="p-6 space-y-6 max-w-6xl">
             <div className="flex items-center justify-between">
                 <div>
-                    <h1 className="text-2xl font-bold">Code Reading Guide</h1>
-                    <p className="text-muted-foreground mt-1">
+                    <h1 className="text-2xl font-bold text-kinetic-on-surface">Code Reading Guide</h1>
+                    <p className="text-kinetic-on-surface-variant mt-1">
                         Start here, read in this order
                     </p>
                 </div>
-                <Button variant="outline" size="sm" onClick={fetchData} disabled={loading}>
+                <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={fetchData}
+                    disabled={loading}
+                    className="border-kinetic-border bg-kinetic-surface-container text-kinetic-on-surface hover:bg-kinetic-surface-container-high hover:text-kinetic-on-surface"
+                >
                     <RefreshCw className={`h-4 w-4 mr-1 ${loading ? "animate-spin" : ""}`} />
                     Refresh
                 </Button>
             </div>
 
             {/* Reading Order */}
-            <Card>
+            <Card className="border-kinetic-border bg-kinetic-surface-container-low">
                 <CardHeader>
-                    <CardTitle>Recommended Reading Order</CardTitle>
+                    <CardTitle className="text-kinetic-on-surface">Recommended Reading Order</CardTitle>
                 </CardHeader>
                 <CardContent className="space-y-0">
                     {order?.order.map((item, idx) => (
@@ -75,33 +83,33 @@ export default function ReadingOrderPage() {
                             <div className="flex items-start gap-3 py-3">
                                 <div className="flex items-center gap-2 mt-0.5">
                                     {item.priority === "must-read" && (
-                                        <Star className="h-4 w-4 text-yellow-500 fill-yellow-500" />
+                                        <Star className="h-4 w-4 text-kinetic-tertiary fill-kinetic-tertiary" />
                                     )}
-                                    <span className="text-sm font-medium text-muted-foreground w-6">
+                                    <span className="text-sm font-medium text-kinetic-on-surface-variant w-6">
                                         {idx + 1}.
                                     </span>
                                 </div>
                                 <div className="flex-1 space-y-1">
                                     <div className="flex items-center gap-2">
-                                        <span className="font-mono text-sm font-medium">
+                                        <span className="font-mono text-sm font-medium text-kinetic-on-surface">
                                             {item.file}
                                         </span>
                                         {item.risk_level && <RiskBadge level={item.risk_level} />}
                                     </div>
-                                    <p className="text-sm text-muted-foreground">{item.reason}</p>
+                                    <p className="text-sm text-kinetic-on-surface-variant">{item.reason}</p>
                                     {item.direct && item.direct.length > 0 && (
-                                        <p className="text-xs text-muted-foreground">
+                                        <p className="text-xs text-kinetic-on-surface-variant">
                                             Used by: {item.direct.join(", ")}
                                         </p>
                                     )}
                                 </div>
                                 {item.affected_files !== undefined && (
-                                    <span className="text-xs text-muted-foreground whitespace-nowrap">
+                                    <span className="text-xs text-kinetic-on-surface-variant whitespace-nowrap">
                                         {item.affected_files} dependents
                                     </span>
                                 )}
                             </div>
-                            {idx < (order?.order.length ?? 0) - 1 && <Separator />}
+                            {idx < (order?.order.length ?? 0) - 1 && <Separator className="bg-kinetic-border" />}
                         </div>
                     ))}
                 </CardContent>

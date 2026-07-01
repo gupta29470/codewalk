@@ -16,9 +16,12 @@ This package exposes Codewalk as an HTTP API and manages shared in-memory state 
 ```
 POST /analyze
     ↓
-state.set_repo_path() + full_index_parallel / reindex
+state.set_repo_path() + analyze_or_reindex_index(mode=auto|reindex|full)
     ↓
-state.initialize() → build_full_analysis + GraphStore + GraphRuntime + agent
+{no index} → full_index_parallel → build_full_analysis
+{complete index} → load_scoped_analysis
+{partial index} → status="behind" warning + message
+{reindex/full} → incremental_reindex / full_index_parallel, then build_full_analysis
     ↓
 query/review/chat endpoints read from state
 ```
@@ -45,9 +48,11 @@ query/review/chat endpoints read from state
 - Docs endpoints accept `repo_path`; `/review/guidelines` honours the requested guidelines path.
 - `/semantic-search` uses the repo's stored collection and the shared `state.get_store()`.
 - `/analyze` (sync + stream) refreshes the `VectorStore` handle after indexing so `state.get_store()` always points at live Chroma collections.
+- `AnalyzeResponse` now includes a `message` field (used for the `behind` warning).
 - `chat_approve` preserves `HTTPException` and maps `RuntimeError` to 400.
 - Catch-up indexing inserts and updates a `jobs` row so `/admin/repos` shows the current run.
 
 ## Notes
 
 - Incremental reindex updates Chroma incrementally, then fully rebuilds DuckDB and `knowledge-graph.json` from all Chroma chunks so the `chunks` table stays consistent.
+- `POST /analyze` with `index_mode="auto"` no longer silently resumes partial indexes; it returns `status="behind"` and a message telling the caller to use `POST /incremental-reindex` or `POST /analyze` with `index_mode="reindex"`.

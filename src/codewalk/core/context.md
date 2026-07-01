@@ -6,7 +6,7 @@ This package contains small reusable LangGraph building blocks used by the agent
 
 | File | Role |
 |------|------|
-| `fanout.py` | `create_fanout_graph()` — runs N parallel sub-tasks (e.g. research sub-questions) and aggregates results. |
+| `fanout.py` | `build_fanout_graph()` — runs N parallel sub-tasks (e.g. research sub-questions) and aggregates results. |
 | `reflect.py` | Reflection/critic node utilities for self-critique loops. |
 | `hitl.py` | Human-in-the-loop interrupt utilities used by `agent/graph.py` and `agent/tools.py`.
 
@@ -17,4 +17,4 @@ This package contains small reusable LangGraph building blocks used by the agent
 
 ## Recent fixes
 
-- `core/hitl.py` wraps compiled LangGraph graphs in `_ThreadSafeGraph`, serializing `invoke`/`stream`/`ainvoke`/`astream` with an `RLock` so the SQLite checkpointer is not accessed concurrently from multiple API worker threads.
+- `core/hitl.py` wraps compiled LangGraph graphs in `_ThreadSafeGraph`, serializing `invoke`/`stream`/`ainvoke`/`astream` with an `RLock` so the SQLite checkpointer is not accessed concurrently from multiple API worker threads. It also supports `async_checkpointer=True` (used by `research/deep_research.py`) which returns an async context wrapping `AsyncSqliteSaver`.

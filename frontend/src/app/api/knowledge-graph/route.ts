@@ -5,10 +5,13 @@ import { dirname, basename, join, resolve } from "path";
 import type { NextRequest } from "next/server";
 
 function candidatePaths(repoPath?: string | null): string[] {
-  // When a repoPath is explicitly provided, only look in that repo.
-  // This prevents showing the wrong repo's graph when the target repo isn't indexed yet.
-  if (repoPath) {
-    return [join(repoPath, ".codewalk", "knowledge-graph.json")];
+  // When a repoPath is explicitly provided (query param or env var), only look
+  // in that repo. This prevents showing the wrong repo's graph when the target
+  // repo isn't indexed yet, and lets the UI be launched from the Codewalk
+  // checkout while reading indexes from the user's repo.
+  const explicitRepo = repoPath || process.env.CODEWALK_REPO_PATH;
+  if (explicitRepo) {
+    return [join(explicitRepo, ".codewalk", "knowledge-graph.json")];
   }
 
   const cwd = process.cwd();

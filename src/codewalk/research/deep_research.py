@@ -1,12 +1,13 @@
 """Deep research fan-out orchestrator: plan, search, synthesize, reflect."""
 from __future__ import annotations
+import asyncio
 from typing import TypedDict, Any, Annotated
 import operator
 
 from src.codewalk.research.planner import decompose, SubQuestion
 from src.codewalk.research.researcher import make_researcher, SubFindings
 from src.codewalk.research.synthesizer import (
-    merge_findings, synthesize, StructuredReport,
+    merge_findings, make_synthesizer, StructuredReport,
     SYNTHESIS_CRITIC_PROMPT,
 )
 from src.codewalk.core.fanout import build_fanout_graph
@@ -59,6 +60,50 @@ def _improve_report(report: StructuredReport, critique: str) -> StructuredReport
         sources=report.sources,
     )
 
+
+async def _run_research_pipeline(
+    question: str,
+    sub_questions: list[SubQuestion],
+    store: VectorStore,
+    graph_store: GraphStore | None,
+    interrupt_before_research: bool,
+) -> StructuredReport:
+    """Async research execution: build graph, compile with async checkpointer, run."""
+    parallel_nodes = {
+        sub_question.id: make_researcher(sub_question, store, graph_store)
+        for sub_question in sub_questions
+    }
+
+    builder = build_fanout_graph(
+        state_type=ResearchState,
+        parallel_nodes=parallel_nodes,
+        merge_node=merge_findings,
+        generate_node=make_synthesizer(graph_store),
+    )
+
+    interrupt_nodes = [list(parallel_nodes.keys())[0]] if interrupt_before_research else []
+    graph_ctx = compile_with_hitl(
+        builder,
+        interrupt_nodes=interrupt_nodes,
+        async_checkpointer=True,
+    )
+
+    initial_state = {
+        "question": question,
+        "results": [],
+        "merged_findings": [],
+        "report": None,
+    }
+
+    async with graph_ctx as graph:
+        result = await graph.ainvoke(
+            initial_state,
+            config={"configurable": {"thread_id": f"research-{hash(question)}"}},
+        )
+
+    return result["report"]
+
+
 def deep_research(question: str,
     store: VectorStore,
     graph_store: GraphStore | None = None,
@@ -79,38 +124,16 @@ def deep_research(question: str,
     # Step 1: Decompose question → sub-questions
     sub_questions: list[SubQuestion] = decompose(question, depth)
 
-    # Step 2: Build parallel_nodes — one researcher per sub-question
-    parallel_nodes = {
-        sub_question.id: make_researcher(sub_question, store, graph_store)
-        for sub_question in sub_questions
-    }
-
-    # Step 3: Build fanout graph (topology only — no checkpointing yet)
-    builder = build_fanout_graph(
-        state_type=ResearchState,
-        parallel_nodes=parallel_nodes,
-        merge_node=merge_findings,
-        generate_node=synthesize,
+    # Step 2-5: Build and run the async research graph
+    draft_report: StructuredReport = asyncio.run(
+        _run_research_pipeline(
+            question,
+            sub_questions,
+            store,
+            graph_store,
+            interrupt_before_research,
+        )
     )
-
-    # Step 4: Compile with hitl — optional interrupt before fan-out
-    interrupt_nodes = [list(parallel_nodes.keys())[0]] if interrupt_before_research else []
-    graph = compile_with_hitl(builder, interrupt_nodes=interrupt_nodes)
-
-    # Step 5: Run fanout — all N researchers execute in parallel
-    import asyncio
-    initial_state = {
-        "question": question,
-        "results": [],           # Annotated[list, operator.add] — researchers append here
-        "merged_findings": [],
-        "report": None,
-    }
-
-    result = asyncio.run(
-        graph.ainvoke(initial_state, config={"configurable": {"thread_id": f"research-{hash(question)}"}})
-    )
-
-    draft_report: StructuredReport = result["report"]
 
     # Step 6: Reflect — critic pass on the synthesized report
     improved_report = reflect(
@@ -122,5 +145,3 @@ def deep_research(question: str,
     )
 
     return improved_report
-
-

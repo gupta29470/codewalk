@@ -149,6 +149,7 @@ function KnowledgeGraphViewInner() {
   const diffMode = useKgStore((s) => s.diffMode);
   const changedNodeIds = useKgStore((s) => s.changedNodeIds);
   const affectedNodeIds = useKgStore((s) => s.affectedNodeIds);
+  const activeLayerId = useKgStore((s) => s.activeLayerId);
 
   useGraphExport();
   useTourFitView();
@@ -168,6 +169,9 @@ function KnowledgeGraphViewInner() {
 
   const filteredGraph = useMemo((): KnowledgeGraph | null => {
     if (!graph) return null;
+    const activeLayer = activeLayerId ? graph.layers.find((l) => l.id === activeLayerId) : null;
+    const layerNodeIds = activeLayer ? new Set(activeLayer.nodeIds) : null;
+
     const codeFilters = new Set<string>();
     if (knowledgeViewFilter === "files" || knowledgeViewFilter === "both") {
       codeFilters.add("file");
@@ -179,6 +183,7 @@ function KnowledgeGraphViewInner() {
     }
 
     const filteredNodes = graph.nodes.filter((n) => {
+      if (layerNodeIds && !layerNodeIds.has(n.id)) return false;
       if (["article", "entity", "topic", "claim", "source"].includes(n.type)) {
         return nodeTypeFilters.knowledge !== false;
       }
@@ -189,7 +194,7 @@ function KnowledgeGraphViewInner() {
       (e) => filteredNodeIds.has(e.source) && filteredNodeIds.has(e.target),
     );
     return { ...graph, nodes: filteredNodes, edges: filteredEdges };
-  }, [graph, nodeTypeFilters, knowledgeViewFilter]);
+  }, [graph, activeLayerId, nodeTypeFilters, knowledgeViewFilter]);
 
   const { positionMap, edgeCounts } = useMemo(() => {
     if (!filteredGraph) return { positionMap: new Map(), edgeCounts: new Map() };
@@ -250,12 +255,16 @@ function KnowledgeGraphViewInner() {
         id: `ke-${i}`,
         source: e.source,
         target: e.target,
+        label: e.type,
         animated: !!connected,
         style: {
           stroke: "var(--kg-accent)",
           strokeWidth: connected ? 3 : 2,
           opacity: selectedNodeId ? (connected ? 1 : 0.12) : 1,
         },
+        labelStyle: { fill: "var(--kg-text-secondary)", fontSize: 10 },
+        labelShowBg: true,
+        labelBgStyle: { fill: "var(--kg-root)", fillOpacity: 0.8 },
       };
     });
 

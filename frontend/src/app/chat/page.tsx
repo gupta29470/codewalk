@@ -8,6 +8,7 @@ import { Card } from "@/components/ui/card";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Loader2, Send, Bot, User, Wifi, WifiOff, CheckCircle2, XCircle, AlertTriangle } from "lucide-react";
 import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
 
 interface Message {
     role: "user" | "assistant";
@@ -170,20 +171,20 @@ export default function ChatPage() {
     const showSuggestions = messages.length <= 1 && !loading && !hitlPending;
 
     return (
-        <div className="flex flex-col h-[calc(100vh-3rem)]">
+        <div className="flex flex-col h-full p-6">
             <div className="flex items-center justify-between mb-4">
-                <h1 className="text-2xl font-bold">Ask Codewalk</h1>
+                <h1 className="text-2xl font-bold text-kinetic-on-surface">Ask Codewalk</h1>
                 <div className="flex items-center gap-2 text-sm">
                     {connected ? (
-                        <><Wifi className="h-4 w-4 text-green-500" /><span className="text-muted-foreground">Connected</span></>
+                        <><Wifi className="h-4 w-4 text-kinetic-node-config" /><span className="text-kinetic-on-surface-variant">Connected</span></>
                     ) : (
-                        <><WifiOff className="h-4 w-4 text-red-500" /><span className="text-red-500">Backend offline — run `uvicorn src.codewalk.api.main:app`</span></>
+                        <><WifiOff className="h-4 w-4 text-kinetic-error" /><span className="text-kinetic-error">Backend offline — run `uvicorn src.codewalk.api.main:app`</span></>
                     )}
                 </div>
             </div>
 
             {/* Messages */}
-            <Card className="flex-1 overflow-hidden">
+            <Card className="flex-1 overflow-hidden border-kinetic-border bg-kinetic-surface-container-low">
                 <ScrollArea className="h-full p-4" ref={scrollRef}>
                     <div className="space-y-4">
                         {messages.map((msg, idx) => (
@@ -193,20 +194,31 @@ export default function ChatPage() {
                                     }`}
                             >
                                 {msg.role === "assistant" && (
-                                    <div className="h-8 w-8 rounded-full bg-primary flex items-center justify-center flex-shrink-0">
-                                        <Bot className="h-4 w-4 text-primary-foreground" />
+                                    <div className="h-8 w-8 rounded-full bg-kinetic-primary flex items-center justify-center flex-shrink-0">
+                                        <Bot className="h-4 w-4 text-kinetic-on-primary" />
                                     </div>
                                 )}
                                 <div
-                                    className={`max-w-[75%] rounded-lg px-4 py-2 text-sm ${msg.role === "user"
-                                        ? "bg-primary text-primary-foreground"
-                                        : "bg-muted"
+                                    className={`max-w-[75%] rounded-md px-4 py-2 text-sm ${msg.role === "user"
+                                        ? "bg-kinetic-primary text-kinetic-on-primary"
+                                        : "bg-kinetic-surface-container text-kinetic-on-surface border border-kinetic-border"
                                         }`}
                                 >
                                     {msg.role === "assistant" ? (
-                                        <div className="prose prose-sm dark:prose-invert max-w-none">
-                                            <ReactMarkdown>{msg.content}</ReactMarkdown>
-                                        </div>
+                                        msg.content === "" && loading ? (
+                                            <div className="flex items-center gap-2 text-kinetic-on-surface">
+                                                <Loader2 className="h-4 w-4 animate-spin flex-shrink-0 text-kinetic-primary" />
+                                                {activeToolName && (
+                                                    <span className="text-kinetic-on-surface-variant">
+                                                        {activeToolName.replace(/_/g, " ")}…
+                                                    </span>
+                                                )}
+                                            </div>
+                                        ) : (
+                                            <div className="prose prose-sm prose-invert max-w-none chat-message">
+                                                <ReactMarkdown remarkPlugins={[remarkGfm]}>{msg.content}</ReactMarkdown>
+                                            </div>
+                                        )
                                     ) : (
                                         <pre className="whitespace-pre-wrap font-sans">
                                             {msg.content}
@@ -214,8 +226,8 @@ export default function ChatPage() {
                                     )}
                                 </div>
                                 {msg.role === "user" && (
-                                    <div className="h-8 w-8 rounded-full bg-muted flex items-center justify-center flex-shrink-0">
-                                        <User className="h-4 w-4" />
+                                    <div className="h-8 w-8 rounded-full bg-kinetic-surface-container flex items-center justify-center flex-shrink-0 border border-kinetic-border">
+                                        <User className="h-4 w-4 text-kinetic-on-surface" />
                                     </div>
                                 )}
                             </div>
@@ -224,17 +236,17 @@ export default function ChatPage() {
                         {/* HITL Approval Card */}
                         {hitlPending && (
                             <div className="flex gap-3">
-                                <div className="h-8 w-8 rounded-full bg-primary flex items-center justify-center flex-shrink-0">
-                                    <Bot className="h-4 w-4 text-primary-foreground" />
+                                <div className="h-8 w-8 rounded-full bg-kinetic-primary flex items-center justify-center flex-shrink-0">
+                                    <Bot className="h-4 w-4 text-kinetic-on-primary" />
                                 </div>
-                                <Card className="bg-amber-50 dark:bg-amber-950 border-amber-200 dark:border-amber-800 p-4 max-w-[80%]">
+                                <Card className="bg-kinetic-tertiary/10 border-kinetic-tertiary/30 p-4 max-w-[80%]">
                                     <div className="flex items-start gap-2 mb-3">
-                                        <AlertTriangle className="h-5 w-5 text-amber-600 dark:text-amber-400 flex-shrink-0 mt-0.5" />
+                                        <AlertTriangle className="h-5 w-5 text-kinetic-tertiary flex-shrink-0 mt-0.5" />
                                         <div>
-                                            <p className="text-sm font-medium text-amber-800 dark:text-amber-200">
+                                            <p className="text-sm font-medium text-kinetic-tertiary">
                                                 The agent wants to apply a code fix
                                             </p>
-                                            <p className="text-xs text-amber-700 dark:text-amber-300 mt-1 font-mono">
+                                            <p className="text-xs text-kinetic-on-surface-variant mt-1 font-mono">
                                                 {hitlAction}
                                             </p>
                                         </div>
@@ -245,7 +257,7 @@ export default function ChatPage() {
                                             variant="default"
                                             onClick={() => handleHitl("approve")}
                                             disabled={hitlLoading}
-                                            className="bg-green-600 hover:bg-green-700"
+                                            className="bg-kinetic-node-config text-kinetic-on-primary hover:bg-kinetic-node-config/90"
                                         >
                                             <CheckCircle2 className="h-4 w-4 mr-1" />
                                             Approve
@@ -255,7 +267,7 @@ export default function ChatPage() {
                                             variant="outline"
                                             onClick={() => handleHitl("reject")}
                                             disabled={hitlLoading}
-                                            className="border-red-300 text-red-600 hover:bg-red-50 hover:text-red-700"
+                                            className="border-kinetic-error text-kinetic-error hover:bg-kinetic-error/10 hover:text-kinetic-error"
                                         >
                                             <XCircle className="h-4 w-4 mr-1" />
                                             Reject
@@ -265,21 +277,7 @@ export default function ChatPage() {
                             </div>
                         )}
 
-                        {loading && (
-                            <div className="flex gap-3">
-                                <div className="h-8 w-8 rounded-full bg-primary flex items-center justify-center flex-shrink-0">
-                                    <Bot className="h-4 w-4 text-primary-foreground" />
-                                </div>
-                                <div className="bg-muted rounded-lg px-4 py-2 text-sm flex items-center gap-2">
-                                    <Loader2 className="h-4 w-4 animate-spin flex-shrink-0" />
-                                    {activeToolName && (
-                                        <span className="text-muted-foreground">
-                                            {activeToolName.replace(/_/g, " ")}…
-                                        </span>
-                                    )}
-                                </div>
-                            </div>
-                        )}
+
                     </div>
                 </ScrollArea>
             </Card>
@@ -292,7 +290,7 @@ export default function ChatPage() {
                             key={q}
                             variant="outline"
                             size="sm"
-                            className="text-xs"
+                            className="text-xs border-kinetic-border bg-kinetic-surface-container text-kinetic-on-surface-variant hover:bg-kinetic-surface-container-high hover:text-kinetic-on-surface"
                             onClick={() => handleSend(q)}
                         >
                             {q}
@@ -307,10 +305,14 @@ export default function ChatPage() {
                     onChange={(e) => setInput(e.target.value)}
                     onKeyDown={handleKeyDown}
                     rows={1}
-                    className="resize-none"
+                    className="resize-none border-kinetic-border bg-kinetic-surface-container text-kinetic-on-surface placeholder:text-kinetic-on-surface-variant focus-visible:ring-kinetic-primary"
                     disabled={hitlPending}
                 />
-                <Button onClick={() => handleSend()} disabled={loading || !input.trim() || hitlPending}>
+                <Button
+                    onClick={() => handleSend()}
+                    disabled={loading || !input.trim() || hitlPending}
+                    className="bg-kinetic-primary text-kinetic-on-primary hover:bg-kinetic-primary/90"
+                >
                     <Send className="h-4 w-4" />
                 </Button>
             </div>

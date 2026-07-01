@@ -11,7 +11,7 @@ export default function KnowledgeGraphLayout({
   children: React.ReactNode;
 }>) {
   return (
-    <div className="kg-dashboard kg-noise-overlay h-screen w-screen overflow-hidden">
+    <div className="kinetic-dashboard h-full w-full bg-kinetic-root text-kinetic-on-surface">
       {children}
     </div>
   );

@@ -1,6 +1,7 @@
 """Summary writing stage of the review pipeline."""
 from __future__ import annotations
 
+import threading
 from typing import TYPE_CHECKING
 
 from src.codewalk.review.report import Cluster, Verdict

@@ -16,7 +16,7 @@ This guide shows how to phrase questions so the IDE agent routes them to the rig
 ## 1. Setup & indexing
 
 ### `codewalk_analyze_codebase`
-Run once per repo per workspace.
+Run once per repo per workspace. `mode="auto"` does a full build if no index exists, loads a complete index, or warns (`status="behind"`) if the index is partial.
 
 ```text
 @codewalk Analyze this repo.
@@ -41,11 +41,12 @@ To overwrite an existing config:
 ```
 
 ### `codewalk_incremental_reindex`
-After you edit files.
+After you edit files, or to resume/sync a partial/interrupted index.
 
 ```text
 @codewalk Reindex only the files that changed.
 @codewalk Run an incremental reindex.
+@codewalk Resume the partial index.
 ```
 
 ### `codewalk_refresh_analysis`

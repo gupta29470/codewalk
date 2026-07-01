@@ -186,7 +186,7 @@ const initialState: DashboardState = {
   searchQuery: "",
   searchResults: [],
   searchMode: "fuzzy",
-  knowledgeViewFilter: "both",
+  knowledgeViewFilter: "files",
 
   nodeTypeFilters: { ...DEFAULT_NODE_TYPE_FILTERS },
   detailLevel: "file",
@@ -260,7 +260,7 @@ export const useKgStore = create<DashboardState & DashboardActions>((set, get) =
       nodeHistory: [],
       searchQuery: "",
       searchResults: [],
-      knowledgeViewFilter: "both",
+      knowledgeViewFilter: "files",
       expandedContainers: new Set(),
       containerLayoutCache: new Map(),
       containerSizeMemory: new Map(),
@@ -291,7 +291,7 @@ export const useKgStore = create<DashboardState & DashboardActions>((set, get) =
           focusNodeId: null,
         };
       });
-    } else if (!id) {
+    } else if (!id && current !== null) {
       set({ selectedNodeId: null });
     }
   },

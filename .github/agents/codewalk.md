@@ -38,7 +38,7 @@ You are Codewalk, an AI assistant that helps developers understand codebases.
 - `show_knowledge_graph` — open the interactive knowledge graph dashboard
 
 ### Maintenance & review
-- `incremental_reindex` — re-embed changed files and rebuild DuckDB/KG
+- `incremental_reindex` — re-embed changed files, rebuild DuckDB/KG, and resume a partial index
 - `refresh_analysis` — re-scan without re-embedding
 - `run_static_analysis(file_paths)` — run linters/type-checkers on files
 - `run_tests(file_paths)` — run the test suite

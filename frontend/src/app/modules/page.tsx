@@ -38,25 +38,33 @@ export default function ModulesPage() {
 
     if (loading) {
         return (
-            <div className="flex items-center justify-center min-h-[60vh]">
-                <Loader2 className="h-8 w-8 animate-spin text-muted-foreground" />
+            <div className="flex items-center justify-center min-h-full p-6">
+                <Loader2 className="h-8 w-8 animate-spin text-kinetic-primary" />
             </div>
         );
     }
 
     if (error) {
         return (
-            <div className="p-4 bg-destructive/10 text-destructive rounded-md">
-                {error}
+            <div className="p-6">
+                <div className="p-4 bg-kinetic-error/10 text-kinetic-error rounded-md border border-kinetic-error/20">
+                    {error}
+                </div>
             </div>
         );
     }
 
     return (
-        <div className="space-y-6">
+        <div className="p-6 space-y-6 max-w-6xl">
             <div className="flex items-center justify-between">
-                <h1 className="text-2xl font-bold">Modules</h1>
-                <Button variant="outline" size="sm" onClick={fetchData} disabled={loading}>
+                <h1 className="text-2xl font-bold text-kinetic-on-surface">Modules</h1>
+                <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={fetchData}
+                    disabled={loading}
+                    className="border-kinetic-border bg-kinetic-surface-container text-kinetic-on-surface hover:bg-kinetic-surface-container-high hover:text-kinetic-on-surface"
+                >
                     <RefreshCw className={`h-4 w-4 mr-1 ${loading ? "animate-spin" : ""}`} />
                     Refresh
                 </Button>
@@ -65,16 +73,16 @@ export default function ModulesPage() {
             <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
                 {modules.map((mod) => (
                     <Link key={mod.name} href={`/modules/${encodeURIComponent(mod.name)}`}>
-                        <Card className="hover:border-primary/50 transition-colors cursor-pointer h-full">
+                        <Card className="border-kinetic-border bg-kinetic-surface-container-low hover:border-kinetic-primary/50 transition-colors cursor-pointer h-full">
                             <CardHeader className="pb-2">
-                                <CardTitle className="text-lg flex items-center justify-between">
+                                <CardTitle className="text-lg flex items-center justify-between text-kinetic-on-surface">
                                     {mod.name}
-                                    <ArrowRight className="h-4 w-4 text-muted-foreground" />
+                                    <ArrowRight className="h-4 w-4 text-kinetic-on-surface-variant" />
                                 </CardTitle>
                             </CardHeader>
                             <CardContent className="space-y-2">
                                 <div className="flex items-center justify-between text-sm">
-                                    <span className="text-muted-foreground">
+                                    <span className="text-kinetic-on-surface-variant">
                                         {mod.file_count} files
                                     </span>
                                     <RiskBadge level={mod.module_risk} />
@@ -83,14 +91,14 @@ export default function ModulesPage() {
                                     {Object.keys(mod.languages).map((lang) => (
                                         <span
                                             key={lang}
-                                            className="text-xs px-2 py-0.5 bg-muted rounded"
+                                            className="text-xs px-2 py-0.5 rounded bg-kinetic-surface-container-high text-kinetic-on-surface-variant border border-kinetic-border"
                                         >
                                             {lang}
                                         </span>
                                     ))}
                                 </div>
                                 {mod.depends_on.length > 0 && (
-                                    <p className="text-xs text-muted-foreground">
+                                    <p className="text-xs text-kinetic-on-surface-variant">
                                         Depends on: {mod.depends_on.join(", ")}
                                     </p>
                                 )}

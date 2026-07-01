@@ -1,7 +1,7 @@
 "use client";
 
 import { useState } from "react";
-import { api } from "@/lib/api";
+import { api, ResearchResponse } from "@/lib/api";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -31,7 +31,7 @@ export default function ResearchPage() {
         setReport("");
         setSources([]);
         try {
-            const res = await api.research(question.trim(), depth);
+            const res: ResearchResponse = await api.research(question.trim(), depth);
             setReport(res.report);
             setSources(res.sources);
         } catch (err) {
@@ -41,17 +41,24 @@ export default function ResearchPage() {
         }
     }
 
-    return (
-        <div className="space-y-6">
-            <h1 className="text-2xl font-bold">Deep Research</h1>
-            <p className="text-sm text-muted-foreground">
-                Ask a complex question about your codebase and get a thorough researched report.
-            </p>
+    const depthButtonClass = (active: boolean) =>
+        active
+            ? "bg-kinetic-primary text-kinetic-on-primary hover:bg-kinetic-primary/90"
+            : "border-kinetic-border bg-kinetic-surface-container text-kinetic-on-surface hover:bg-kinetic-surface-container-high hover:text-kinetic-on-surface";
 
-            <Card>
+    return (
+        <div className="p-6 space-y-6 max-w-6xl">
+            <div>
+                <h1 className="text-2xl font-bold text-kinetic-on-surface">Deep Research</h1>
+                <p className="text-sm text-kinetic-on-surface-variant">
+                    Ask a complex question about your codebase and get a thorough researched report.
+                </p>
+            </div>
+
+            <Card className="border-kinetic-border bg-kinetic-surface-container-low">
                 <CardHeader>
-                    <CardTitle className="flex items-center gap-2">
-                        <Search className="h-5 w-5" />
+                    <CardTitle className="flex items-center gap-2 text-kinetic-on-surface">
+                        <Search className="h-5 w-5 text-kinetic-primary" />
                         Research Question
                     </CardTitle>
                 </CardHeader>
@@ -61,15 +68,17 @@ export default function ResearchPage() {
                         value={question}
                         onChange={(e) => setQuestion(e.target.value)}
                         onKeyDown={(e) => e.key === "Enter" && handleResearch()}
+                        className="border-kinetic-border bg-kinetic-surface-container text-kinetic-on-surface placeholder:text-kinetic-on-surface-variant focus-visible:ring-kinetic-primary"
                     />
 
-                    <div className="flex gap-2">
+                    <div className="flex gap-2 flex-wrap">
                         {DEPTH_OPTIONS.map((d) => (
                             <Button
                                 key={d.value}
-                                variant={depth === d.value ? "default" : "outline"}
+                                variant="outline"
                                 size="sm"
                                 onClick={() => setDepth(d.value)}
+                                className={depthButtonClass(depth === d.value)}
                             >
                                 {d.label}
                             </Button>
@@ -79,7 +88,7 @@ export default function ResearchPage() {
                     <Button
                         onClick={handleResearch}
                         disabled={loading || !question.trim()}
-                        className="w-full sm:w-auto"
+                        className="w-full sm:w-auto bg-kinetic-primary text-kinetic-on-primary hover:bg-kinetic-primary/90"
                     >
                         {loading ? (
                             <>
@@ -92,7 +101,7 @@ export default function ResearchPage() {
                     </Button>
 
                     {error && (
-                        <div className="p-3 bg-destructive/10 text-destructive rounded-md text-sm flex items-center gap-2">
+                        <div className="p-3 bg-kinetic-error/10 text-kinetic-error rounded-md text-sm flex items-center gap-2 border border-kinetic-error/20">
                             <AlertCircle className="h-4 w-4" />
                             {error}
                         </div>
@@ -101,22 +110,22 @@ export default function ResearchPage() {
             </Card>
 
             {report && (
-                <Card>
+                <Card className="border-kinetic-border bg-kinetic-surface-container-low">
                     <CardHeader>
-                        <CardTitle>Research Report</CardTitle>
+                        <CardTitle className="text-kinetic-on-surface">Research Report</CardTitle>
                     </CardHeader>
                     <CardContent className="space-y-4">
-                        <div className="prose prose-sm dark:prose-invert max-w-none">
+                        <div className="prose prose-sm dark:prose-invert max-w-none research-report">
                             <ReactMarkdown>{report}</ReactMarkdown>
                         </div>
                         {sources.length > 0 && (
                             <>
-                                <Separator />
+                                <Separator className="bg-kinetic-border" />
                                 <div>
-                                    <p className="text-sm font-medium mb-2">Sources</p>
+                                    <p className="text-sm font-medium mb-2 text-kinetic-on-surface">Sources</p>
                                     <div className="flex flex-wrap gap-2">
                                         {sources.map((s, i) => (
-                                            <Badge key={i} variant="outline" className="text-xs font-mono">
+                                            <Badge key={i} variant="outline" className="text-xs font-mono border-kinetic-border text-kinetic-on-surface-variant">
                                                 {s.split("/").pop() || s}
                                             </Badge>
                                         ))}
@@ -127,6 +136,7 @@ export default function ResearchPage() {
                     </CardContent>
                 </Card>
             )}
+
         </div>
     );
 }

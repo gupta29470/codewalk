@@ -381,11 +381,11 @@
     <div id="header">
         <h1>🔍 <span>Codewalk</span> Architecture</h1>
         <div class="header-stats">
-            <div class="stat"><span class="stat-val">10</span> modules</div>
-            <div class="stat"><span class="stat-val">51</span> files</div>
-            <div class="stat"><span class="stat-val">18</span> MCP tools</div>
-            <div class="stat"><span class="stat-val">17</span> API endpoints</div>
-            <div class="stat"><span class="stat-val">14</span> languages</div>
+            <div class="stat"><span class="stat-val">20</span> modules</div>
+            <div class="stat"><span class="stat-val">130+</span> files</div>
+            <div class="stat"><span class="stat-val">42</span> MCP tools</div>
+            <div class="stat"><span class="stat-val">35+</span> API endpoints</div>
+            <div class="stat"><span class="stat-val">15+</span> languages</div>
         </div>
         <div class="controls">
             <button id="btn-reset">Reset View</button>
@@ -411,10 +411,16 @@
             <div class="legend-dot" style="background:#58a6ff"></div> Entry Point
         </div>
         <div class="legend-item">
+            <div class="legend-dot" style="background:#f78166"></div> Orchestration
+        </div>
+        <div class="legend-item">
             <div class="legend-dot" style="background:#39d2f5"></div> Ingestion
         </div>
         <div class="legend-item">
             <div class="legend-dot" style="background:#e3b341"></div> Analysis
+        </div>
+        <div class="legend-item">
+            <div class="legend-dot" style="background:#79c0ff"></div> Graph
         </div>
         <div class="legend-item">
             <div class="legend-dot" style="background:#3fb950"></div> Embeddings
@@ -423,7 +429,7 @@
             <div class="legend-dot" style="background:#bc8cff"></div> Agent / RAG
         </div>
         <div class="legend-item">
-            <div class="legend-dot" style="background:#39d2f5"></div> Generation
+            <div class="legend-dot" style="background:#79e8ff"></div> Generation
         </div>
         <div class="legend-item">
             <div class="legend-dot" style="background:#f85149"></div> Review
@@ -432,7 +438,25 @@
             <div class="legend-dot" style="background:#a371f7"></div> Voice
         </div>
         <div class="legend-item">
-            <div class="legend-dot" style="background:#f78166"></div> Orchestration
+            <div class="legend-dot" style="background:#ff9bce"></div> Research
+        </div>
+        <div class="legend-item">
+            <div class="legend-dot" style="background:#22d3ee"></div> Doc Knowledge
+        </div>
+        <div class="legend-item">
+            <div class="legend-dot" style="background:#a5d6ff"></div> Services
+        </div>
+        <div class="legend-item">
+            <div class="legend-dot" style="background:#d2a8ff"></div> Core
+        </div>
+        <div class="legend-item">
+            <div class="legend-dot" style="background:#ffa657"></div> Tools
+        </div>
+        <div class="legend-item">
+            <div class="legend-dot" style="background:#ff7b72"></div> Worker
+        </div>
+        <div class="legend-item">
+            <div class="legend-dot" style="background:#56d364"></div> Eval
         </div>
         <div class="legend-item">
             <div class="legend-dot" style="background:#bc8cff;border:2px solid #d2a8ff"></div> External
@@ -454,100 +478,158 @@
         // ════════════════════════════════════════════════════════════
 
         const modules = {
-            user: { label: '👤 User', group: 'entry', color: '#58a6ff', tier: 0, x: 0, y: -380, files: [], desc: 'End user — developer or team member onboarding to a codebase.' },
-            frontend: { label: '🌐 Next.js Frontend', group: 'entry', color: '#58a6ff', tier: 1, x: -300, y: -260, files: ['layout.tsx', 'page.tsx', 'Sidebar.tsx', 'MermaidDiagram.tsx', 'api.ts'], desc: 'React/Next.js UI — localhost:3000. Module browser, chat, blast radius viz, voice recorder.' },
-            mcp_entry: { label: '🧩 MCP Server', group: 'entry', color: '#58a6ff', tier: 1, x: -100, y: -260, files: [], desc: 'Model Context Protocol entry — 18 tools exposed to Copilot/Claude via stdio.' },
-            api_entry: { label: '📡 FastAPI REST', group: 'entry', color: '#58a6ff', tier: 1, x: 100, y: -260, files: [], desc: 'HTTP API server — 17 endpoints at localhost:8000. Serves the frontend.' },
-            voice_cli: { label: '🎙️ Voice CLI', group: 'entry', color: '#58a6ff', tier: 1, x: 300, y: -260, files: [], desc: 'CLI voice companion — mic → transcribe → route → execute → speak.' },
+            user: { label: '👤 User', group: 'entry', color: '#58a6ff', tier: 0, x: 0, y: -400, files: [], desc: 'End user — developer or team member exploring or changing a codebase.' },
+            frontend: { label: '🌐 Next.js Frontend', group: 'entry', color: '#58a6ff', tier: 1, x: -320, y: -280, files: ['page.tsx', 'chat/page.tsx', 'overview/page.tsx', 'knowledge-graph/page.tsx + _components/*', 'research/page.tsx + _components/ResearchDiagram.tsx', 'review/page.tsx', 'voice/page.tsx', 'components/KineticShell.tsx', 'components/kinetic/*', 'api.ts'], desc: 'React/Next.js UI — localhost:3000. Knowledge graph, module browser, blast radius, chat, review, voice, research diagram, admin. Uses KineticShell and kinetic design tokens.' },
+            mcp_entry: { label: '🧩 MCP Server', group: 'entry', color: '#58a6ff', tier: 1, x: -110, y: -280, files: [], desc: 'Model Context Protocol entry — 42 tools exposed to Copilot / Claude Code / Cursor via stdio.' },
+            api_entry: { label: '📡 FastAPI REST', group: 'entry', color: '#58a6ff', tier: 1, x: 110, y: -280, files: [], desc: 'HTTP API server — 35+ endpoints at localhost:8000. Serves the frontend and external integrations.' },
+            voice_cli: { label: '🎙️ Voice CLI', group: 'entry', color: '#58a6ff', tier: 1, x: 320, y: -280, files: [], desc: 'Hands-free voice companion — mic → transcribe → route → execute → speak.' },
 
             api: {
-                label: 'API · 17 endpoints', group: 'api', color: '#3fb950', tier: 2, x: 50, y: -130,
-                files: ['main.py — 8 routes: /analyze, /chat, /overview, /modules, /blast-radius, /reading-order, /execution-flow, /review', 'models.py — Pydantic schemas: AnalyzeRequest, ChatRequest, OverviewResponse'],
-                desc: 'FastAPI HTTP layer. Streaming SSE for /analyze/stream progress. CORS for frontend.',
-                functions: ['/analyze (POST)', '  → modes: full, reindex, auto', '/analyze/stream (POST, SSE)', '/chat (POST) → invoke agent', '/overview (GET)', '/modules/{name} (GET)', '/blast-radius (GET)', '/reading-order (GET)', '/execution-flow (GET)', '/review (POST)', '/review/file (POST)', '/review/guidelines (POST)', '/refresh (POST)', '/incremental-reindex (POST)', '/voice/ask (POST)', '/voice/transcribe (POST)']
+                label: 'API · 35+ endpoints', group: 'api', color: '#3fb950', tier: 2, x: 60, y: -160,
+                files: ['main.py — 35+ REST endpoints', 'models.py — Pydantic request/response schemas', 'state.py — shared in-memory state', 'cloud.py — GitHub webhooks + cloud admin'],
+                desc: 'FastAPI HTTP layer. SSE streaming for /analyze/stream. Rate limiting, CORS, cloud-mode detection. Endpoints cover analyze, chat, query, review, docs, voice, research, maintenance.',
+                functions: ['/analyze · /analyze/stream (SSE)', '/chat · /chat/stream · /chat/approve', '/overview · /modules/{name} · /blast-radius · /reading-order · /execution-flow', '/semantic-search · /rag/expand-query · /rag/rerank · /rag/symbol-lookup', '/review · /review/file · /review/guidelines · /review/apply', '/docs/index · /docs/search · /docs/ask', '/voice/ask', '/research', '/refresh · /incremental-reindex', '/admin/* (cloud)']
             },
 
             mcp: {
-                label: 'MCP · 18 tools', group: 'mcp', color: '#bc8cff', tier: 2, x: -150, y: -130,
-                files: ['server.py — FastMCP server, 18 @mcp.tool() functions, 80-line system prompt'],
-                desc: 'Model Context Protocol server. Auto-init with codewalk_analyze_codebase. Progressive batch filtering. Tool categories: SETUP, QUERY, MAINT, VOICE.',
-                functions: ['SETUP: analyze_codebase, scan_files, submit_filtered_files, index_filtered_files', 'QUERY: search_codebase, get_module_info, explain_function, get_overview, get_blast_radius_map, get_reading_order, get_execution_flow', 'MAINT: incremental_reindex, refresh_analysis, review_diff, review_file, load_guidelines', 'VOICE: voice_ask, speak']
+                label: 'MCP · 42 tools', group: 'mcp', color: '#bc8cff', tier: 2, x: -160, y: -160,
+                files: ['server.py — FastMCP server, 42 @mcp.tool() functions, system prompt'],
+                desc: 'Model Context Protocol server. Auto-init with codewalk_analyze_codebase. Workspace-change guards. Tool categories: setup, query, graph, review, docs, maintenance, voice, cloud, HITL.',
+                functions: ['SETUP: analyze_codebase, generate_config', 'QUERY: search_codebase, lookup_symbol, explain_function, explain_class, get_module_info, get_overview, get_blast_radius_map, get_reading_order, get_execution_flow', 'GRAPH: find_circular_dependencies, get_architecture_health, call_chain, show_knowledge_graph', 'REVIEW: run_review, review_file, get_review_details, finding_verdict, apply_accepted, approve_action, apply_fix, verify_fix, get_stack_info, load_guidelines', 'DOCS: index_docs, search_docs, ask_docs', 'MAINT: incremental_reindex, refresh_analysis, run_static_analysis, run_tests', 'VOICE: voice_ask, speak', 'CLOUD: pull_index, connect_repo, index_status, check_version']
             },
 
             state: {
-                label: '🗄️ State Singleton', group: 'state', color: '#f78166', tier: 3, x: -50, y: -10,
-                files: ['state.py — Module-level globals: _store, _agent, _modules_result, _files, _deps'],
-                desc: 'Shared state for API + MCP. ensure_initialized() auto-loads from disk on restart. Per-repo ChromaDB at .codewalk/chroma/. Collection name derived from repo path.',
-                functions: ['initialize()', 'ensure_initialized() — lazy load from disk', 'rebuild_analysis_cache()', 'refresh() — update analysis without re-embed', 'get_collection_name()', 'chroma_path() → {repo}/.codewalk/chroma/']
+                label: '🗄️ State Singleton', group: 'state', color: '#f78166', tier: 3, x: -50, y: -40,
+                files: ['state.py — Module-level globals: _store, _graph_store, _graph_runtime, _agent, _modules_result, _files, _deps'],
+                desc: 'Shared state for API + MCP. ensure_initialized() auto-loads ChromaDB, DuckDB graph, and agent from disk on restart. Holds one repo at a time.',
+                functions: ['initialize()', 'ensure_initialized() — lazy load from disk', 'set_repo_path()', 'load_scoped_analysis()', 'get_store() · get_graph_store() · get_graph_runtime()', 'get_agent()', 'refresh() — update analysis without re-embed']
             },
 
             pipeline: {
-                label: '⚙️ Pipeline', group: 'pipeline', color: '#f78166', tier: 3, x: -250, y: 40,
-                files: ['pipeline.py — 440 lines, 5 pipeline functions, producer-consumer threading'],
-                desc: 'Orchestrates scan → chunk → embed → store. Full index, parallel index, path-scoped index, incremental reindex (MD5 hash delta). Producer-consumer threads: CPU chunking overlaps with I/O embedding.',
-                functions: ['full_index()', 'full_index_parallel()', 'index_from_paths()', 'index_from_paths_parallel()', 'incremental_reindex() — MD5 hash-based skip', 'chunk_and_embed_parallel() — producer/consumer threads']
+                label: '⚙️ Pipeline', group: 'pipeline', color: '#f78166', tier: 3, x: -260, y: 0,
+                files: ['pipeline.py — full/incremental indexing orchestrator'],
+                desc: 'Orchestrates scan → chunk → embed → store → analyze. Full index, parallel index, path-scoped index, incremental reindex (content hash delta). Writes manifest.json with collection name.',
+                functions: ['full_index_parallel()', 'incremental_reindex()', 'build_full_analysis()', 'index_from_paths_parallel()', 'scan + chunk + embed + store']
             },
 
             ingestion: {
-                label: '📂 Ingestion', group: 'ingestion', color: '#39d2f5', tier: 4, x: -370, y: 160,
-                files: ['scanner.py — scan_directory(), 30+ extensions, language detection', 'file_filter.py — should_skip(), ~80 skip dirs, ~200 skip extensions', 'tech_detect.py — detect_tech_stack(), 16 config file patterns', '__init__.py'],
-                desc: 'Repository scanning layer. Walks file tree, detects languages by extension, identifies tech stack via config files (package.json, pyproject.toml, Cargo.toml, etc.), filters noise (node_modules, __pycache__, build artifacts).',
-                functions: ['scan_directory(repo_path) → list[file_info]', 'should_skip(path) → bool', 'detect_tech_stack(repo_path) → dict']
+                label: '📂 Ingestion', group: 'ingestion', color: '#39d2f5', tier: 4, x: -480, y: 130,
+                files: ['scanner.py — scan_directory()', 'file_filter.py — core safety net + .codewalkignore', 'tech_detect.py — language/framework heuristics', 'config_generator.py — stack-specific codewalk.yaml'],
+                desc: 'Repository scanning layer. Walks file tree, applies core safety net (node_modules, build artifacts, binaries, secrets), repo-specific codewalk.yaml excludes, and .codewalkignore. Detects tech stack from config files.',
+                functions: ['scan_directory(repo_path)', 'team_scan_directory(repo_path) — merges yaml + safety net', 'should_skip(path)', 'detect_tech_stack(repo_path)', 'generate_codewalk_yaml(repo_path)']
             },
 
             analysis: {
-                label: '🔬 Analysis', group: 'analysis', color: '#e3b341', tier: 4, x: -120, y: 160,
-                files: ['code_parser.py — tree-sitter AST parsing, 14 grammars, FUNCTION_NODE_TYPES registry', 'dependency_graph.py — 310 lines, extract + resolve imports, 5 language-specific handlers', 'module_detector.py — 195 lines, source root stripping, cross-parent repetition heuristic', 'blast_radius.py — reversed BFS, dual-threshold risk scoring (CRITICAL/HIGH/MODERATE/LOW/SAFE)', 'reading_order.py — Kahn\'s algorithm topological sort, LLM relevance tagging', 'relevance_filter.py — filter_files_with_llm() for indexing', 'python_parser.py — Python-specific AST helpers', '__init__.py'],
-                desc: 'Core code intelligence. Tree-sitter parses 14 languages, extracts functions/classes. Dependency graph resolves imports (Python dots, Rust crate::, Dart package:, TS .js→.ts swap, Go last-segment). Module detector uses cross-parent child repetition at 50% threshold. Blast radius: reversed BFS with absolute + ratio thresholds.',
-                functions: ['parse_file(path, lang) → [functions/classes]', 'build_dependency_graph(files) → {graph, stats}', 'resolve_import_to_file()', 'detect_modules(files, deps) → {modules, module_graph}', 'get_blast_radius(target, graph) → {direct, transitive, risk}', 'calculate_full_blast_map(graph)', 'topological_sort(graph) → ordered files', 'generate_reading_order() / _raw()']
+                label: '🔬 Analysis', group: 'analysis', color: '#e3b341', tier: 4, x: -220, y: 130,
+                files: ['code_parser.py — tree-sitter registry', 'dependency_graph.py — import extraction + resolution', 'module_detector.py — auto-grouping into modules', 'blast_radius.py — reversed BFS risk scoring', 'reading_order.py — topological sort + LLM tagging', 'relevance_filter.py — query relevance'],
+                desc: 'Core code intelligence. Tree-sitter parses 15+ languages, extracts symbols. Dependency graph resolves imports across languages. Module detector groups files. Blast radius uses reversed BFS.',
+                functions: ['parse_file(path, lang) → symbols', 'build_dependency_graph(files)', 'detect_modules(files, deps)', 'calculate_full_blast_map(graph)', 'generate_reading_order(graph, modules)']
+            },
+
+            graph: {
+                label: '🕸️ Graph', group: 'graph', color: '#79c0ff', tier: 4, x: 40, y: 130,
+                files: ['graph_store.py — DuckDB 10-table schema', 'graph_runtime.py — igraph C-speed traversal', 'knowledge_graph_export.py — knowledge-graph.json'],
+                desc: 'Persistent graph storage and fast traversal. DuckDB stores files, imports, symbols, calls, modules, chunks. igraph runs centrality, cycles, shortest paths.',
+                functions: ['GraphStore.populate_from_analysis()', 'GraphRuntime — PageRank, betweenness, cycles, paths', 'export_knowledge_graph()']
             },
 
             embeddings: {
-                label: '📐 Embeddings', group: 'embeddings', color: '#3fb950', tier: 4, x: 130, y: 160,
-                files: ['chunker.py — 180 lines, AST-aware chunking, leftover detection via line-set-difference, MD5 hashing', 'embedder.py — Jina Code v2, CUDA/MPS/CPU auto-detect, batch embedding', 'vector_store.py — 160 lines, ChromaDB wrapper, cosine search, batch upsert (500), file hash registry', '__init__.py'],
-                desc: 'Chunking → embedding → storage. Parser-first chunking uses tree-sitter boundaries; falls back to LangChain language-aware splitter. Each chunk carries: symbol_name, type, start_line, end_line, file_hash. ChromaDB with HNSW cosine similarity. Content hashes enable incremental reindex.',
-                functions: ['chunk_file(file_info) → [chunks]', 'chunk_file_with_parser() — AST boundaries', 'get_leftover_code() — line-number set difference', 'embed_chunks(chunks) → [embedded]', 'VectorStore.add_chunks()', 'VectorStore.search(query, n)', 'VectorStore.get_file_hash()', 'VectorStore.delete_by_file()', 'VectorStore.get_symbols_by_files()']
+                label: '📐 Embeddings', group: 'embeddings', color: '#3fb950', tier: 4, x: 300, y: 130,
+                files: ['chunker.py — AST-aware parent/child chunks', 'embedder.py — Jina Code 1.5B', 'vector_store.py — ChromaDB wrapper'],
+                desc: 'Chunking → embedding → storage. Parent-child chunking: small searchable children + full-symbol parents. ChromaDB with cosine similarity. Content hashes enable incremental reindex.',
+                functions: ['chunk_file() — parent/child chunks', 'embed_chunks(chunks)', 'VectorStore.add_parent_child_chunks()', 'VectorStore.search_with_parents()', 'VectorStore.delete_by_file()']
             },
 
             generation: {
-                label: '📝 Generation', group: 'generation', color: '#39d2f5', tier: 5, x: -320, y: 310,
-                files: ['overview_generator.py — LLM-generated project overview from tech stack + modules', 'diagram_generator.py — Mermaid flowcharts from module dependency graph', 'flow_generator.py — LLM-generated execution flow diagrams', 'module_explainer.py — module explanation generator', '__init__.py'],
-                desc: 'LLM-powered content generation. Overview combines tech stack, module list, and architecture description. Diagrams output Mermaid syntax. Execution flow traces code paths from entry points.',
-                functions: ['generate_overview(tech, modules, deps)', 'generate_module_diagram(modules, graph)', 'generate_execution_flow(modules, deps)']
+                label: '📝 Generation', group: 'generation', color: '#79e8ff', tier: 5, x: -520, y: 270,
+                files: ['overview_generator.py', 'flow_generator.py', 'module_explainer.py'],
+                desc: 'LLM-powered artifact generation. Overview, execution flow narration, module explanations.',
+                functions: ['generate_overview()', 'generate_execution_flow()']
             },
 
             rag: {
-                label: '🔎 RAG', group: 'rag', color: '#f778ba', tier: 5, x: -80, y: 310,
-                files: ['chain.py — retrieve → format → prompt → LLM answer', 'prompts.py — SYSTEM_PROMPT + QUESTION_PROMPT (strict: answer only from chunks)', '__init__.py'],
-                desc: 'Retrieval-Augmented Generation. Searches ChromaDB for relevant chunks, formats with file paths + line numbers, sends to LLM with strict "answer only from retrieved context" rules.',
-                functions: ['ask(query, store) → answer string', 'format_context(results) → formatted text']
+                label: '🔎 RAG', group: 'rag', color: '#f778ba', tier: 5, x: -360, y: 270,
+                files: ['chain.py — retrieve_corrective / ask', 'symbol_lookup.py — exact symbol search', 'retrieval_quality.py — distance filtering', 'graph_expansion.py — neighbor chunks via graph', 'query_expander.py · query_rewriter.py · query_router.py', 'chunk_grader.py · reranker.py · answer_grader.py'],
+                desc: 'Corrective retrieval pipeline. Symbol lookup → vector search → distance filter → graph expansion → keyword grading. Optional LLM query rewriting and answer grading.',
+                functions: ['retrieve_corrective() — deterministic path', 'ask_corrective() — with retries + grading', 'expand_via_graph()', 'grade_chunks_free()', 'grade_answer()']
             },
 
             agent: {
-                label: '🤖 LangGraph Agent', group: 'agent', color: '#bc8cff', tier: 5, x: 160, y: 310,
-                files: ['graph.py — LangGraph StateGraph + MemorySaver, compiled agent', 'tools.py — create_tools() factory, 8 agent tools wrapping codewalk capabilities', 'prompts.py — AGENT_SYSTEM_PROMPT', '__init__.py'],
-                desc: 'LangGraph-based conversational agent. StateGraph with tool nodes. MemorySaver for persistent conversation threads. Tools wrap: search, explain, overview, modules, blast radius, reading order, execution flow.',
-                functions: ['create_agent(store, deps, modules) → compiled graph', 'create_tools(store, deps, modules) → [Tool]', 'Tools: search_codebase, get_module_info, explain_function, get_overview, get_blast_radius_map, get_reading_order, get_execution_flow']
+                label: '🤖 LangGraph Agent', group: 'agent', color: '#bc8cff', tier: 5, x: -200, y: 270,
+                files: ['graph.py — compiled StateGraph + HITL', 'tools.py — 11 agent tools', 'prompts.py — system prompt'],
+                desc: 'Conversational agent with tool calling and memory. Human-in-the-loop gate before any file modification via LangGraph interrupt.',
+                functions: ['create_agent()', '11 tools: search, explain, modules, overview, blast radius, reading order, execution flow, architecture health, review diff/file, apply fix, verify fix, load guidelines']
             },
 
             review: {
-                label: '🔬 Code Review', group: 'review', color: '#f85149', tier: 5, x: 360, y: 310,
-                files: ['reviewer.py — 5 context sources, adaptive chunking (200-line threshold)', 'diff_parser.py — git diff → DiffFile with hunks/lines', 'test_coverage.py — 14-language test file detection, _guess_test_file()', 'review_prompts.py — OWASP encyclopedia system prompt (14 categories)', 'guidelines_loader.py — load team standards into ChromaDB for RAG', 'models.py — ReviewResult, Issue, Severity, Category, DiffFile', '__init__.py'],
-                desc: 'AI code review with 5 context sources: full file content (500-line cap), caller context (reversed dep graph), security context (keyword→RAG query mapping), blast radius warnings, team guidelines RAG. Adaptive: <200 added lines = single pass, >200 = per-file parallel. Pre-checks: test coverage without LLM.',
-                functions: ['prepare_review_context()', 'review_code() — orchestrator', '_review_single_file() — per-file LLM call', '_review_all_at_once() — single-pass', '_get_security_context_for_file() — keyword→query mapping', 'TestCoverage.analyze() — no LLM needed']
+                label: '🔬 Code Review', group: 'review', color: '#f85149', tier: 5, x: -40, y: 270,
+                files: ['engine.py — run_review / run_review_context', 'report.py — Finding / ReviewReport models', 'finding_store.py · session_store.py', 'diff_parser.py · fix_applier.py', 'neighborhood.py · static_analysis.py · stack_detect.py', 'reviewers/ · pipeline/ · renderers/'],
+                desc: 'Multi-stage AI review with architecture context. Parses diff, expands neighborhood, runs static analysis, batched LLM review, clustering, dedup, ranking, adversarial verification, fix application.',
+                functions: ['run_review() — diff review', 'run_review_file() — single-file review', 'apply_fix_to_file()', 'submit_batch_findings()', 'get_review_summary()']
             },
 
             voice: {
-                label: '🎙️ Voice', group: 'voice', color: '#a371f7', tier: 5, x: 130, y: 440,
-                files: ['stt.py — silence-gated recording (heard_speech flag), faster-whisper small/int8', 'router.py — 16-tool registry, dual-backend routing (Ollama + cloud LLM), disambiguation rules', 'backends.py — 3 execution strategies: direct, MCP, HTTP. Argument sanitization via inspect.signature', 'tts.py — edge-tts synthesis, afplay playback, Escape-key interruption, event loop detection', 'companion.py — voice loop: record→transcribe→route→execute→narrate→speak. 7-step markdown cleanup', '__init__.py'],
-                desc: 'Full voice pipeline. Silence-gated mic recording (100ms chunks, RMS threshold). Whisper transcription. Dual routing (Ollama for speed, cloud LLM fallback). Direct tool execution with hallucinated-arg sanitization. Markdown→speech cleanup (7 regex passes). LLM narrative overlay for long results. Edge-TTS with Escape interruption.',
-                functions: ['record_audio() — silence-gated, heard_speech flag', 'transcribe(audio) → text', 'route(transcript) → {tool, args}', 'execute_direct(tool, args) — same-process', 'synthesize(text) → MP3 bytes', 'speak(text) — afplay + Escape listener', '_clean_for_speech() — 7-step regex', 'format_voice_response() — dual: technical + speech']
+                label: '🎙️ Voice', group: 'voice', color: '#a371f7', tier: 5, x: 120, y: 270,
+                files: ['stt.py — faster-whisper', 'tts.py — edge-tts', 'backends.py — direct / MCP / API'],
+                desc: 'Hands-free voice interface. Record → transcribe → route to tool → synthesize spoken answer. Available via MCP and API.',
+                functions: ['record_audio()', 'transcribe()', 'synthesize()', 'speak()']
             },
 
-            chromadb: { label: '💾 ChromaDB', group: 'external', color: '#bc8cff', tier: 6, x: 70, y: 560, files: ['.codewalk/chroma/ — per-repo persistent storage', 'HNSW index, cosine similarity', 'Chunk metadata: file_path, symbol_name, start_line, end_line, file_hash'], desc: 'Persistent vector database. Stored inside each analyzed repo at .codewalk/chroma/. Collection name = repo directory name. Stores code chunks + embeddings + metadata. Used as document registry (file hashes) for incremental reindex.' },
-            llm: { label: '🧠 LLM Providers', group: 'external', color: '#e3b341', tier: 6, x: -200, y: 560, files: ['Ollama (default) — qwen3.5:27b, local', 'OpenAI — GPT models', 'Anthropic — Claude models', 'Google Gemini', 'Groq — fast inference', 'OpenRouter — model aggregator'], desc: 'Configurable LLM backend via config.py get_llm() factory. Provider set by LLM_PROVIDER env var. Temperature 0 for deterministic analysis, 0.3 for narrative generation.' },
-            treesitter: { label: '🌳 Tree-sitter', group: 'external', color: '#e3b341', tier: 6, x: -370, y: 440, files: ['14 language grammars', 'Python, JS, TS, Dart, Java, Go, Rust, Ruby, PHP, C, C++, C#, Kotlin, Swift'], desc: 'Incremental parsing library. Produces ASTs for function/class extraction and import resolution. Each grammar is a compiled .so loaded at runtime.' },
-            jina: { label: '🔢 Jina Embeddings', group: 'external', color: '#e3b341', tier: 6, x: 340, y: 560, files: ['jina-code-embeddings-1.5b', 'HuggingFace model', 'CUDA / MPS / CPU auto-detect'], desc: 'Code-specialized embedding model. 1.5B parameters, optimized for code similarity search. Auto-detects GPU (CUDA/MPS) or falls back to CPU.' },
+            research: {
+                label: '🔬 Research', group: 'research', color: '#ff9bce', tier: 5, x: 280, y: 270,
+                files: ['deep_research.py', 'planner.py', 'researcher.py', 'synthesizer.py', 'diagram_generator.py'],
+                desc: 'Deep research mode. Decomposes complex questions into sub-questions, fans out parallel retrieval, synthesizes a graph-grounded markdown report, optionally builds a structured diagram, then reflects.',
+                functions: ['deep_research(question)', 'decompose()', 'make_researcher()', 'make_synthesizer(graph_store)', 'synthesize() · reflect()', 'generate_research_diagram()']
+            },
+
+            doc_knowledge: {
+                label: '📚 Doc Knowledge', group: 'doc_knowledge', color: '#22d3ee', tier: 5, x: 440, y: 270,
+                files: ['doc_parser.py — .md/.pdf/.txt/.rst', 'doc_store.py — ChromaDB doc collection', 'prompts.py'],
+                desc: 'Indexes team docs and guidelines into a separate ChromaDB collection. Grounds review and ask endpoints in team standards.',
+                functions: ['parse_all_docs()', 'DocStore.index_docs()', 'DocStore.search()', 'DocStore.ask()']
+            },
+
+            services: {
+                label: '🔧 Services', group: 'services', color: '#a5d6ff', tier: 6, x: -360, y: 410,
+                files: ['search_service.py — deterministic retrieval wrapper', 'symbol_service.py — symbol lookup wrapper'],
+                desc: 'Thin deterministic wrappers around retrieval. Shared by API endpoints and MCP tools. No LLM calls.',
+                functions: ['search_service.search()', 'symbol_service.lookup()']
+            },
+
+            core: {
+                label: '🧩 Core', group: 'core', color: '#d2a8ff', tier: 6, x: -120, y: 410,
+                files: ['fanout.py — parallel sub-task graphs', 'reflect.py — actor/critic loops', 'hitl.py — human-in-the-loop interrupts'],
+                desc: 'Reusable LangGraph primitives. Fan-out/fan-in, reflection, and HITL interrupts used by agent and research.',
+                functions: ['create_fanout_graph()', 'reflect()', 'compile_with_hitl()']
+            },
+
+            tools: {
+                label: '🛠️ Tools', group: 'tools', color: '#ffa657', tier: 6, x: 120, y: 410,
+                files: ['tool_runner.py — command discovery + execution', 'static_analysis.py — ruff/mypy/eslint/etc.', 'test_runner.py — pytest/npm test/etc.'],
+                desc: 'External command runners. Discovers and runs linters, type-checkers, and test runners per language, normalizing output.',
+                functions: ['run_static_analysis()', 'run_tests()', 'get_tool_commands()']
+            },
+
+            worker: {
+                label: '☁️ Worker', group: 'worker', color: '#ff7b72', tier: 6, x: 360, y: 410,
+                files: ['indexer.py — polling worker', 'github_app.py — installation tokens', 'atomic_store.py — atomic index swap'],
+                desc: 'Standalone cloud indexing worker. Polls Postgres jobs, clones repos, builds indexes, atomically publishes them for MCP download.',
+                functions: ['worker_loop()', 'build_index()', 'atomic_swap()']
+            },
+
+            eval: {
+                label: '📊 Eval', group: 'eval', color: '#56d364', tier: 6, x: 0, y: 500,
+                files: ['evaluator.py — RAGAS harness', 'dataset.py · metrics.py · experiments.py', 'generate_multilang_review_fixtures.py'],
+                desc: 'Offline evaluation harness for retrieval and review quality. Not part of runtime. Used to benchmark RAG changes before shipping.',
+                functions: ['run_full_evaluation()', 'run_experiment()', 'sweep_experiment()']
+            },
+
+            chromadb: { label: '💾 ChromaDB', group: 'external', color: '#bc8cff', tier: 7, x: -50, y: 620, files: ['.codewalk/chroma/ — per-repo persistent storage', 'Parents + children collections', 'cosine similarity, metadata filtering'], desc: 'Persistent vector database. Stores code chunks, doc chunks, and guideline embeddings per repo at .codewalk/chroma/.' },
+            duckdb: { label: '🗃️ DuckDB', group: 'external', color: '#bc8cff', tier: 7, x: 130, y: 620, files: ['.codewalk/graph.duckdb — 10-table schema', 'files · imports · symbols · symbol_calls · chunks · modules · module_deps'], desc: 'Embedded analytical graph database. Persistent SQL store for structured repo data.' },
+            igraph: { label: '📈 igraph', group: 'external', color: '#bc8cff', tier: 7, x: 310, y: 620, files: ['C-speed graph traversal', 'centrality · cycles · shortest paths'], desc: 'In-memory graph runtime loaded from DuckDB for fast centrality, cycle detection, and path tracing.' },
+            treesitter: { label: '🌳 Tree-sitter', group: 'external', color: '#e3b341', tier: 7, x: -420, y: 620, files: ['15+ language grammars', 'Python, JS, TS, Java, Go, Rust, Ruby, PHP, C#, C++, C, Kotlin, Swift, Dart'], desc: 'Incremental parsing library. Produces ASTs for symbol extraction and import resolution across languages.' },
+            jina: { label: '🔢 Jina Embeddings', group: 'external', color: '#e3b341', tier: 7, x: 520, y: 620, files: ['jinaai/jina-code-embeddings-1.5b', '768-dim vectors', 'CUDA / MPS / CPU'], desc: 'Code-specialized embedding model. 1.5B parameters, optimized for code similarity search.' },
+            llm: { label: '🧠 LLM Providers', group: 'external', color: '#e3b341', tier: 7, x: -230, y: 620, files: ['Ollama · OpenAI · Anthropic · Gemini · Groq · OpenRouter · DeepSeek'], desc: 'Configurable LLM backend via config.py get_llm() factory. Provider set by LLM_PROVIDER env var.' },
         };
 
         const connections = [
@@ -564,51 +646,96 @@
             // Interface → state
             { from: 'api', to: 'state', type: 'dep', label: '' },
             { from: 'mcp', to: 'state', type: 'dep', label: '' },
-            // State → pipeline & agent
+            // State → pipeline, agent, graph, services
             { from: 'state', to: 'pipeline', type: 'dep', label: '' },
             { from: 'state', to: 'agent', type: 'dep', label: '' },
+            { from: 'state', to: 'graph', type: 'dep', label: 'graph runtime' },
+            { from: 'state', to: 'services', type: 'dep', label: '' },
             // Pipeline → lower modules
             { from: 'pipeline', to: 'ingestion', type: 'dep', label: 'scan' },
             { from: 'pipeline', to: 'embeddings', type: 'dep', label: 'chunk+embed' },
             { from: 'pipeline', to: 'analysis', type: 'dep', label: 'deps' },
+            { from: 'pipeline', to: 'graph', type: 'dep', label: 'populate' },
+            { from: 'pipeline', to: 'doc_knowledge', type: 'dep', label: 'docs' },
             // Analysis internals
-            { from: 'analysis', to: 'treesitter', type: 'dep', label: '14 grammars' },
+            { from: 'analysis', to: 'treesitter', type: 'dep', label: '15+ grammars' },
+            { from: 'analysis', to: 'graph', type: 'dep', label: 'populate' },
+            // Graph → storage/runtime
+            { from: 'graph', to: 'duckdb', type: 'flow', label: 'persist' },
+            { from: 'graph', to: 'igraph', type: 'dep', label: 'traverse' },
             // Embeddings internals
             { from: 'embeddings', to: 'analysis', type: 'dep', label: 'parse_file()' },
             { from: 'embeddings', to: 'chromadb', type: 'flow', label: 'store' },
             { from: 'embeddings', to: 'jina', type: 'dep', label: 'encode' },
-            // Agent → tools
+            // Services → retrieval
+            { from: 'services', to: 'rag', type: 'dep', label: '' },
+            { from: 'services', to: 'graph', type: 'dep', label: '' },
+            // Agent → consumers
             { from: 'agent', to: 'rag', type: 'dep', label: '' },
             { from: 'agent', to: 'analysis', type: 'dep', label: 'blast radius' },
             { from: 'agent', to: 'generation', type: 'dep', label: '' },
             { from: 'agent', to: 'review', type: 'dep', label: '' },
-            // RAG → storage
+            { from: 'agent', to: 'tools', type: 'dep', label: '' },
+            { from: 'agent', to: 'core', type: 'dep', label: 'HITL' },
+            // RAG → storage + graph + llm
             { from: 'rag', to: 'chromadb', type: 'flow', label: 'search' },
+            { from: 'rag', to: 'graph', type: 'dep', label: 'expand' },
             { from: 'rag', to: 'llm', type: 'dep', label: 'generate' },
-            // Generation → LLM
+            // Generation → LLM + analysis
             { from: 'generation', to: 'llm', type: 'dep', label: '' },
             { from: 'generation', to: 'analysis', type: 'dep', label: 'modules+deps' },
+            { from: 'generation', to: 'graph', type: 'dep', label: '' },
             // Review → deps
             { from: 'review', to: 'analysis', type: 'dep', label: 'callers+blast' },
+            { from: 'review', to: 'graph', type: 'dep', label: 'neighborhood' },
             { from: 'review', to: 'chromadb', type: 'flow', label: 'security RAG' },
             { from: 'review', to: 'llm', type: 'dep', label: '' },
-            // Voice → tools
+            { from: 'review', to: 'tools', type: 'dep', label: 'verify' },
+            // Voice → interfaces + llm
             { from: 'voice', to: 'mcp', type: 'dep', label: 'execute tools' },
+            { from: 'voice', to: 'api', type: 'dep', label: 'execute tools' },
             { from: 'voice', to: 'llm', type: 'dep', label: 'route + narrate' },
+            // Research → rag + core
+            { from: 'research', to: 'rag', type: 'dep', label: '' },
+            { from: 'research', to: 'core', type: 'dep', label: 'fanout + reflect' },
+            // Doc Knowledge → chromadb
+            { from: 'doc_knowledge', to: 'chromadb', type: 'flow', label: 'store' },
+            { from: 'doc_knowledge', to: 'rag', type: 'dep', label: '' },
+            { from: 'doc_knowledge', to: 'review', type: 'dep', label: 'guidelines' },
+            // Tools → external commands
+            { from: 'tools', to: 'llm', type: 'dep', label: '' },
+            // Worker → pipeline + github
+            { from: 'worker', to: 'pipeline', type: 'dep', label: '' },
+            { from: 'worker', to: 'analysis', type: 'dep', label: '' },
+            { from: 'worker', to: 'embeddings', type: 'dep', label: '' },
+            // Eval → rag + review + embeddings
+            { from: 'eval', to: 'rag', type: 'dep', label: '' },
+            { from: 'eval', to: 'review', type: 'dep', label: '' },
+            { from: 'eval', to: 'embeddings', type: 'dep', label: '' },
             // MCP → many
             { from: 'mcp', to: 'pipeline', type: 'dep', label: '' },
             { from: 'mcp', to: 'analysis', type: 'dep', label: '' },
+            { from: 'mcp', to: 'graph', type: 'dep', label: '' },
             { from: 'mcp', to: 'embeddings', type: 'dep', label: '' },
             { from: 'mcp', to: 'generation', type: 'dep', label: '' },
             { from: 'mcp', to: 'review', type: 'dep', label: '' },
             { from: 'mcp', to: 'voice', type: 'dep', label: '' },
             { from: 'mcp', to: 'rag', type: 'dep', label: '' },
+            { from: 'mcp', to: 'research', type: 'dep', label: '' },
+            { from: 'mcp', to: 'doc_knowledge', type: 'dep', label: '' },
+            { from: 'mcp', to: 'tools', type: 'dep', label: '' },
+            { from: 'mcp', to: 'worker', type: 'dep', label: 'cloud sync' },
             // API → many
             { from: 'api', to: 'pipeline', type: 'dep', label: '' },
             { from: 'api', to: 'analysis', type: 'dep', label: '' },
+            { from: 'api', to: 'graph', type: 'dep', label: '' },
             { from: 'api', to: 'generation', type: 'dep', label: '' },
             { from: 'api', to: 'review', type: 'dep', label: '' },
             { from: 'api', to: 'voice', type: 'dep', label: '' },
+            { from: 'api', to: 'research', type: 'dep', label: '' },
+            { from: 'api', to: 'doc_knowledge', type: 'dep', label: '' },
+            { from: 'api', to: 'tools', type: 'dep', label: '' },
+            { from: 'api', to: 'worker', type: 'dep', label: 'cloud webhooks' },
             // Analysis → LLM (reading order relevance)
             { from: 'analysis', to: 'llm', type: 'dep', label: 'relevance' },
         ];

@@ -10,10 +10,14 @@ export async function GET(request: NextRequest) {
     return NextResponse.json({ error: "Missing path" }, { status: 400 });
   }
 
-  // Resolve relative to project root. Reject absolute paths outside repo.
+  // Prefer an explicit repo path (query param or env var), otherwise fall back
+  // to the legacy cwd-based discovery for the standard dev layout.
+  const explicitRepo = request.nextUrl.searchParams.get("repoPath") || process.env.CODEWALK_REPO_PATH;
   const cwd = process.cwd();
-  const candidates = [join(cwd, "..", path), resolve(cwd, "..", path), join(cwd, path)];
-  const repoRoot = resolve(cwd, "..");
+  const repoRoot = explicitRepo ? resolve(explicitRepo) : resolve(cwd, "..");
+  const candidates = explicitRepo
+    ? [join(repoRoot, path), resolve(repoRoot, path)]
+    : [join(cwd, "..", path), resolve(cwd, "..", path), join(cwd, path)];
 
   for (const filePath of candidates) {
     if (!filePath.startsWith(repoRoot) && !filePath.startsWith(cwd)) continue;

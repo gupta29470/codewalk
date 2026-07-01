@@ -20,7 +20,7 @@ export interface OverviewResponse {
     total_files: number;
     total_modules: number;
     modules: string[];
-    diagram: string;
+    diagram?: string;
     overview_text: string;
     riskiest_files: FileRisk[];
 }
@@ -71,8 +71,28 @@ export interface ReadingOrderResponse {
     total_files: number;
 }
 
+export interface ExecutionFlowNode {
+    id: string;
+    name: string;
+    full_path: string;
+    position: number;
+    level: number;
+    x: number;
+    y: number;
+}
+
+export interface ExecutionFlowEdge {
+    source: string;
+    target: string;
+    source_name: string;
+    target_name: string;
+    type: string;
+}
+
 export interface ExecutionFlowResponse {
-    flow: string;
+    nodes: ExecutionFlowNode[];
+    edges: ExecutionFlowEdge[];
+    narration: string;
 }
 
 export interface ArchitectureStats {
@@ -150,10 +170,38 @@ export interface DocsAskResponse {
     sources: { doc_path: string; section: string }[];
 }
 
+export interface ResearchDiagramNode {
+    id: string;
+    type: "file" | "function" | "class" | "method";
+    name: string;
+    full_path: string;
+    x?: number;
+    y?: number;
+    level?: number;
+    parentId?: string;
+    module?: string;
+    start_line?: number;
+    end_line?: number;
+    parent_class?: string;
+    qualified_name?: string;
+}
+
+export interface ResearchDiagramEdge {
+    source: string;
+    target: string;
+    type: "contains" | "imports" | "calls" | "member_of";
+}
+
+export interface ResearchDiagram {
+    nodes: ResearchDiagramNode[];
+    edges: ResearchDiagramEdge[];
+}
+
 export interface ResearchResponse {
     question: string;
     report: string;
     sources: string[];
+    diagram?: ResearchDiagram;
 }
 
 export interface ReviewIssue {

@@ -5,8 +5,9 @@ import { join, resolve } from "path";
 import type { NextRequest } from "next/server";
 
 function candidatePaths(repoPath?: string | null): string[] {
-  if (repoPath) {
-    return [join(repoPath, ".codewalk", "diff-overlay.json")];
+  const explicitRepo = repoPath || process.env.CODEWALK_REPO_PATH;
+  if (explicitRepo) {
+    return [join(explicitRepo, ".codewalk", "diff-overlay.json")];
   }
   const cwd = process.cwd();
   return [

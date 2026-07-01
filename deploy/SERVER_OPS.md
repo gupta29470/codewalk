@@ -292,7 +292,7 @@ ls -lh /tmp/index.tar.gz
 
 **After server re-index** (§11): bump `index_version` on cloud → laptop `codewalk_pull_index` or `rm -rf .codewalk` + pull.
 
-**Stale-index notifications (MCP):** When cloud env is set, every MCP tool may prepend `[Cloud]` / `[Local]` banners. Cloud users: `codewalk_pull_index` for index updates; wait for server catch-up if manifest `codewalk_version` lags API `/version`. Local-only: `codewalk_analyze_codebase`. Software updates: `git pull` + **restart MCP**. `codewalk_index_status` compares local vs cloud.
+**Stale-index notifications (MCP):** When cloud env is set, every MCP tool may prepend `[Cloud]` / `[Local]` banners. Cloud users: `codewalk_pull_index` for index updates; wait for server catch-up if manifest `codewalk_version` lags API `/version`. Local-only: `codewalk_incremental_reindex`. Software updates: `git pull` + **restart MCP**. `codewalk_index_status` compares local vs cloud.
 
 **Local API / frontend:** `GET /staleness`, `GET /version`, and `X-Codewalk-Staleness` header on query endpoints (local mode only, not cloud-only).
 

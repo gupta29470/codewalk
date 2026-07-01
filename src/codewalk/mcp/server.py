@@ -43,8 +43,9 @@ Review architecture (batched, no external LLM calls):
     codewalk_run_review, codewalk_review_file,
     codewalk_get_overview, codewalk_get_architecture_health
 
-  codewalk_analyze_codebase also prompts for stack setup after indexing
-  so the file is ready before the user calls any other tool.
+  codewalk_analyze_codebase prompts for stack setup after indexing completes
+  (status ready/built/reindexed). If the index is behind, it asks for reindex
+  first and defers the stack-context prompt until the index is synced.
 
   IMPORTANT: No MCP tool calls detect_stack() or any external LLM.
   Stack context comes purely from the persistent file on disk.
@@ -87,14 +88,12 @@ logger = logging.getLogger("codewalk")
 # Single-use HITL token from last codewalk_approve_action (host UI approves; code enforces token)
 _pending_approval_token: str | None = None
 
-from src.codewalk.generation.diagram_generator import generate_module_diagram
-from src.codewalk.embeddings.vector_store import VectorStore
 from src.codewalk.rag.chain import format_context
 from src.codewalk.rag.prompts import SYSTEM_PROMPT, QUESTION_PROMPT
 from src.codewalk.services.search_service import search as deterministic_search
 from src.codewalk.services.symbol_service import lookup as deterministic_symbol_lookup
 
-from src.codewalk.pipeline import index_from_paths_parallel, incremental_reindex
+
 from src.codewalk.codewalk_config import load_codewalk_yaml
 from src.codewalk.ingestion.config_generator import generate_codewalk_yaml
 from src.codewalk.config import settings
@@ -135,9 +134,10 @@ mcp = FastMCP(
         "2) codewalk_analyze_codebase() — ONE CALL, no arguments:\n"
         "   • Uses the current MCP workspace directory (cwd) as the repo root.\n"
         "   • Local index is checked FIRST:\n"
-        "     - .codewalk/ with chunks on disk → INDEX READY (load only, no re-embed)\n"
-        "     - Cloud configured + no local index → auto-download from server\n"
-        "     - No index + local only → scan (codewalk.yaml excludes), embed on this machine\n"
+        "     - .codewalk/ complete → INDEX READY (load only, no re-embed)\n"
+        "     - .codewalk/ partial/chroma missing files → BEHIND warning; call codewalk_incremental_reindex to sync\n"
+        "     - No local index + cloud configured → auto-download from server\n"
+        "     - No local index + local only → scan (codewalk.yaml excludes), embed on this machine\n"
         "3) Query tools auto-load .codewalk/ on later MCP sessions (no re-analyze needed).\n"
         "\n"
         "## ANSWERING QUESTIONS (after setup)\n"
@@ -164,8 +164,8 @@ mcp = FastMCP(
         "- When quoting code with obvious typos or odd identifiers, explicitly flag them so the user knows they are real source issues.\n"
         "- When reporting counts from grep/search, present them as approximate unless you verified them; reconcile counts before publishing.\n"
         "\n"
-        "## MAINTENANCE (after code changes)\n"
-        "- codewalk_incremental_reindex — re-embed only changed files (hash-based skip)\n"
+        "## MAINTENANCE (after code changes or interrupted indexing)\n"
+        "- codewalk_incremental_reindex — re-embed changed files, resume partial indexes, and remove chunks for deleted files (hash-based)\n"
         "- codewalk_refresh_analysis — rebuild deps/modules without re-embedding\n"
         "\n"
         "## CODE REVIEW — FULL FLOW (agent-driven via MCP)\n"
@@ -187,7 +187,7 @@ mcp = FastMCP(
         "        To refresh: `codewalk_run_review(refresh_stack=True)` or call\n"
         "        `codewalk_get_stack_info()` + `codewalk_save_stack_context()` again.\n"
         "        NOTE: codewalk_analyze_codebase also prompts you to do this after\n"
-        "        indexing — so if you follow that prompt, you're already set.\n"
+        "        indexing completes successfully — so if you follow that prompt, you're already set.\n"
         "\n"
         "Step 1: START — call codewalk_run_review(target_branch='main') once.\n"
         "        Returns: session_id + first batch of 3-5 files with full context.\n"
@@ -466,11 +466,11 @@ def download_cloud_index_if_missing():
     _ = (local_version, remote_version, remote)
 
 
-def _download_index(server_url: str, repo_name: str, repo_token: str):
+def _download_index(server_url: str, repo_name: str, repo_token: str) -> Path:
     import tempfile
 
     repo_root = _target_repo_root()
-    print(f"⏳ Downloading index for {repo_name} → {repo_root}/.codewalk/ ...")
+    _log(f"[download_index] Downloading index for {repo_name} → {repo_root}/.codewalk/ ...")
     request = requests.get(
         f"{server_url}/indexes/{repo_name}",
         headers={"X-Repo-Token": repo_token},
@@ -491,7 +491,16 @@ def _download_index(server_url: str, repo_name: str, repo_token: str):
         subprocess.run(["tar", "-xzf", str(tarball), "-C", str(repo_root)], check=True)
     finally:
         tarball.unlink(missing_ok=True)
-    print(f"✅ Index ready ({repo_name})")
+
+    manifest_path = codewalk_dir / "manifest.json"
+    if not manifest_path.exists():
+        raise RuntimeError(
+            f"Download succeeded but {manifest_path} was not found after extraction. "
+            f"The archive may be empty or extracted to an unexpected location."
+        )
+
+    _log(f"[download_index] Index ready ({repo_name}) at {codewalk_dir}")
+    return codewalk_dir
 
 # ══════════════════════════════════════════════════════════════════════
 #  Index gate — query tools load from disk; analyze builds the index
@@ -499,8 +508,11 @@ def _download_index(server_url: str, repo_name: str, repo_token: str):
 
 def _require_index() -> str | None:
     """Return error message if no index on disk, else None (loads index automatically)."""
-    if state.ensure_initialized():
-        return None
+    try:
+        if state.ensure_initialized():
+            return None
+    except RuntimeError as e:
+        _log(f"[_require_index] {e}")
     return state.INDEX_REQUIRED_MCP
 
 
@@ -545,20 +557,32 @@ def _require_stack(tool_name: str = "") -> str | None:
 
 # ─── TOOL 1 [SETUP · user+AI]: codewalk_analyze_codebase ────────────
 @mcp.tool()
-def codewalk_analyze_codebase() -> str:
+def codewalk_analyze_codebase(mode: str = "auto") -> str:
     """Analyze a codebase structure and prepare for search.
+
+    Modes:
+      auto    — load complete index, do a full build if no index exists, or
+                warn if the index is behind (default). Does NOT auto-resume.
+      reindex — smart re-index (only changed/new/deleted files); use this to
+                resume a partial/interrupted index
+      full    — nuke everything and re-embed from scratch
 
     Call this once to set up a repo. Query tools work automatically after that.
 
     Flow:
-    1. Local .codewalk/ index exists → load and return INDEX READY
-    2. No local index + cloud configured → download cloud index
-    3. No local index + local only → scan (codewalk.yaml excludes), embed on this machine
+    1. Local .codewalk/ index exists and is complete → load and return INDEX READY
+    2. Local .codewalk/ index is partial (chroma has chunks but manifest missing
+       or files missing) → warn and tell you to run reindex
+    3. No local index + cloud configured → download cloud index
+    4. No local index + local only → scan (codewalk.yaml excludes), embed locally
 
     ⏩ NEXT STEP: use any query tool directly
     """
     repo_path = _mcp_repo_path()
-    _log(f"[codewalk_analyze_codebase] Starting analysis: {repo_path}")
+    _log(f"[codewalk_analyze_codebase] Starting analysis: {repo_path} mode={mode}")
+
+    if mode not in {"auto", "reindex", "full"}:
+        return f"❌ Invalid mode: '{mode}'. Use auto, reindex, or full."
 
     if not repo_path or not os.path.isdir(repo_path):
         return f"❌ Invalid repo path: '{repo_path}' is not a directory."
@@ -569,44 +593,13 @@ def codewalk_analyze_codebase() -> str:
     # Cloud: download index if missing; staleness checks run on every tool (staleness.py)
     download_cloud_index_if_missing()
 
-    built = False
-    embed_result: dict | None = None
     try:
-        if state.index_on_disk(repo_path):
-            # Full index present — load deps/modules/chroma without re-embedding
-            state.load_scoped_analysis()
-        else:
-            # Build analysis first (codewalk.yaml excludes); embed locally if chroma empty
-            state.rebuild_analysis_cache(
-                guidelines_path=None,
-                docs_path=docs_path,
-            )
-
-        state._store = VectorStore(persist_dir=state.chroma_path())
-        state._store.create_collection(state.get_collection_name())
-        existing = state._store.chunk_count()
-
-        if existing == 0:
-            all_paths = [f["file_path"] for f in state._files]
-            _log(f"[codewalk_analyze_codebase] INDEX EMPTY → local embedding {len(all_paths)} files")
-            if not all_paths:
-                return (
-                    f"⚠️ No indexable files found after filtering.\n"
-                    f"Check codewalk.yaml indexing.exclude or .codewalkignore."
-                )
-            built = True
-            embed_result = index_from_paths_parallel(
-                all_paths,
-                repo_path,
-                state.get_collection_name(),
-                persist_dir=state.chroma_path(),
-            )
-            state._store = VectorStore(persist_dir=state.chroma_path())
-            state._store.create_collection(state.get_collection_name())
-            existing = state._store.chunk_count()
-            if state._graph_store and embed_result.get("embedded_chunks"):
-                state._graph_store._populate_chunks(embed_result["embedded_chunks"])
-            state._wire_query_state()
+        result = state.analyze_or_reindex_index(
+            repo_path,
+            docs_path=docs_path,
+            guidelines_path=None,
+            mode=mode,
+        )
     except Exception as e:
         error_msg = str(e)
         if "lock" in error_msg.lower() or "Could not set lock" in error_msg:
@@ -617,68 +610,80 @@ def codewalk_analyze_codebase() -> str:
             )
         raise
 
-    modules = list(state._modules_result["modules"].keys())
-    _log(f"[codewalk_analyze_codebase] Modules: {modules} | Index: {existing} chunks")
-    if existing > 0:
-        # Backfill DuckDB chunks table from ChromaDB if empty
-        if state._graph_store:
-            state._graph_store.populate_chunks_from_chromadb(state._store)
+    if not state._files:
+        return (
+            f"⚠️ No indexable files found after filtering.\n"
+            f"Check codewalk.yaml indexing.exclude or .codewalkignore."
+        )
 
-        # Docs already indexed by build_full_analysis
-        docs_msg = ""
-        if docs_path:
-            from src.codewalk.doc_knowledge.doc_store import DocStore as _DocStore
-            _ds = _DocStore(persist_dir=state.chroma_path(), collection_name=f"{state.get_collection_name()}_docs")
-            _ds.create_collection()
-            dc = _ds.chunk_count()
-            if dc > 0:
-                docs_msg = f"Docs: {dc} chunks embedded\n"
+    status = result.get("status")
+    existing = state._store.chunk_count() if state._store else 0
+    modules = []
+    if state._modules_result is not None:
+        modules = list(state._modules_result.get("modules", {}).keys())
+    _log(f"[codewalk_analyze_codebase] Modules: {modules} | Status: {status} | Index: {existing} chunks")
 
-        if built and embed_result:
-            result_msg = (
-                f"Codebase analyzed and indexed successfully.\n"
-                + f"Files found: {len(state._files)}\n"
-                + f"Files indexed: {embed_result.get('files_scanned', len(state._files))}\n"
-                + f"Chunks embedded: {embed_result.get('chunks_embedded', existing)}\n"
-                + f"Time: {embed_result.get('total_time', 'N/A')}\n"
-                + f"{docs_msg}"
-                + f"Modules found: {', '.join(modules)}\n\n"
-                + f"✅ Local embedding complete — use query tools directly."
-            )
-        else:
-            result_msg = (
-                f"Codebase analyzed successfully.\n"
-                + f"Files found: {len(state._files)}\n"
-                + f"Modules found: {', '.join(modules)}\n"
-                + f"Search index: INDEX READY — {existing} chunks available.\n"
-                + f"{docs_msg}\n"
-                + f"✅ Loaded existing index.\n"
-                + f"Ready to answer questions — use query tools directly."
-            )
+    # Docs message
+    docs_msg = ""
+    if docs_path:
+        from src.codewalk.doc_knowledge.doc_store import DocStore as _DocStore
+        _ds = _DocStore(persist_dir=state.chroma_path(), collection_name=f"{state.get_collection_name()}_docs")
+        _ds.create_collection()
+        dc = _ds.chunk_count()
+        if dc > 0:
+            docs_msg = f"Docs: {dc} chunks embedded\n"
 
-        # If stack context file is missing, prompt the host to set it up now.
-        # This ensures the first tool call on a new repo triggers stack detection.
-        from src.codewalk.review.stack_detect import _load_cached
-        if not _load_cached(Path(repo_path)):
-            result_msg += (
-                "\n\n---\n\n"
-                "## ⏩ Stack Context Setup Required\n\n"
-                "To enable architecture-aware reviews and overview:\n"
-                "1. Call `codewalk_get_stack_info()` to get the file tree + detection prompt\n"
-                "2. Analyze it and produce the JSON describing the stack\n"
-                "3. Call `codewalk_save_stack_context(your_json)` to save it\n\n"
-                "This only happens **once per repo**."
-            )
+    if status == "ready":
+        result_msg = (
+            f"Codebase analyzed successfully.\n"
+            + f"Files found: {len(state._files)}\n"
+            + f"Modules found: {', '.join(modules)}\n"
+            + f"Search index: INDEX READY — {existing} chunks available.\n"
+            + f"{docs_msg}"
+            + f"✅ Loaded existing index.\n"
+            + f"Ready to answer questions — use query tools directly."
+        )
+    elif status == "behind":
+        sample = result.get("missing_sample", [])
+        sample_text = ""
+        if sample:
+            sample_text = "\nExamples: " + ", ".join(sample)
+            if result["missing_count"] > len(sample):
+                sample_text += f" and {result['missing_count'] - len(sample)} more"
+        result_msg = (
+            f"⚠️ Indexing is behind from repo.\n"
+            + f"Files found: {len(state._files)}\n"
+            + f"Indexed files: {len(state._files) - result['missing_count']}\n"
+            + f"Missing files: {result['missing_count']}{sample_text}\n\n"
+            + f"Run `codewalk_incremental_reindex` or `codewalk_analyze_codebase(mode='reindex')` to sync."
+        )
+    else:
+        result_msg = (
+            f"Codebase analyzed and indexed successfully.\n"
+            + f"Files found: {len(state._files)}\n"
+            + f"Files indexed: {result['files_scanned']}\n"
+            + f"Chunks embedded: {result['chunks_embedded']}\n"
+            + f"Time: {result['total_time']}\n"
+            + f"{docs_msg}"
+            + f"Modules found: {', '.join(modules)}\n\n"
+            + f"✅ Local embedding complete — use query tools directly."
+        )
 
-        return result_msg
+    # If stack context file is missing, prompt the host to set it up now.
+    # Skip this prompt when the index is behind so the user focuses on reindexing first.
+    from src.codewalk.review.stack_detect import _load_cached
+    if status != "behind" and not _load_cached(Path(repo_path)):
+        result_msg += (
+            "\n\n---\n\n"
+            "## ⏩ Stack Context Setup Required\n\n"
+            "To enable architecture-aware reviews and overview:\n"
+            "1. Call `codewalk_get_stack_info()` to get the file tree + detection prompt\n"
+            "2. Analyze it and produce the JSON describing the stack\n"
+            "3. Call `codewalk_save_stack_context(your_json)` to save it\n\n"
+            "This only happens **once per repo**."
+        )
 
-    return (
-        f"⚠️ Indexing produced 0 chunks.\n"
-        + f"Files scanned (codewalk.yaml excludes applied): {len(state._files or [])}\n"
-        + f"Modules: {', '.join(modules)}\n"
-        + f"Local: check embedder (Jina/HF) is installed and the MCP workspace is the target repo.\n"
-        + f"Cloud: rm -rf .codewalk && codewalk_pull_index, then analyze again."
-    )
+    return result_msg
 
 
 # ─── TOOL 1b [SETUP · user+AI]: codewalk_generate_config ─────────────
@@ -1096,10 +1101,12 @@ def codewalk_incremental_reindex() -> str:
 
     Compares content hashes stored in ChromaDB metadata against current
     file content on disk. Skips unchanged files, re-embeds changed ones,
-    and removes chunks for deleted files. Much faster than full re-index.
+    removes chunks for deleted files, and resumes a partial/interrupted index.
+    Much faster than full re-index.
 
-    Requires: codebase must be indexed at least once via codewalk_analyze_codebase.
-    After that, call this tool whenever code changes to keep embeddings in sync.
+    If no local index exists, this performs a full build. If a partial index
+    exists (chroma has chunks but manifest is missing), it backfills the
+    missing files instead of returning "No index found".
 
     Returns a summary showing how many files were skipped, re-indexed,
     or deleted, plus the number of new chunks embedded.
@@ -1107,35 +1114,23 @@ def codewalk_incremental_reindex() -> str:
     ⏪ PREVIOUS STEP: codewalk_analyze_codebase (first-time setup)
     ⏩ NEXT STEP: any query tool (search, explain, blast radius, etc.)
     """
-    if err := _require_index():
-        return err
+    repo_path = _mcp_repo_path()
+    if not repo_path or not os.path.isdir(repo_path):
+        return f"❌ Invalid repo path: '{repo_path}' is not a directory."
 
-    repo_path = state.get_repo_path()
-    codewalk_config = load_codewalk_yaml(repo_path)
-
-    if state._store.chunk_count() == 0:
-        return "❌ No files to reindex. Run codewalk_analyze_codebase first."
-
-    # Pass the repo root so the scanner considers every file, including new ones.
-    result = incremental_reindex(
-        [repo_path], repo_path, state.get_collection_name(),
-        persist_dir=state.chroma_path(), codewalk_config=codewalk_config,
-    )
-
-    # Full rebuild of DuckDB + KG from every chunk in ChromaDB, not just changed ones.
-    all_chunks = state._store.get_all_chunks()
-
+    state.set_repo_path(repo_path)
     docs_path = load_codewalk_yaml(repo_path).docs_path
-    state.rebuild_analysis_cache(
-        embedded_chunks=all_chunks,
-        guidelines_path=None,
+
+    result = state.analyze_or_reindex_index(
+        repo_path,
         docs_path=docs_path,
-        force_reindex_extras=True,
+        guidelines_path=None,
+        mode="reindex",
     )
 
     return (
         f"Incremental reindex complete ({result['total_time']})\n\n"
-        f"  Files on disk:   {result['files_on_disk']}\n"
+        f"  Files on disk:   {result['files_scanned']}\n"
         f"  Skipped (same):  {result['files_skipped']}\n"
         f"  Re-indexed:      {result['files_reindexed']}\n"
         f"  Deleted:         {result['files_deleted']}\n"
@@ -2964,7 +2959,7 @@ def codewalk_pull_index(force: bool = False) -> str:
 
     # Check if already up to date before downloading
     local_meta = _local_manifest_path()
-    if local_meta.exists():
+    if local_meta.exists() and not force:
         try:
             remote = requests.get(
                 f"{server_url}/indexes/{repo_name}/manifest",
@@ -2985,16 +2980,21 @@ def codewalk_pull_index(force: bool = False) -> str:
         except Exception:
             pass  # If manifest check fails, proceed with download
 
-    _download_index(server_url, repo_name, repo_token)
+    codewalk_dir = _download_index(server_url, repo_name, repo_token)
+
+    # Clear stale in-memory state so the next query tool reloads from the
+    # freshly downloaded index. _repo_path is discovered from cwd by
+    # state.ensure_initialized() / _resolve_repo_path() when needed.
     _reset_state()
-    local_meta_after = _local_manifest_path()
+
+    local_meta_after = codewalk_dir / "manifest.json"
     new_version = ""
     if local_meta_after.exists():
         try:
             new_version = f" (v{json.loads(local_meta_after.read_text()).get('index_version', '?')})"
         except Exception:
             pass
-    return f"Index updated{new_version}. Using latest version now."
+    return f"Index updated{new_version}. Using latest version now.\nExtracted to: {codewalk_dir}"
 
 # ─── TOOL 23 [CLOUD · AI]: codewalk_index_status ─────
 @mcp.tool()

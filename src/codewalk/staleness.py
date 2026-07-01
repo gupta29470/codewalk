@@ -365,8 +365,8 @@ def _index_build_staleness() -> dict | None:
     else:
         title = "Local index built with older Codewalk"
         message = f"Index was built with v{stored}; running v{__version__}."
-        action_mcp = "Run codewalk_analyze_codebase to rebuild the index locally"
-        action_api = "POST /analyze to rebuild the local index"
+        action_mcp = "Run codewalk_incremental_reindex to sync the local index"
+        action_api = "POST /incremental-reindex to sync the local index"
 
     return {
         "kind": "index_build",

@@ -9,6 +9,9 @@ import queue
 from pathlib import Path
 from contextlib import asynccontextmanager
 
+from dotenv import load_dotenv
+load_dotenv()
+
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
@@ -16,10 +19,7 @@ from fastapi.responses import StreamingResponse
 from fastapi import UploadFile, File, Form
 from fastapi.responses import JSONResponse
 
-from src.codewalk.pipeline import (
-    full_index_parallel, reindex, chunk_and_embed_parallel, incremental_reindex,
-    write_manifest, _next_index_version,
-)
+
 from src.codewalk.api.models import (
     AnalyzeRequest, AnalyzeResponse,
     ApplyAcceptedRequest, ApplyAcceptedResponse,
@@ -31,7 +31,7 @@ from src.codewalk.api.models import (
     ReviewVerdictRequest, ReviewVerdictResponse,
     GuidelinesRequest,
     DocsIndexRequest, DocsAskRequest, DocsSearchRequest, ApproveRequest,
-    ResearchRequest, ApplyFixesRequest, ApplyFixesResponse, AppliedFix,
+    ResearchRequest, ResearchResponse, ApplyFixesRequest, ApplyFixesResponse, AppliedFix,
     SemanticSearchRequest, SemanticSearchResponse, SemanticSearchResult,
     StaticAnalysisRequest, StaticAnalysisResponse, StaticAnalysisIssue,
     TestRunRequest, TestRunResponse,
@@ -44,9 +44,7 @@ from langchain_core.messages import AIMessage, ToolMessage
 from src.codewalk.agent.graph import proposed_write_action
 from src.codewalk.ingestion.scanner import scan_directory
 from src.codewalk.ingestion.tech_detect import detect_tech_stack
-from src.codewalk.generation.diagram_generator import generate_module_diagram
 from src.codewalk.generation.overview_generator import generate_overview
-from src.codewalk.embeddings.vector_store import VectorStore
 from src.codewalk.analysis.reading_order import generate_reading_order
 from src.codewalk.generation.flow_generator import generate_execution_flow
 from src.codewalk.config import settings
@@ -176,12 +174,16 @@ from collections import defaultdict
 
 _RATE_LIMIT_REQUESTS = int(os.getenv("RATE_LIMIT_REQUESTS", "60"))
 _RATE_LIMIT_WINDOW = int(os.getenv("RATE_LIMIT_WINDOW", "60"))
+_RATE_LIMIT_DISABLED = os.getenv("DISABLE_RATE_LIMIT", "").lower() in ("true", "1", "yes")
 _rate_limit_store: dict[str, list[float]] = defaultdict(list)
 _rate_limit_lock = asyncio.Lock()
 
 @app.middleware("http")
 async def rate_limit_middleware(request, call_next):
     """Simple sliding-window rate limiter per client IP."""
+    if _RATE_LIMIT_DISABLED:
+        return await call_next(request)
+
     client_ip = request.client.host if request.client else "unknown"
     now = time.time()
     async with _rate_limit_lock:
@@ -267,8 +269,8 @@ def analyze(request: AnalyzeRequest):
     """Index a codebase: scan → chunk → embed → store → build agent.
 
     Modes:
-        auto    — skip indexing if collection already has data (default)
-        reindex — smart re-index (only changed/new/deleted files)
+        auto    — load complete index, full build if empty, or warn if behind (default)
+        reindex — smart re-index (only changed/new/deleted files); resumes partial indexes
         full    — nuke everything and re-embed from scratch
     """
     try:
@@ -278,70 +280,45 @@ def analyze(request: AnalyzeRequest):
         state.set_repo_path(request.repo_path)
         if not request.collection_name:
             request.collection_name = state.get_collection_name()
-        persist_dir = f"{request.repo_path.rstrip('/')}/.codewalk/chroma"
         codewalk_config = load_codewalk_yaml(request.repo_path)
         guidelines_path, docs_path = _resolve_extras_paths(request.repo_path, codewalk_config)
 
-        # ── Index on disk + auto mode → load only (no re-embed) ──
-        if request.index_mode == "auto" and state.index_on_disk(request.repo_path):
-            state.load_scoped_analysis()
-            _log(f"[api] Loaded existing index — {state._store.chunk_count()} chunks")
+        result = state.analyze_or_reindex_index(
+            request.repo_path,
+            docs_path=docs_path,
+            guidelines_path=guidelines_path,
+            mode=request.index_mode,
+        )
+
+        status = result.get("status")
+        if status == "behind":
+            sample = result.get("missing_sample", [])
+            sample_text = ""
+            if sample:
+                sample_text = "; examples: " + ", ".join(sample)
+                if result["missing_count"] > len(sample):
+                    sample_text += f" and {result['missing_count'] - len(sample)} more"
+            message = (
+                f"⚠️ Indexing is behind from repo. "
+                f"Missing {result['missing_count']} files{sample_text}. "
+                f"Run /incremental-reindex or /analyze with index_mode='reindex' to sync."
+            )
             return AnalyzeResponse(
-                status="complete",
+                status="behind",
                 repo_path=request.repo_path,
-                files_scanned=len(state._files or []),
-                chunks_created=state._store.chunk_count(),
-                modules=list(state._modules_result["modules"].keys()),
+                files_scanned=0,
+                chunks_created=0,
+                modules=[],
+                message=message,
             )
-
-        store = VectorStore(persist_dir=persist_dir)
-        store.create_collection(request.collection_name)
-        existing_count = store.chunk_count()
-
-        # ── Decide whether to index ──────────────────────────────
-        files = None
-        if request.index_mode == "full" or existing_count == 0:
-            index_result = full_index_parallel(
-                request.repo_path, request.collection_name, persist_dir=persist_dir,
-                codewalk_config=codewalk_config,
-            )
-            files = index_result.get("files")
-        elif request.index_mode == "reindex":
-            index_result = reindex(
-                request.repo_path, request.collection_name, persist_dir=persist_dir,
-                codewalk_config=codewalk_config,
-            )
-        else:
-            index_result = {
-                "repo_path": request.repo_path,
-                "files_scanned": 0,
-                "chunks_created": 0,
-                "skipped": True,
-            }
-            _log(f"[api] Skipping indexing — collection already has {existing_count} chunks")
-
-        if files is None:
-            files = state.scan_repo_files(request.repo_path)
-
-        # Refresh the VectorStore handle: full_index_parallel / reindex create their
-        # own store objects and may clear/recreate collections, so the handle created
-        # above would point to deleted Chroma collections.
-        store = VectorStore(persist_dir=persist_dir)
-        store.create_collection(request.collection_name)
-
-        force_extras = request.index_mode in ("full", "reindex")
-        state.initialize(store, None, None, index_result,
-                         files=files, deps=None, repo_path=request.repo_path,
-                         embedded_chunks=index_result.get("embedded_chunks"),
-                         guidelines_path=guidelines_path, docs_path=docs_path,
-                         force_reindex_extras=force_extras)
 
         return AnalyzeResponse(
             status="complete",
             repo_path=request.repo_path,
-            files_scanned=index_result["files_scanned"],
-            chunks_created=index_result.get("chunks_embedded", index_result.get("chunks_created", 0)),
+            files_scanned=result["files_scanned"],
+            chunks_created=result["chunks_embedded"],
             modules=list(state._modules_result["modules"].keys()),
+            message="",
         )
     except HTTPException:
         raise
@@ -354,119 +331,57 @@ def analyze_stream(request: AnalyzeRequest):
     request.repo_path = _require_repo_path(request.repo_path)
 
     async def event_stream():
-        """Async generator that yields SSE events at each pipeline step.
-        Blocking operations run in thread pool so events stream in real time."""
+        """Async generator that yields SSE events around analyze_or_reindex_index."""
         try:
             from src.codewalk.codewalk_config import load_codewalk_yaml
 
-            request.repo_path = _require_repo_path(request.repo_path)
             state.set_repo_path(request.repo_path)
             if not request.collection_name:
                 request.collection_name = state.get_collection_name()
             codewalk_config = load_codewalk_yaml(request.repo_path)
             guidelines_path, docs_path = _resolve_extras_paths(request.repo_path, codewalk_config)
 
-            # Step 1: Check existing data
             yield f"data: {json.dumps({'step': 'init', 'message': 'Checking existing index...'})}\n\n"
-            if request.index_mode == "auto" and state.index_on_disk(request.repo_path):
-                await asyncio.to_thread(state.load_scoped_analysis)
-                count = state._store.chunk_count()
-                yield f"data: {json.dumps({'step': 'skip', 'message': f'Loaded existing index ({count} chunks)'})}\n\n"
-                yield f"data: {json.dumps({'step': 'done', 'message': 'Analysis complete!', 'result': {'status': 'complete', 'repo_path': request.repo_path, 'files_scanned': len(state._files or []), 'chunks_created': count, 'modules': list(state._modules_result['modules'].keys())}})}\n\n"
-                return
 
-            persist_dir = f"{request.repo_path.rstrip('/')}/.codewalk/chroma"
-            store = VectorStore(persist_dir=persist_dir)
-            store.create_collection(request.collection_name)
-            existing_count = store.chunk_count()
-            files = None  # set during full-index; avoids redundant scan at Step 3
-
-            # Step 2: Indexing
-            if request.index_mode == "full" or existing_count == 0:
-                # ── Full index with progress ──
-                yield f"data: {json.dumps({'step': 'scan', 'message': 'Scanning directory...'})}\n\n"
-                files = await asyncio.to_thread(state.scan_repo_files, request.repo_path)
-                scanned_count = len(files)
-                yield f"data: {json.dumps({'step': 'scan', 'message': f'Scanned {scanned_count} files (codewalk.yaml excludes applied)'})}\n\n"
-
-                yield f"data: {json.dumps({'step': 'chunk', 'message': 'Chunking + embedding in parallel...'})}\n\n"
-
-                embedded, chunks_created = await asyncio.to_thread(chunk_and_embed_parallel, files)
-
-                yield f"data: {json.dumps({'step': 'chunk', 'message': f'Created {chunks_created} chunks'})}\n\n"
-                yield f"data: {json.dumps({'step': 'embed', 'message': f'Embedded {len(embedded)} chunks'})}\n\n"
-
-                yield f"data: {json.dumps({'step': 'store', 'message': 'Storing in vector database...'})}\n\n"
-                await asyncio.to_thread(store.clear_collection)
-                await asyncio.to_thread(store.add_parent_child_chunks, embedded)
-                index_dir = f"{request.repo_path.rstrip('/')}/.codewalk"
-                await asyncio.to_thread(
-                    write_manifest,
-                    index_dir,
-                    file_count=len(files),
-                    chunk_count=store.chunk_count(),
-                    collection_name=request.collection_name,
-                    index_version=_next_index_version(index_dir),
-                )
-                yield f"data: {json.dumps({'step': 'store', 'message': f'Stored {len(embedded)} chunks in ChromaDB'})}\n\n"
-
-                index_result = {
-                    "repo_path": request.repo_path,
-                    "files_scanned": len(files),
-                    "chunks_created": chunks_created,
-                    "embedded_chunks": embedded,
-                    "files": files,
-                }
-
-            elif request.index_mode == "reindex":
-                yield f"data: {json.dumps({'step': 'scan', 'message': 'Scanning for changes...'})}\n\n"
-                index_result = await asyncio.to_thread(
-                    reindex, request.repo_path, request.collection_name,
-                    persist_dir=persist_dir, codewalk_config=codewalk_config,
-                )
-                new = index_result['new_files']
-                changed = index_result['changed_files']
-                deleted = index_result['deleted_files']
-                msg = f'New: {new}, Changed: {changed}, Deleted: {deleted}'
-                yield f"data: {json.dumps({'step': 'reindex', 'message': msg})}\n\n"
-
-            else:
-                yield f"data: {json.dumps({'step': 'skip', 'message': f'Index exists ({existing_count} chunks) — skipping'})}\n\n"
-                index_result = {
-                    "repo_path": request.repo_path,
-                    "files_scanned": 0,
-                    "chunks_created": 0,
-                    "skipped": True,
-                }
-
-            # Step 3: Analysis + DuckDB (via build_full_analysis inside initialize)
-            yield f"data: {json.dumps({'step': 'analyze', 'message': 'Building dependency graph...'})}\n\n"
-            if files is None:
-                files = await asyncio.to_thread(state.scan_repo_files, request.repo_path)
-
-            # Step 4: Save state — initialize does deps → modules → DuckDB → docs → guidelines → agent
-            yield f"data: {json.dumps({'step': 'agent', 'message': 'Creating AI agent...'})}\n\n"
-
-            # Refresh the VectorStore handle after any operation that may have
-            # recreated the underlying Chroma collections (full/reindex paths).
-            store = VectorStore(persist_dir=persist_dir)
-            store.create_collection(request.collection_name)
-
-            force_extras = request.index_mode in ("full", "reindex")
-            await asyncio.to_thread(
-                state.initialize, store, None, None, index_result,
-                files=files, deps=None, repo_path=request.repo_path,
-                embedded_chunks=index_result.get("embedded_chunks"),
-                guidelines_path=guidelines_path, docs_path=docs_path,
-                force_reindex_extras=force_extras
+            index_result = await asyncio.to_thread(
+                state.analyze_or_reindex_index,
+                request.repo_path,
+                docs_path=docs_path,
+                guidelines_path=guidelines_path,
+                mode=request.index_mode,
             )
 
-            num_modules = len(state._modules_result['modules'])
-            yield f"data: {json.dumps({'step': 'analyze', 'message': f'Detected {num_modules} modules'})}\n\n"
+            status = index_result.get("status")
+            if status == "ready":
+                msg = f"Loaded existing index ({index_result['chunks_embedded']} chunks)"
+                yield f"data: {json.dumps({'step': 'skip', 'message': msg})}\n\n"
+            elif status == "behind":
+                sample = index_result.get("missing_sample", [])
+                sample_text = ""
+                if sample:
+                    sample_text = "; examples: " + ", ".join(sample)
+                    if index_result["missing_count"] > len(sample):
+                        sample_text += f" and {index_result['missing_count'] - len(sample)} more"
+                msg = (
+                    f"Indexing is behind from repo — "
+                    f"missing {index_result['missing_count']} files{sample_text}. "
+                    f"Run /incremental-reindex or /analyze with index_mode='reindex' to sync."
+                )
+                yield f"data: {json.dumps({'step': 'behind', 'message': msg})}\n\n"
+            elif status == "reindexed":
+                msg = f"Reindexed {index_result['files_scanned']} files ({index_result['chunks_embedded']} chunks)"
+                yield f"data: {json.dumps({'step': 'reindex', 'message': msg})}\n\n"
+            else:
+                msg = f"Indexed {index_result['files_scanned']} files ({index_result['chunks_embedded']} chunks)"
+                yield f"data: {json.dumps({'step': 'store', 'message': msg})}\n\n"
 
-            # Final event — includes full result
-            chunks = index_result.get('chunks_embedded', index_result.get('chunks_created', 0))
-            yield f"data: {json.dumps({'step': 'done', 'message': 'Analysis complete!', 'result': {'status': 'complete', 'repo_path': request.repo_path, 'files_scanned': index_result.get('files_scanned', 0), 'chunks_created': chunks, 'modules': list(state._modules_result['modules'].keys())}})}\n\n"
+            if status == "behind":
+                yield f"data: {json.dumps({'step': 'done', 'message': 'Analysis check complete', 'result': {'status': 'behind', 'repo_path': request.repo_path, 'files_scanned': 0, 'chunks_created': 0, 'modules': []}})}\n\n"
+            else:
+                yield f"data: {json.dumps({'step': 'analyze', 'message': 'Building dependency graph...'})}\n\n"
+                num_modules = len(state._modules_result['modules'])
+                yield f"data: {json.dumps({'step': 'analyze', 'message': f'Detected {num_modules} modules'})}\n\n"
+                yield f"data: {json.dumps({'step': 'done', 'message': 'Analysis complete!', 'result': {'status': 'complete', 'repo_path': request.repo_path, 'files_scanned': index_result['files_scanned'], 'chunks_created': index_result['chunks_embedded'], 'modules': list(state._modules_result['modules'].keys())}})}\n\n"
 
         except HTTPException:
             raise
@@ -592,21 +507,17 @@ def chat_stream(request: ChatRequest):
 # ─── GET /overview ───────────────────────────────────────────────────
 @app.get("/overview", response_model=OverviewResponse)
 def overview():
-    """Get the project overview (tech stack, modules, diagram, LLM summary)."""
+    """Get the project overview (tech stack, modules, LLM summary)."""
     try:
         state.require_index()
         modules_result = state.get_modules_result()
-        store = state.get_store()
-
-        # Generate diagram
-        diagram = generate_module_diagram(modules_result["module_graph"])
 
         # Detect tech stack
         analyze_result = state.get_analyze_result()
         tech = detect_tech_stack(analyze_result.get("repo_path") or state.get_repo_path())
 
         # Generate overview (calls LLM)
-        overview_text = generate_overview(tech, modules_result, diagram)
+        overview_text = generate_overview(tech, modules_result)
 
         deps = state.get_deps()
         runtime = state._graph_runtime or deps["graph"]
@@ -619,9 +530,9 @@ def overview():
             total_files=modules_result["stats"]["total_files"],
             total_modules=modules_result["stats"]["total_modules"],
             modules=list(modules_result["modules"].keys()),
-            diagram=diagram,
+            diagram=None,
             overview_text=overview_text,
-            riskiest_files=top_risky, 
+            riskiest_files=top_risky,
         )
     
     except RuntimeError as e:
@@ -785,7 +696,7 @@ def get_execution_flow():
         runtime = state._graph_runtime or deps["graph"]
         order = generate_reading_order(files, deps, graph_runtime=runtime)
         flow = generate_execution_flow(order, deps)
-        return {"flow": flow}
+        return flow
     except RuntimeError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except HTTPException:
@@ -820,38 +731,24 @@ def refresh_analysis():
 # ─── POST /incremental-reindex ───────────────────────────────────────
 @app.post("/incremental-reindex")
 def incremental_reindex_endpoint():
-    """Re-embed only files that changed since last indexing."""
+    """Re-embed only files that changed since last indexing.
+
+    Also resumes a partial/interrupted index and performs a full build when no
+    index exists, so it always leaves the repo in a queryable state.
+    """
     try:
         from src.codewalk.codewalk_config import load_codewalk_yaml
 
-        state.require_index()
-        store = state.get_store()
-        repo_path = state.get_repo_path()
-        collection_name = state.get_collection_name()
-        persist_dir = state.chroma_path()
+        repo_path = _require_repo_path(None)
+        state.set_repo_path(repo_path)
         codewalk_config = load_codewalk_yaml(repo_path)
-        if store.chunk_count() == 0:
-            raise HTTPException(status_code=400, detail="No files indexed yet. Run /analyze first.")
-
-        # Pass the repo root so the scanner considers every file, not just the
-        # previously indexed ones. Deletions are still detected by comparing with
-        # the existing indexed file set inside incremental_reindex.
-        result = incremental_reindex(
-            [repo_path], repo_path, collection_name,
-            persist_dir=persist_dir, codewalk_config=codewalk_config,
-        )
-
-        # Full rebuild of DuckDB + knowledge graph so they reflect every chunk
-        # currently in ChromaDB, not just the files that changed in this run.
-        all_chunks = store.get_all_chunks()
-
-        # Refresh analysis cache + re-index docs/guidelines from codewalk.yaml
         guidelines_path, docs_path = _resolve_extras_paths(repo_path, codewalk_config)
-        state.rebuild_analysis_cache(
-            embedded_chunks=all_chunks,
-            guidelines_path=guidelines_path,
+
+        result = state.analyze_or_reindex_index(
+            repo_path,
             docs_path=docs_path,
-            force_reindex_extras=True,
+            guidelines_path=guidelines_path,
+            mode="reindex",
         )
 
         return result
@@ -1404,7 +1301,7 @@ def chat_approve(request: ApproveRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@app.post("/research")
+@app.post("/research", response_model=ResearchResponse)
 async def research_endpoint(request: ResearchRequest):
     """Run deep research on a complex codebase question."""
     try:
@@ -1418,7 +1315,11 @@ async def research_endpoint(request: ResearchRequest):
             state._graph_store,
             request.depth,
         )
-        return {"question": report.question, "report": report.markdown, "sources": report.sources}
+        return {
+            "question": report.question,
+            "report": report.markdown,
+            "sources": report.sources,
+        }
     except RuntimeError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except HTTPException:

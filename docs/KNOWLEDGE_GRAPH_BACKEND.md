@@ -68,8 +68,8 @@ There is **no FastAPI `/knowledge-graph` endpoint**. The graph is served by the 
 curl -s 'http://localhost:3000/api/knowledge-graph?repoPath=/path/to/repo' | python3 -m json.tool | head -30
 ```
 
-- `repoPath` is optional; when omitted the route searches the current working directory and its parent.
-- The **Sidebar locks index-dependent tabs** (including Knowledge Graph) until `GET /index-status` reports `indexed: true`.
+- `repoPath` is optional. When omitted, the route checks the `CODEWALK_REPO_PATH` environment variable, then falls back to the current working directory and its parent.
+- The **`KineticShell` navigation** locks index-dependent tabs (including Knowledge Graph) until `GET /index-status` reports `indexed: true`.
 - 404 → no `.codewalk/knowledge-graph.json` found → run `codewalk analyze` locally or `@codewalk analyze this codebase` via MCP/cloud, then retry.
 
 ### Quick sanity on the file
@@ -215,32 +215,46 @@ frontend/
   src/
     app/
       knowledge-graph/
-        page.tsx               # Main graph page
+        page.tsx                      # Main graph page (server component)
+        layout.tsx                    # Page layout wrapper
+        KnowledgeGraphClient.tsx      # Client-side container (state, diff, mobile)
+        _components/
+          NetworkGraph.tsx            # Primary React Flow structural graph
+          FolderGraph.tsx             # Folder-tree / file-level graph view
+          DependencyView.tsx          # Dependency-focused subviews
+          LayerTree.tsx               # Module / layer tree sidebar
+          LayerDetail.tsx             # Expanded layer detail panel
+          NodeDetailPanel.tsx         # Selected node metadata + source preview
+          CodePreview.tsx             # Source peek for selected node
+          SettingsPanel.tsx           # Filters, themes, export, search settings
+          KineticNode.tsx             # Shared node renderer
+          layout.worker.ts            # Web Worker wrapper for ELK layout
     lib/kg/
-      api.ts                   # Loader for /api/knowledge-graph
-      types.ts                 # TypeScript schema + full node/edge/layer/category types
-      validate.ts              # Runtime validation + auto-correction
-      store.ts                 # Zustand store: selection, filters, view mode, tour, diff
-      themes/                  # Theme engine + preset palettes
-      utils/                   # Layout (ELK, backend positions), search, export, containers
+      api.ts                          # Loader for /api/knowledge-graph
+      types.ts                        # TypeScript schema + full node/edge/layer/category types
+      validate.ts                     # Runtime validation + auto-correction
+      store.ts                        # Zustand store: selection, filters, view mode, tour, diff
+      themes/                         # Theme engine + preset palettes
+      utils/                          # Layout (ELK, backend positions), search, export, containers
     components/kg/
-      GraphView.tsx            # Structural React Flow view
-      KnowledgeGraphView.tsx   # Knowledge-layer view
-      DashboardShell.tsx       # Layout shell + header controls
-      NodeInfo.tsx             # Selected node detail panel
-      FilterPanel.tsx          # Node-category + detail-level filters
-      SearchBar.tsx            # Fuzzy / semantic search
-      CodeViewer.tsx           # Source peek for selected node
-      FileExplorer.tsx         # File tree sidebar
-      PathFinderModal.tsx      # Shortest path between two nodes
-      DiffToggle.tsx           # Highlight changed/affected nodes
-      ExportMenu.tsx           # Export graph as PNG/SVG
-      ThemePicker.tsx          # Theme picker
-      LayerLegend.tsx          # Layer / module legend
-      PersonaSelector.tsx      # experienced / junior / non-technical
-      OnboardingOverlay.tsx    # First-run help
+      GraphView.tsx                   # Legacy/shared React Flow view (still imported by NetworkGraph)
+      KnowledgeGraphView.tsx          # Knowledge-layer view
+      DashboardShell.tsx              # Layout shell + header controls
+      NodeInfo.tsx                    # Selected node detail panel
+      FilterPanel.tsx                 # Node-category + detail-level filters
+      SearchBar.tsx                   # Fuzzy / semantic search
+      CodeViewer.tsx                  # Source peek for selected node
+      FileExplorer.tsx                # File tree sidebar
+      PathFinderModal.tsx             # Shortest path between two nodes
+      DiffToggle.tsx                  # Highlight changed/affected nodes
+      ExportMenu.tsx                  # Export graph as PNG/SVG
+      ThemePicker.tsx                 # Theme picker
+      LayerLegend.tsx                 # Layer / module legend
+      PersonaSelector.tsx             # experienced / junior / non-technical
+      OnboardingOverlay.tsx           # First-run help
       KeyboardShortcutsHelp.tsx
-      MobileLayout.tsx         # Responsive mobile shell
+      MobileLayout.tsx                # Responsive mobile shell
+      ...                             # Additional shared nodes, tooltips, breadcrumbs
 ```
 
 ### 4.2 Dependencies
@@ -276,7 +290,7 @@ The page uses `loadKnowledgeGraph()` from `frontend/src/lib/kg/api.ts`. There is
 
 **Do not** read `file://` paths from the browser — use `/api/knowledge-graph` only.
 
-**Cloud users:** download the index with MCP (`codewalk_pull_index` / `codewalk_connect_repo`), start the frontend, then open `/knowledge-graph?repoPath=<repoPath>` or call `codewalk_show_knowledge_graph`.
+**Cloud users:** download the index with MCP (`codewalk_pull_index` / `codewalk_connect_repo`), then use `scripts/run-ui-for-repo.sh <repoPath>` to start both services, or start the frontend manually and open `/knowledge-graph?repoPath=<repoPath>`. You can also call `codewalk_show_knowledge_graph`.
 
 ### 4.5 React Flow conversion
 
@@ -319,20 +333,31 @@ The page uses `loadKnowledgeGraph()` from `frontend/src/lib/kg/api.ts`. There is
 ### 4.7 Wire into existing app
 
 1. **Data loader** — `frontend/src/lib/kg/api.ts` exports `loadKnowledgeGraph(repoPath?: string)`.
-2. **Sidebar** — nav item at `/knowledge-graph`.
-3. **Index gate** — the Sidebar locks the Knowledge Graph tab until `GET /index-status` reports `indexed: true`.
+2. **KineticShell** — nav item at `/knowledge-graph`.
+3. **Index gate** — `KineticShell` locks the Knowledge Graph tab until `GET /index-status` reports `indexed: true`.
 4. **Home page** — optional card: “Explore codebase graph” → `/knowledge-graph`.
 
 ### 4.8 Local dev workflow
+
+**Quick launch from the target repo:**
+
+```bash
+# From the repo you want to explore
+/path/to/codewalk/scripts/run-ui-for-repo.sh
+# Open http://localhost:3000/knowledge-graph
+```
+
+The launcher starts the API from the target repo, starts the frontend from the Codewalk checkout, and sets `CODEWALK_REPO_PATH` automatically.
+
+**Manual workflow:**
 
 ```bash
 # Terminal 1 — analyze the target repo
 .codewalk-env/bin/python -m codewalk analyze /path/to/small-repo
 
-# Terminal 2 — start the frontend
-cd frontend && npm run dev
-# If stale chunks appear:
-# npm run restart
+# Terminal 2 — start the frontend with the repo path
+cd /path/to/codewalk/frontend
+CODEWALK_REPO_PATH=/path/to/small-repo npm run dev
 # Open http://localhost:3000/knowledge-graph?repoPath=/path/to/small-repo
 ```
 
@@ -366,6 +391,16 @@ After every **incremental** reindex, Codewalk performs a **Chroma incremental up
 
 ### 5.2 Local dev workflow
 
+**Quick launch from the target repo:**
+
+```bash
+# From the repo you want to explore
+/path/to/codewalk/scripts/run-ui-for-repo.sh
+# Open http://localhost:3000/knowledge-graph
+```
+
+**Manual workflow:**
+
 ```bash
 # Terminal 1 — from the target repo root, analyze the codebase
 curl -X POST http://localhost:8000/analyze \
@@ -375,8 +410,9 @@ curl -X POST http://localhost:8000/analyze \
 # Or use the CLI:
 # .codewalk-env/bin/python -m codewalk analyze
 
-# Terminal 2 — start the frontend
-cd frontend && npm run dev
+# Terminal 2 — start the frontend with the repo path
+cd /path/to/codewalk/frontend
+CODEWALK_REPO_PATH=/path/to/target/repo npm run dev
 # If the frontend throws stale chunk errors, restart cleanly:
 # npm run restart
 # Open http://localhost:3000/knowledge-graph?repoPath=/path/to/target/repo
@@ -408,7 +444,7 @@ cd frontend && npm run dev
 - [ ] Layer filter reduces visible nodes
 - [ ] Search finds node by name or path
 - [ ] Click node shows detail (path, lines, metrics)
-- [ ] Sidebar link locked until analyzed
+- [ ] KineticShell nav link locked until analyzed
 - [ ] Large graph: file-only or layer filter prevents browser freeze
 
 ---

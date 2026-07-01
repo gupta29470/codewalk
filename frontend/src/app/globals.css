@@ -4,56 +4,62 @@
 
 @layer base {
   :root {
-    --background: 0 0% 100%;
-    --foreground: 0 0% 9%;
-    --card: 0 0% 100%;
-    --card-foreground: 0 0% 9%;
-    --popover: 0 0% 100%;
-    --popover-foreground: 0 0% 9%;
-    --primary: 0 0% 15%;
-    --primary-foreground: 0 0% 98%;
-    --secondary: 0 0% 96%;
-    --secondary-foreground: 0 0% 15%;
-    --muted: 0 0% 96%;
-    --muted-foreground: 0 0% 45%;
-    --accent: 0 0% 96%;
-    --accent-foreground: 0 0% 15%;
-    --destructive: 0 84% 60%;
-    --destructive-foreground: 0 0% 98%;
-    --border: 0 0% 90%;
-    --input: 0 0% 90%;
-    --ring: 0 0% 64%;
-    --radius: 0.5rem;
+    /* Kinetic Logic dark theme as the global default */
+    --background: 216 24% 7%;
+    --foreground: 222 25% 90%;
+    --card: 213 16% 11%;
+    --card-foreground: 222 25% 90%;
+    --popover: 213 15% 13%;
+    --popover-foreground: 222 25% 90%;
+    --primary: 214 100% 82%;
+    --primary-foreground: 208 100% 18%;
+    --secondary: 220 11% 17%;
+    --secondary-foreground: 222 25% 90%;
+    --muted: 213 15% 13%;
+    --muted-foreground: 218 22% 79%;
+    --accent: 220 11% 17%;
+    --accent-foreground: 222 25% 90%;
+    --destructive: 6 100% 84%;
+    --destructive-foreground: 358 100% 21%;
+    --border: 212 12% 21%;
+    --input: 212 12% 21%;
+    --ring: 214 100% 82%;
+    --radius: 0.375rem;
   }
 
   .dark {
-    --background: 0 0% 9%;
-    --foreground: 0 0% 98%;
-    --card: 0 0% 13%;
-    --card-foreground: 0 0% 98%;
-    --popover: 0 0% 13%;
-    --popover-foreground: 0 0% 98%;
-    --primary: 0 0% 98%;
-    --primary-foreground: 0 0% 15%;
-    --secondary: 0 0% 18%;
-    --secondary-foreground: 0 0% 98%;
-    --muted: 0 0% 18%;
-    --muted-foreground: 0 0% 64%;
-    --accent: 0 0% 18%;
-    --accent-foreground: 0 0% 98%;
-    --destructive: 0 62% 30%;
-    --destructive-foreground: 0 0% 98%;
-    --border: 0 0% 18%;
-    --input: 0 0% 18%;
-    --ring: 0 0% 64%;
+    --background: 216 24% 7%;
+    --foreground: 222 25% 90%;
+    --card: 213 16% 11%;
+    --card-foreground: 222 25% 90%;
+    --popover: 213 15% 13%;
+    --popover-foreground: 222 25% 90%;
+    --primary: 214 100% 82%;
+    --primary-foreground: 208 100% 18%;
+    --secondary: 220 11% 17%;
+    --secondary-foreground: 222 25% 90%;
+    --muted: 213 15% 13%;
+    --muted-foreground: 218 22% 79%;
+    --accent: 220 11% 17%;
+    --accent-foreground: 222 25% 90%;
+    --destructive: 6 100% 84%;
+    --destructive-foreground: 358 100% 21%;
+    --border: 212 12% 21%;
+    --input: 212 12% 21%;
+    --ring: 214 100% 82%;
   }
 
   * {
     @apply border-border;
   }
 
+  html {
+    color-scheme: dark;
+  }
+
   body {
     @apply bg-background text-foreground;
+    font-family: var(--font-inter), ui-sans-serif, system-ui, sans-serif;
   }
 }
 
@@ -217,4 +223,453 @@
 
 .kg-dashboard .react-flow__background {
   background-color: var(--kg-root);
+}
+
+/* ── Kinetic Logic Design System ───────────────────────────────────────── */
+
+:root {
+  --kinetic-root: #101419;
+  --kinetic-background: #101419;
+  --kinetic-surface: #101419;
+  --kinetic-surface-dim: #101419;
+  --kinetic-surface-bright: #36393f;
+  --kinetic-surface-container-lowest: #0b0e14;
+  --kinetic-surface-container-low: #181c21;
+  --kinetic-surface-container: #1c2025;
+  --kinetic-surface-container-high: #272a30;
+  --kinetic-surface-container-highest: #32353b;
+  --kinetic-surface-variant: #32353b;
+
+  --kinetic-on-surface: #e0e2ea;
+  --kinetic-on-surface-variant: #c0c7d4;
+  --kinetic-inverse-surface: #e0e2ea;
+  --kinetic-inverse-on-surface: #2d3136;
+
+  --kinetic-outline: #8b919d;
+  --kinetic-outline-variant: #414752;
+  --kinetic-surface-tint: #a2c9ff;
+
+  --kinetic-primary: #a2c9ff;
+  --kinetic-on-primary: #00315c;
+  --kinetic-primary-container: #58a6ff;
+  --kinetic-on-primary-container: #003a6b;
+  --kinetic-inverse-primary: #0060aa;
+
+  --kinetic-secondary: #d8baff;
+  --kinetic-on-secondary: #430882;
+  --kinetic-secondary-container: #5d2d9c;
+  --kinetic-on-secondary-container: #cda8ff;
+
+  --kinetic-tertiary: #ffba42;
+  --kinetic-on-tertiary: #432c00;
+  --kinetic-tertiary-container: #da9600;
+  --kinetic-on-tertiary-container: #4f3400;
+
+  --kinetic-error: #ffb4ab;
+  --kinetic-on-error: #690005;
+  --kinetic-error-container: #93000a;
+  --kinetic-on-error-container: #ffdad6;
+
+  --kinetic-primary-fixed: #d3e4ff;
+  --kinetic-primary-fixed-dim: #a2c9ff;
+  --kinetic-on-primary-fixed: #001c38;
+  --kinetic-on-primary-fixed-variant: #004882;
+
+  --kinetic-secondary-fixed: #eddcff;
+  --kinetic-secondary-fixed-dim: #d8baff;
+  --kinetic-on-secondary-fixed: #290055;
+  --kinetic-on-secondary-fixed-variant: #5b2b9a;
+
+  --kinetic-tertiary-fixed: #ffddaf;
+  --kinetic-tertiary-fixed-dim: #ffba42;
+  --kinetic-on-tertiary-fixed: #281800;
+  --kinetic-on-tertiary-fixed-variant: #614000;
+
+  /* Semantic node colors */
+  --kinetic-node-file: #a2c9ff;
+  --kinetic-node-service: #d8baff;
+  --kinetic-node-document: #ffba42;
+  --kinetic-node-config: #7ee787;
+  --kinetic-node-endpoint: #ff7b72;
+  --kinetic-node-function: #79c0ff;
+  --kinetic-node-class: #d2a8ff;
+  --kinetic-node-module: #ffca28;
+
+  /* Status tints */
+  --kinetic-status-analyzed: rgba(162, 201, 255, 0.18);
+  --kinetic-status-analyzed-text: #a2c9ff;
+  --kinetic-status-changed: rgba(255, 186, 66, 0.18);
+  --kinetic-status-changed-text: #ffba42;
+  --kinetic-status-unchanged: rgba(139, 145, 157, 0.18);
+  --kinetic-status-unchanged-text: #8b919d;
+  --kinetic-status-error: rgba(255, 180, 171, 0.18);
+  --kinetic-status-error-text: #ffb4ab;
+
+  --kinetic-border: #30363d;
+  --kinetic-border-subtle: rgba(48, 54, 61, 0.8);
+  --kinetic-gutter: 1px;
+}
+
+.kinetic-dashboard {
+  background-color: var(--kinetic-root);
+  color: var(--kinetic-on-surface);
+  font-family: var(--font-inter), ui-sans-serif, system-ui, sans-serif;
+}
+
+.kinetic-font-mono {
+  font-family: var(--font-jetbrains-mono), ui-monospace, monospace;
+}
+
+/* Kinetic theme accents */
+.kinetic-accent-blue {
+  --kinetic-primary: #a2c9ff;
+  --kinetic-on-primary: #00315c;
+  --kinetic-primary-container: #58a6ff;
+  --kinetic-on-primary-container: #003a6b;
+  --kinetic-surface-tint: #a2c9ff;
+}
+
+.kinetic-accent-purple {
+  --kinetic-primary: #d8baff;
+  --kinetic-on-primary: #430882;
+  --kinetic-primary-container: #5d2d9c;
+  --kinetic-on-primary-container: #cda8ff;
+  --kinetic-surface-tint: #d8baff;
+}
+
+.kinetic-accent-gold {
+  --kinetic-primary: #ffba42;
+  --kinetic-on-primary: #432c00;
+  --kinetic-primary-container: #da9600;
+  --kinetic-on-primary-container: #4f3400;
+  --kinetic-surface-tint: #ffba42;
+}
+
+.kinetic-accent-green {
+  --kinetic-primary: #7ee787;
+  --kinetic-on-primary: #002109;
+  --kinetic-primary-container: #005313;
+  --kinetic-on-primary-container: #9bfab1;
+  --kinetic-surface-tint: #7ee787;
+}
+
+/* Kinetic graph controls */
+.kinetic-graph .react-flow__controls {
+  background: var(--kinetic-surface-container);
+  border: 1px solid var(--kinetic-border);
+  border-radius: 6px;
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.45);
+  overflow: hidden;
+}
+
+.kinetic-graph .react-flow__controls-button {
+  background: var(--kinetic-surface-container);
+  color: var(--kinetic-on-surface-variant);
+  border-bottom: 1px solid var(--kinetic-border);
+}
+
+.kinetic-graph .react-flow__controls-button:last-child {
+  border-bottom: none;
+}
+
+.kinetic-graph .react-flow__controls-button svg {
+  fill: currentColor;
+}
+
+.kinetic-graph .react-flow__controls-button:hover {
+  background: var(--kinetic-surface-container-high);
+  color: var(--kinetic-on-surface);
+}
+
+/* Overview markdown contrast overrides */
+.overview-markdown {
+  color: var(--kinetic-on-surface-variant);
+}
+
+.overview-markdown h1,
+.overview-markdown h2,
+.overview-markdown h3,
+.overview-markdown h4,
+.overview-markdown strong {
+  color: var(--kinetic-on-surface);
+}
+
+.overview-markdown code {
+  background: var(--kinetic-surface-container);
+  color: var(--kinetic-on-surface);
+  border: 1px solid var(--kinetic-border);
+  border-radius: 4px;
+  padding: 0.125rem 0.375rem;
+  font-size: 0.8em;
+}
+
+.overview-markdown pre {
+  background: var(--kinetic-surface-container);
+  border: 1px solid var(--kinetic-border);
+  border-radius: 6px;
+  padding: 0.75rem;
+}
+
+.overview-markdown pre code {
+  background: transparent;
+  border: none;
+  padding: 0;
+  color: var(--kinetic-on-surface);
+}
+
+
+/* Execution flow narrative markdown */
+.execution-flow-narrative {
+  color: var(--kinetic-on-surface-variant);
+}
+
+.execution-flow-narrative h1,
+.execution-flow-narrative h2,
+.execution-flow-narrative h3,
+.execution-flow-narrative h4 {
+  color: var(--kinetic-on-surface);
+  font-weight: 600;
+  margin-top: 1.5rem;
+  margin-bottom: 0.75rem;
+}
+
+.execution-flow-narrative h1 {
+  font-size: 1.25rem;
+}
+
+.execution-flow-narrative h2 {
+  font-size: 1.125rem;
+}
+
+.execution-flow-narrative h3 {
+  font-size: 1rem;
+}
+
+.execution-flow-narrative p {
+  margin-bottom: 0.75rem;
+  line-height: 1.6;
+}
+
+.execution-flow-narrative ul,
+.execution-flow-narrative ol {
+  margin-left: 1.25rem;
+  margin-bottom: 0.75rem;
+}
+
+.execution-flow-narrative li {
+  margin-bottom: 0.375rem;
+}
+
+.execution-flow-narrative strong {
+  color: var(--kinetic-on-surface);
+  font-weight: 600;
+}
+
+.execution-flow-narrative code {
+  background: var(--kinetic-surface-container);
+  color: var(--kinetic-on-surface);
+  border: 1px solid var(--kinetic-border);
+  border-radius: 4px;
+  padding: 0.125rem 0.375rem;
+  font-size: 0.8em;
+}
+
+/* Research report markdown */
+.research-report {
+  color: var(--kinetic-on-surface);
+}
+
+.research-report h1,
+.research-report h2,
+.research-report h3,
+.research-report h4 {
+  color: var(--kinetic-on-surface);
+  font-weight: 600;
+  margin-top: 1.5rem;
+  margin-bottom: 0.75rem;
+}
+
+.research-report h1 {
+  font-size: 1.375rem;
+}
+
+.research-report h2 {
+  font-size: 1.25rem;
+}
+
+.research-report h3 {
+  font-size: 1.125rem;
+}
+
+.research-report p {
+  margin-bottom: 0.75rem;
+  line-height: 1.7;
+}
+
+.research-report ul,
+.research-report ol {
+  margin-left: 1.25rem;
+  margin-bottom: 0.75rem;
+}
+
+.research-report li {
+  margin-bottom: 0.5rem;
+}
+
+.research-report strong {
+  color: var(--kinetic-on-surface);
+  font-weight: 600;
+}
+
+.research-report code {
+  background: var(--kinetic-surface-container);
+  color: var(--kinetic-on-surface);
+  border: 1px solid var(--kinetic-border);
+  border-radius: 4px;
+  padding: 0.125rem 0.375rem;
+  font-size: 0.85em;
+}
+
+.research-report pre {
+  background: var(--kinetic-surface-container);
+  border: 1px solid var(--kinetic-border);
+  border-radius: 6px;
+  padding: 1rem;
+  overflow-x: auto;
+}
+
+.research-report pre code {
+  background: transparent;
+  border: none;
+  padding: 0;
+  font-size: 0.8em;
+}
+
+.research-report a {
+  color: var(--kinetic-primary);
+  text-decoration: underline;
+}
+
+.research-report a:hover {
+  color: var(--kinetic-secondary);
+}
+
+.research-report blockquote {
+  border-left: 3px solid var(--kinetic-primary);
+  background: var(--kinetic-surface-container);
+  padding: 0.75rem 1rem;
+  margin-bottom: 0.75rem;
+  border-radius: 0 6px 6px 0;
+}
+
+/* Chat message markdown */
+.chat-message {
+  color: var(--kinetic-on-surface);
+}
+
+.chat-message p {
+  margin-bottom: 0.5rem;
+  line-height: 1.6;
+}
+
+.chat-message p:last-child {
+  margin-bottom: 0;
+}
+
+.chat-message h1,
+.chat-message h2,
+.chat-message h3,
+.chat-message h4 {
+  color: var(--kinetic-on-surface);
+  font-weight: 600;
+  margin-top: 0.75rem;
+  margin-bottom: 0.5rem;
+}
+
+.chat-message h1 {
+  font-size: 1.25rem;
+}
+
+.chat-message h2 {
+  font-size: 1.125rem;
+}
+
+.chat-message h3 {
+  font-size: 1rem;
+}
+
+.chat-message ul,
+.chat-message ol {
+  margin-left: 1.25rem;
+  margin-bottom: 0.5rem;
+}
+
+.chat-message li {
+  margin-bottom: 0.25rem;
+}
+
+.chat-message strong {
+  color: var(--kinetic-on-surface);
+  font-weight: 600;
+}
+
+.chat-message code {
+  background: var(--kinetic-surface-container);
+  color: var(--kinetic-on-surface);
+  border: 1px solid var(--kinetic-border);
+  border-radius: 4px;
+  padding: 0.125rem 0.375rem;
+  font-size: 0.85em;
+}
+
+.chat-message pre {
+  background: var(--kinetic-surface-container);
+  border: 1px solid var(--kinetic-border);
+  border-radius: 6px;
+  padding: 0.75rem;
+  overflow-x: auto;
+  margin-bottom: 0.5rem;
+}
+
+.chat-message pre code {
+  background: transparent;
+  border: none;
+  padding: 0;
+  font-size: 0.8em;
+}
+
+.chat-message a {
+  color: var(--kinetic-primary);
+  text-decoration: underline;
+}
+
+.chat-message a:hover {
+  color: var(--kinetic-secondary);
+}
+
+.chat-message table {
+  width: 100%;
+  border-collapse: collapse;
+  margin-bottom: 0.75rem;
+  font-size: 0.85rem;
+}
+
+.chat-message th,
+.chat-message td {
+  border: 1px solid var(--kinetic-border);
+  padding: 0.375rem 0.5rem;
+  text-align: left;
+}
+
+.chat-message th {
+  background: var(--kinetic-surface-container);
+  font-weight: 600;
+}
+
+.chat-message blockquote {
+  border-left: 3px solid var(--kinetic-primary);
+  background: var(--kinetic-surface-container);
+  padding: 0.5rem 0.75rem;
+  margin-bottom: 0.5rem;
+  border-radius: 0 6px 6px 0;
 }

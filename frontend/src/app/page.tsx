@@ -45,26 +45,26 @@ export default function HomePage() {
   }
 
   return (
-    <div className="flex items-center justify-center min-h-[80vh]">
+    <div className="flex items-center justify-center min-h-full p-6">
       <div className="w-full max-w-lg space-y-6">
         <div className="text-center space-y-2">
-          <h1 className="text-4xl font-bold tracking-tight">CODEWALK</h1>
-          <p className="text-muted-foreground">
+          <h1 className="text-4xl font-bold tracking-tight text-kinetic-on-surface">CODEWALK</h1>
+          <p className="text-kinetic-on-surface-variant">
             Understand any codebase in hours, not weeks
           </p>
         </div>
 
-        <Card>
+        <Card className="border-kinetic-border bg-kinetic-surface-container-low">
           <CardHeader>
-            <CardTitle className="flex items-center gap-2">
-              <FolderOpen className="h-5 w-5" />
+            <CardTitle className="flex items-center gap-2 text-kinetic-on-surface">
+              <FolderOpen className="h-5 w-5 text-kinetic-primary" />
               Analyze Codebase
             </CardTitle>
           </CardHeader>
           <CardContent>
             <form onSubmit={handleAnalyze} className="space-y-4">
               <div className="space-y-2">
-                <label className="text-sm font-medium">Index Mode</label>
+                <label className="text-sm font-medium text-kinetic-on-surface">Index Mode</label>
                 <div className="flex flex-col gap-3">
                   {[
                     {
@@ -86,19 +86,22 @@ export default function HomePage() {
                       desc: "Wipes the entire index and re-scans, re-chunks, and re-embeds every file from scratch. Use when something seems off.",
                     },
                   ].map((mode) => (
-                    <label key={mode.value} className="flex items-start gap-2 cursor-pointer">
+                    <label
+                      key={mode.value}
+                      className="flex items-start gap-3 p-3 rounded-md border border-kinetic-border bg-kinetic-surface-container cursor-pointer hover:border-kinetic-outline-variant transition-colors"
+                    >
                       <input
                         type="radio"
                         name="indexMode"
                         value={mode.value}
                         checked={indexMode === mode.value}
                         onChange={(e) => setIndexMode(e.target.value)}
-                        className="accent-primary mt-1"
+                        className="accent-kinetic-primary mt-1"
                       />
                       <div>
-                        <span className="text-sm font-medium">{mode.label}</span>
-                        <span className="ml-2 text-xs text-muted-foreground italic">({mode.speed})</span>
-                        <p className="text-xs text-muted-foreground">{mode.desc}</p>
+                        <span className="text-sm font-medium text-kinetic-on-surface">{mode.label}</span>
+                        <span className="ml-2 text-xs text-kinetic-on-surface-variant italic">({mode.speed})</span>
+                        <p className="text-xs text-kinetic-on-surface-variant mt-0.5">{mode.desc}</p>
                       </div>
                     </label>
                   ))}
@@ -121,16 +124,16 @@ export default function HomePage() {
             </form>
 
             {steps.length > 0 && (
-              <div className="mt-4 space-y-1">
+              <div className="mt-4 space-y-1.5">
                 {steps.map((step, idx) => (
                   <div
                     key={idx}
-                    className="flex items-center gap-2 text-sm text-muted-foreground"
+                    className="flex items-center gap-2 text-sm text-kinetic-on-surface-variant"
                   >
                     {idx === steps.length - 1 && loading ? (
-                      <Loader2 className="h-3 w-3 animate-spin flex-shrink-0" />
+                      <Loader2 className="h-3 w-3 animate-spin flex-shrink-0 text-kinetic-primary" />
                     ) : (
-                      <CheckCircle2 className="h-3 w-3 text-green-500 flex-shrink-0" />
+                      <CheckCircle2 className="h-3 w-3 text-kinetic-node-config flex-shrink-0" />
                     )}
                     {step}
                   </div>
@@ -139,23 +142,23 @@ export default function HomePage() {
             )}
 
             {error && (
-              <div className="mt-4 p-3 bg-destructive/10 text-destructive rounded-md text-sm">
+              <div className="mt-4 p-3 bg-kinetic-error/10 text-kinetic-error rounded-md text-sm border border-kinetic-error/20">
                 {error}
               </div>
             )}
 
             {result && (
-              <div className="mt-4 p-3 bg-green-50 dark:bg-green-950 rounded-md text-sm space-y-1">
-                <div className="flex items-center gap-2 text-green-700 dark:text-green-300 font-medium">
+              <div className="mt-4 p-3 rounded-md text-sm space-y-1 border border-kinetic-node-config/30 bg-kinetic-node-config/10">
+                <div className="flex items-center gap-2 text-kinetic-node-config font-medium">
                   <CheckCircle2 className="h-4 w-4" />
                   Analysis Complete
                 </div>
-                <p className="text-muted-foreground">
+                <p className="text-kinetic-on-surface-variant">
                   {result.files_scanned} files scanned &bull;{" "}
                   {result.chunks_created} chunks &bull;{" "}
                   {result.modules.length} modules
                 </p>
-                <p className="text-xs text-muted-foreground">
+                <p className="text-xs text-kinetic-on-surface-variant">
                   Navigate to any tab in the sidebar to explore.
                 </p>
               </div>

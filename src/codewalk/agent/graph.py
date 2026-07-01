@@ -8,6 +8,7 @@ from typing_extensions import TypedDict
 from langgraph.graph import StateGraph, START, END
 from langgraph.graph.message import add_messages
 from langchain_core.messages import AIMessage, SystemMessage, ToolMessage
+from collections import Counter
 
 from src.codewalk.config import settings, get_llm
 from src.codewalk.log import log as _log
@@ -62,6 +63,37 @@ def proposed_write_action(messages: list) -> str:
     """Format pending write tool calls for HITL approval UI."""
     from src.codewalk.agent.tools import format_write_tool_calls
     return format_write_tool_calls(_pending_write_tool_calls(messages))
+
+
+_SEARCH_LOOP_THRESHOLD = 2
+
+
+def _search_query_counts(messages: list) -> Counter:
+    """Count how many times each search_codebase query has been issued."""
+    counts: Counter = Counter()
+    for msg in messages:
+        if not isinstance(msg, AIMessage):
+            continue
+        for tc in getattr(msg, "tool_calls", []) or []:
+            if tc.get("name") == "search_codebase":
+                args = tc.get("args", {})
+                query = args.get("query", "") if isinstance(args, dict) else ""
+                if query:
+                    counts[query.strip()] += 1
+    return counts
+
+
+def _force_final_answer(messages: list, llm) -> AIMessage:
+    """Call the LLM without tools and demand a final answer."""
+    stop_message = SystemMessage(
+        content=(
+            "You have already searched for this exact query multiple times. "
+            "STOP calling tools. Use the search results already provided and "
+            "answer the user's question directly. If the existing results are "
+            "insufficient, briefly explain what is missing instead of searching again."
+        )
+    )
+    return llm.invoke(messages + [stop_message])
 
 
 def make_selective_tool_node(tools: list, allowed_names: frozenset[str]) -> Callable:
@@ -174,6 +206,22 @@ def create_agent(
                         content="",
                         tool_calls=[{"name": tool_name, "args": tool_args, "id": f"call_{tool_name}"}],
                     )
+
+        # Loop guard: if the model tries to repeat a search query it already
+        # issued, force a direct answer without tools.
+        prior_queries = _search_query_counts(state["messages"])
+        if response.tool_calls:
+            repeated = False
+            for tc in response.tool_calls:
+                if tc.get("name") == "search_codebase":
+                    args = tc.get("args", {})
+                    query = args.get("query", "").strip() if isinstance(args, dict) else ""
+                    if prior_queries.get(query, 0) >= _SEARCH_LOOP_THRESHOLD - 1:
+                        repeated = True
+                        break
+            if repeated:
+                _log("[agent] Detected repeated search query; forcing final answer.")
+                response = _force_final_answer(messages, llm)
 
         return {"messages": [response]}
 

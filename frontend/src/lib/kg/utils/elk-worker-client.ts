@@ -14,7 +14,7 @@ interface WorkerError {
   error: string;
 }
 
-const WORKER_TIMEOUT_MS = 2500;
+const WORKER_TIMEOUT_MS = 8000;
 
 type Pending = {
   resolve: (value: { positioned: ElkOutput; issues: { level: "warning" | "error"; message: string }[] }) => void;

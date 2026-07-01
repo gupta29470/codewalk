@@ -126,16 +126,16 @@ export default function AdminPage() {
     }
 
     function statusBadge(status: string | null) {
-        if (!status) return <span className="text-muted-foreground text-xs">—</span>;
+        if (!status) return <span className="text-kinetic-on-surface-variant text-xs">—</span>;
         const map: Record<string, { icon: React.ReactNode; className: string }> = {
-            queued: { icon: <Clock className="h-3 w-3" />, className: "bg-yellow-100 text-yellow-700" },
-            running: { icon: <Loader2 className="h-3 w-3 animate-spin" />, className: "bg-blue-100 text-blue-700" },
-            indexing: { icon: <Loader2 className="h-3 w-3 animate-spin" />, className: "bg-blue-100 text-blue-700" },
-            done: { icon: <CheckCircle2 className="h-3 w-3" />, className: "bg-green-100 text-green-700" },
-            ready: { icon: <CheckCircle2 className="h-3 w-3" />, className: "bg-green-100 text-green-700" },
-            failed: { icon: <XCircle className="h-3 w-3" />, className: "bg-red-100 text-red-700" },
+            queued: { icon: <Clock className="h-3 w-3" />, className: "bg-kinetic-tertiary/15 text-kinetic-tertiary border border-kinetic-tertiary/30" },
+            running: { icon: <Loader2 className="h-3 w-3 animate-spin" />, className: "bg-kinetic-primary/15 text-kinetic-primary border border-kinetic-primary/30" },
+            indexing: { icon: <Loader2 className="h-3 w-3 animate-spin" />, className: "bg-kinetic-primary/15 text-kinetic-primary border border-kinetic-primary/30" },
+            done: { icon: <CheckCircle2 className="h-3 w-3" />, className: "bg-kinetic-node-config/15 text-kinetic-node-config border border-kinetic-node-config/30" },
+            ready: { icon: <CheckCircle2 className="h-3 w-3" />, className: "bg-kinetic-node-config/15 text-kinetic-node-config border border-kinetic-node-config/30" },
+            failed: { icon: <XCircle className="h-3 w-3" />, className: "bg-kinetic-error/15 text-kinetic-error border border-kinetic-error/30" },
         };
-        const style = map[status] || { icon: null, className: "bg-gray-100 text-gray-700" };
+        const style = map[status] || { icon: null, className: "bg-kinetic-surface-container-high text-kinetic-on-surface-variant border border-kinetic-border" };
         return (
             <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium ${style.className}`}>
                 {style.icon}
@@ -144,38 +144,40 @@ export default function AdminPage() {
         );
     }
 
+    const inputClass = "border-kinetic-border bg-kinetic-surface-container text-kinetic-on-surface placeholder:text-kinetic-on-surface-variant focus-visible:ring-kinetic-primary";
+
     return (
-        <div className="max-w-5xl mx-auto space-y-6">
+        <div className="p-6 space-y-6 max-w-5xl mx-auto">
             <div className="flex items-center gap-3">
-                <Shield className="h-6 w-6 text-primary" />
-                <h1 className="text-2xl font-bold tracking-tight">Cloud Admin</h1>
+                <Shield className="h-6 w-6 text-kinetic-primary" />
+                <h1 className="text-2xl font-bold tracking-tight text-kinetic-on-surface">Cloud Admin</h1>
             </div>
 
             {server && (
-                <Card>
+                <Card className="border-kinetic-border bg-kinetic-surface-container-low">
                     <CardHeader>
-                        <CardTitle className="text-sm flex items-center gap-2">
-                            <Server className="h-4 w-4" />
+                        <CardTitle className="text-sm flex items-center gap-2 text-kinetic-on-surface">
+                            <Server className="h-4 w-4 text-kinetic-primary" />
                             Server
                         </CardTitle>
                     </CardHeader>
                     <CardContent>
                         <div className="flex flex-wrap gap-4 text-sm">
-                            <span className="inline-flex items-center gap-1">
-                                <CheckCircle2 className="h-3.5 w-3.5 text-green-600" />
+                            <span className="inline-flex items-center gap-1 text-kinetic-node-config">
+                                <CheckCircle2 className="h-3.5 w-3.5" />
                                 Health: {server.health}
                             </span>
-                            <span className="text-muted-foreground">Version: {server.version}</span>
-                            <span className="text-muted-foreground font-mono">Commit: {server.commit}</span>
+                            <span className="text-kinetic-on-surface-variant">Version: {server.version}</span>
+                            <span className="text-kinetic-on-surface-variant font-mono">Commit: {server.commit}</span>
                         </div>
                     </CardContent>
                 </Card>
             )}
 
-            <Card>
+            <Card className="border-kinetic-border bg-kinetic-surface-container-low">
                 <CardHeader>
-                    <CardTitle className="text-sm flex items-center gap-2">
-                        <KeyRound className="h-4 w-4" />
+                    <CardTitle className="text-sm flex items-center gap-2 text-kinetic-on-surface">
+                        <KeyRound className="h-4 w-4 text-kinetic-primary" />
                         Admin Authentication
                     </CardTitle>
                 </CardHeader>
@@ -186,23 +188,28 @@ export default function AdminPage() {
                             placeholder="Enter X-Admin-Key"
                             value={adminKey}
                             onChange={(e) => setAdminKey(e.target.value)}
-                            className="flex-1"
+                            className={`${inputClass} flex-1`}
                         />
-                        <Button variant="outline" onClick={fetchRepos} disabled={!adminKey.trim()}>
+                        <Button
+                            variant="outline"
+                            onClick={fetchRepos}
+                            disabled={!adminKey.trim()}
+                            className="border-kinetic-border bg-kinetic-surface-container text-kinetic-on-surface hover:bg-kinetic-surface-container-high hover:text-kinetic-on-surface"
+                        >
                             <RefreshCw className="h-4 w-4 mr-1" />
                             Refresh
                         </Button>
                     </div>
-                    <p className="text-xs text-muted-foreground mt-2">
+                    <p className="text-xs text-kinetic-on-surface-variant mt-2">
                         Set the ADMIN_API_KEY env var on the server, then paste it here.
                     </p>
                 </CardContent>
             </Card>
 
-            <Card>
+            <Card className="border-kinetic-border bg-kinetic-surface-container-low">
                 <CardHeader>
-                    <CardTitle className="text-sm flex items-center gap-2">
-                        <Plus className="h-4 w-4" />
+                    <CardTitle className="text-sm flex items-center gap-2 text-kinetic-on-surface">
+                        <Plus className="h-4 w-4 text-kinetic-primary" />
                         Register Repository
                     </CardTitle>
                 </CardHeader>
@@ -210,41 +217,49 @@ export default function AdminPage() {
                     <form onSubmit={handleRegister} className="space-y-3">
                         <div className="grid grid-cols-2 gap-3">
                             <div>
-                                <label className="text-xs font-medium">Repo Name</label>
+                                <label className="text-xs font-medium text-kinetic-on-surface-variant">Repo Name</label>
                                 <Input
                                     placeholder="owner/repo"
                                     value={form.name}
                                     onChange={(e) => setForm({ ...form, name: e.target.value })}
                                     required
+                                    className={inputClass}
                                 />
                             </div>
                             <div>
-                                <label className="text-xs font-medium">GitHub URL</label>
+                                <label className="text-xs font-medium text-kinetic-on-surface-variant">GitHub URL</label>
                                 <Input
                                     placeholder="https://github.com/org/repo"
                                     value={form.github_url}
                                     onChange={(e) => setForm({ ...form, github_url: e.target.value })}
                                     required
+                                    className={inputClass}
                                 />
                             </div>
                             <div>
-                                <label className="text-xs font-medium">Branch</label>
+                                <label className="text-xs font-medium text-kinetic-on-surface-variant">Branch</label>
                                 <Input
                                     placeholder="main"
                                     value={form.branch}
                                     onChange={(e) => setForm({ ...form, branch: e.target.value })}
+                                    className={inputClass}
                                 />
                             </div>
                             <div>
-                                <label className="text-xs font-medium">Installation ID</label>
+                                <label className="text-xs font-medium text-kinetic-on-surface-variant">Installation ID</label>
                                 <Input
                                     placeholder="12345678"
                                     value={form.installation_id}
                                     onChange={(e) => setForm({ ...form, installation_id: e.target.value })}
+                                    className={inputClass}
                                 />
                             </div>
                         </div>
-                        <Button type="submit" disabled={registering || !adminKey.trim()}>
+                        <Button
+                            type="submit"
+                            disabled={registering || !adminKey.trim()}
+                            className="bg-kinetic-primary text-kinetic-on-primary hover:bg-kinetic-primary/90"
+                        >
                             {registering ? (
                                 <>
                                     <Loader2 className="mr-2 h-4 w-4 animate-spin" />
@@ -258,7 +273,7 @@ export default function AdminPage() {
                             )}
                         </Button>
                         {registerResult && (
-                            <div className="flex items-start gap-2 text-xs text-green-600 bg-green-50 p-2 rounded-md">
+                            <div className="flex items-start gap-2 text-xs text-kinetic-node-config bg-kinetic-node-config/10 p-2 rounded-md border border-kinetic-node-config/30">
                                 <span className="flex-1 break-all">{registerResult}</span>
                                 <button
                                     type="button"
@@ -275,29 +290,31 @@ export default function AdminPage() {
             </Card>
 
             {indexResult && (
-                <div className="text-xs text-green-600 bg-green-50 p-3 rounded-md">{indexResult}</div>
+                <div className="text-xs text-kinetic-node-config bg-kinetic-node-config/10 p-3 rounded-md border border-kinetic-node-config/30">
+                    {indexResult}
+                </div>
             )}
 
-            <Card>
+            <Card className="border-kinetic-border bg-kinetic-surface-container-low">
                 <CardHeader>
-                    <CardTitle className="text-sm">Registered Repositories</CardTitle>
+                    <CardTitle className="text-sm text-kinetic-on-surface">Registered Repositories</CardTitle>
                 </CardHeader>
                 <CardContent>
                     {error && (
-                        <div className="mb-3 p-3 bg-destructive/10 text-destructive rounded-md text-sm">
+                        <div className="mb-3 p-3 bg-kinetic-error/10 text-kinetic-error rounded-md text-sm border border-kinetic-error/20">
                             {error}
                         </div>
                     )}
 
                     {repos.length === 0 ? (
-                        <p className="text-sm text-muted-foreground">
+                        <p className="text-sm text-kinetic-on-surface-variant">
                             {adminKey.trim() ? "No repos registered yet." : "Enter admin key to view repos."}
                         </p>
                     ) : (
                         <div className="overflow-x-auto">
                             <table className="w-full text-sm">
                                 <thead>
-                                    <tr className="border-b text-muted-foreground">
+                                    <tr className="border-b border-kinetic-border text-kinetic-on-surface-variant">
                                         <th className="text-left py-2 px-3 font-medium">Repository</th>
                                         <th className="text-left py-2 px-3 font-medium">Branch</th>
                                         <th className="text-left py-2 px-3 font-medium">Index Status</th>
@@ -310,20 +327,20 @@ export default function AdminPage() {
                                 </thead>
                                 <tbody>
                                     {repos.map((repo) => (
-                                        <tr key={repo.full_name} className="border-b last:border-0 hover:bg-muted/50">
-                                            <td className="py-2 px-3 font-medium">{repo.full_name}</td>
-                                            <td className="py-2 px-3 text-muted-foreground">{repo.branch}</td>
+                                        <tr key={repo.full_name} className="border-b border-kinetic-border last:border-0 hover:bg-kinetic-surface-container/50">
+                                            <td className="py-2 px-3 font-medium text-kinetic-on-surface">{repo.full_name}</td>
+                                            <td className="py-2 px-3 text-kinetic-on-surface-variant">{repo.branch}</td>
                                             <td className="py-2 px-3">{statusBadge(repo.index_status)}</td>
                                             <td className="py-2 px-3">{statusBadge(repo.job_status)}</td>
-                                            <td className="py-2 px-3 font-mono text-xs text-muted-foreground">
+                                            <td className="py-2 px-3 font-mono text-xs text-kinetic-on-surface-variant">
                                                 {repo.last_indexed_sha ? repo.last_indexed_sha.slice(0, 7) : "—"}
                                             </td>
-                                            <td className="py-2 px-3 text-muted-foreground text-xs">
+                                            <td className="py-2 px-3 text-kinetic-on-surface-variant text-xs">
                                                 {repo.job_finished
                                                     ? new Date(repo.job_finished).toLocaleString()
                                                     : "—"}
                                             </td>
-                                            <td className="py-2 px-3 text-red-600 text-xs max-w-xs truncate">
+                                            <td className="py-2 px-3 text-kinetic-error text-xs max-w-xs truncate">
                                                 {repo.job_error || "—"}
                                             </td>
                                             <td className="py-2 px-3">
@@ -332,6 +349,7 @@ export default function AdminPage() {
                                                     variant="outline"
                                                     onClick={() => handleIndex(repo)}
                                                     disabled={indexingRepo === repo.full_name || !adminKey.trim()}
+                                                    className="border-kinetic-border bg-kinetic-surface-container text-kinetic-on-surface hover:bg-kinetic-surface-container-high hover:text-kinetic-on-surface"
                                                 >
                                                     {indexingRepo === repo.full_name ? (
                                                         <Loader2 className="h-3.5 w-3.5 animate-spin" />

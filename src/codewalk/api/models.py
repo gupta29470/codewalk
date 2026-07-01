@@ -25,6 +25,7 @@ class AnalyzeResponse(BaseModel):
     files_scanned: int
     chunks_created: int
     modules: list[str]
+    message: str = ""
 
 class ChatResponse(BaseModel):
     """POST /chat — response body."""
@@ -50,7 +51,7 @@ class OverviewResponse(BaseModel):
     total_files: int
     total_modules: int
     modules: list[str]
-    diagram: str
+    diagram: str | None = None
     overview_text: str
     riskiest_files: list[dict] = []
 
@@ -183,6 +184,40 @@ class ResearchRequest(BaseModel):
     """Request body for POST /research."""
     question: str
     depth: str = "standard"   # quick | standard | deep
+
+class ResearchDiagramNode(BaseModel):
+    """A node in the research architecture diagram."""
+    id: str
+    type: str  # file | function | class | method
+    name: str
+    full_path: str
+    x: float | None = None
+    y: float | None = None
+    level: int | None = None
+    parentId: str | None = None
+    module: str | None = None
+    start_line: int | None = None
+    end_line: int | None = None
+    parent_class: str | None = None
+    qualified_name: str | None = None
+
+class ResearchDiagramEdge(BaseModel):
+    """An edge in the research architecture diagram."""
+    source: str
+    target: str
+    type: str  # contains | imports | calls | member_of
+
+class ResearchDiagram(BaseModel):
+    """Structured diagram payload for the research report."""
+    nodes: list[ResearchDiagramNode]
+    edges: list[ResearchDiagramEdge]
+
+class ResearchResponse(BaseModel):
+    """POST /research — response body."""
+    question: str
+    report: str
+    sources: list[str]
+    diagram: ResearchDiagram | None = None
 
 class FixItem(BaseModel):
     """A single code fix to apply."""

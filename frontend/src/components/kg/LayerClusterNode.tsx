@@ -11,7 +11,6 @@ export interface LayerClusterNodeData extends Record<string, unknown> {
   aggregateComplexity?: string;
   layerColorIndex: number;
   searchMatchCount?: number;
-  onDrillIn: (layerId: string) => void;
 }
 
 export type LayerClusterFlowNode = Node<LayerClusterNodeData, "layer-cluster">;
@@ -26,7 +25,6 @@ function LayerClusterNodeRaw({ data }: { id: string; data: LayerClusterNodeData 
   return (
     <div
       className="relative w-[260px] rounded-xl border bg-kg-surface overflow-hidden cursor-pointer select-none shadow-[0_4px_16px_rgba(0,0,0,0.35)] hover:shadow-[0_6px_24px_rgba(0,0,0,0.45)] transition-shadow"
-      onClick={() => data.onDrillIn(data.layerId)}
       style={{ borderColor: `color-mix(in srgb, ${color} 25%, transparent)` }}
     >
       <Handle type="target" position={Position.Top} className="!bg-transparent !border-0" />

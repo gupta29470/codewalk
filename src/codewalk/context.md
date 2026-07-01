@@ -25,7 +25,7 @@ analysis/ (deps + modules)
     ↓
 graph/ (DuckDB + igraph runtime)
     ↓
-rag/, query/, review/, agent/, generation/ (consumers)
+rag/, query/, review/, agent/, generation/, research/ (consumers)
 ```
 
 ## Entry points that start here
@@ -39,7 +39,7 @@ rag/, query/, review/, agent/, generation/ (consumers)
 
 - `pipeline.py` imports from `ingestion/`, `embeddings/`, `analysis/`, `graph/`, `doc_knowledge/`, `review/`. It also writes `.codewalk/manifest.json` with the active ChromaDB `collection_name` so later loads use the right collection.
 - `pipeline.build_full_analysis()` now takes a `collection_name` argument so doc/guideline collections stay aligned with the code collection.
-- `pipeline.incremental_reindex()` now tolerates unreadable files (`read_file_content()` returning `None`) instead of crashing.
+- `pipeline.incremental_reindex()` now tolerates unreadable files (`read_file_content()` returning `None`) instead of crashing. It also resumes a partial index: files already in Chroma are skipped and only missing/changed files are processed.
 - `api/main.py` refreshes the `VectorStore` handle after indexing so the store kept in `api/state.py` always points at live Chroma collections.
 - `api/state.py` repopulates an empty DuckDB `files` table during `load_scoped_analysis()` so existing Chroma indexes remain usable after schema migrations.
 - `cli.py` calls `pipeline.*` and `codewalk_config.*`.

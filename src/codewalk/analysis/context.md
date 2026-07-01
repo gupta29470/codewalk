@@ -23,13 +23,13 @@ dependency_graph.py → deps {"graph": {...}, "stats": {...}}
     ↓
 module_detector.py → modules_result {"modules": {...}, "module_graph": {...}}
     ↓
-graph/graph_store.py, query/, generation/, rag/
+graph/graph_store.py, query/, generation/, research/, rag/
 ```
 
 ## Connections
 
 - `dependency_graph.py` is called by `pipeline.py`, `api/state.py`, `query/` helpers, and the MCP server.
-- `module_detector.py` output drives `generation/diagram_generator.py` and `query/` module lookups.
+- `module_detector.py` output drives `research/diagram_generator.py` and `query/` module lookups.
 - `reading_order.py` is exposed via API/MCP reading-order tools.
 - `blast_radius.py` feeds review and overview generation.
 

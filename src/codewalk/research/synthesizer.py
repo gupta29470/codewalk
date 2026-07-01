@@ -1,7 +1,9 @@
 """Synthesize parallel research findings into a single coherent report."""
 from __future__ import annotations
 from dataclasses import dataclass, field
+
 from src.codewalk.research.researcher import SubFindings
+from src.codewalk.graph.graph_store import GraphStore
 
 SYNTHESIZER_PROMPT = """You are a senior engineer synthesizing research findings.
 Produce a structured markdown report answering the original question.
@@ -16,13 +18,17 @@ Use this structure:
 ## Code References
 (the most important code snippets with file:line)
 
-## Architecture Diagram
-(Mermaid flowchart if helpful, else omit)
+## Architecture Flow
+(2-4 short paragraphs explaining how the relevant components connect and flow.
+Use the grounded code graph below — file imports and symbol calls — to describe
+what calls what and how data moves. Do NOT include diagrams or Mermaid syntax.)
 
 Original question: {question}
 
 Sub-findings:
-{findings}"""
+{findings}
+
+{graph_context}"""
 
 SYNTHESIS_CRITIC_PROMPT = """You are a senior engineer critiquing a research report.
 Check for:
@@ -33,6 +39,7 @@ Check for:
 
 Return a numbered list of specific gaps. Be concise. If the report is complete, say "LGTM"."""
 
+
 @dataclass
 class StructuredReport:
     """Final research report with citations."""
@@ -40,34 +47,54 @@ class StructuredReport:
     markdown: str
     sources: list[str] = field(default_factory=list)
 
+
 def merge_findings(state: dict) -> dict:
     """Fan-in node: collect all SubFindings from the results list."""
     findings = state.get("results", [])
     findings.sort(key=lambda f: f.sub_question_id)
     return {"merged_findings": findings}
 
-def synthesize(state: dict) -> dict:
-    """Generate node: LLM synthesizes merged findings → StructuredReport."""
+
+def make_synthesizer(graph_store: GraphStore | None = None):
+    """Factory for the synthesis LangGraph node.
+
+    Closes over graph_store so the synthesizer can include grounded architecture
+    context in the report.
+    """
     from src.codewalk.config import get_llm
+    from src.codewalk.research.diagram_generator import generate_research_graph_context
 
-    question = state["question"]
-    findings: list[SubFindings] = state.get("merged_findings", [])
+    def synthesize(state: dict) -> dict:
+        """Generate node: LLM synthesizes merged findings → StructuredReport."""
+        question = state["question"]
+        findings: list[SubFindings] = state.get("merged_findings", [])
 
-    findings_text = "\n\n".join(
-        f"### {finding.sub_question_text}\n{finding.findings}"
-        for finding in findings
-    )
+        findings_text = "\n\n".join(
+            f"### {finding.sub_question_text}\n{finding.findings}"
+            for finding in findings
+        )
 
-    all_sources = list({source for finding in findings for source in finding.sources})
+        all_sources = list({source for finding in findings for source in finding.sources})
 
-    llm = get_llm(temperature=0)
-    prompt = SYNTHESIZER_PROMPT.format(question=question, findings=findings_text)
-    response = llm.invoke(prompt)
+        graph_context = ""
+        if graph_store and all_sources:
+            graph_context = generate_research_graph_context(all_sources, graph_store)
+            if graph_context:
+                graph_context = f"Grounded code graph for the architecture flow:\n{graph_context}"
 
-    report = StructuredReport(
-        question=question,
-        markdown=response.content.strip(),
-        sources=all_sources,
-    )
-    return {"report": report}
+        llm = get_llm(temperature=0)
+        prompt = SYNTHESIZER_PROMPT.format(
+            question=question,
+            findings=findings_text,
+            graph_context=graph_context,
+        )
+        response = llm.invoke(prompt)
 
+        report = StructuredReport(
+            question=question,
+            markdown=response.content.strip(),
+            sources=all_sources,
+        )
+        return {"report": report}
+
+    return synthesize

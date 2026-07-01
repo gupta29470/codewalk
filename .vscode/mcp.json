@@ -3,14 +3,12 @@
         "codewalk": {
             "command": "/Users/amadhavl/Development/codewalk/.codewalk-env/bin/python",
             "args": [
-                "-m",
-                "src.codewalk.mcp.server"
+                "-c",
+                "import os, sys; sys.path.insert(0, os.environ['CODEWALK_PATH']); from src.codewalk.mcp.server import mcp; mcp.run(transport='stdio')"
             ],
             "cwd": "${workspaceFolder}",
             "env": {
-                "EXCLUDE_PATHS": "test,docs",
-                "REVIEW_GUIDELINES_PATH": "",
-                "CODE_DOCS_PATH": "",
+                "CODEWALK_PATH": "/Users/amadhavl/Development/codewalk",
                 "CODEWALK_SERVER_URL": "https://api.codewalk.xyz",
                 "CODEWALK_REPO_NAME": "gupta29470/codewalk",
                 "CODEWALK_REPO_TOKEN": "cw_repo_3d2kvYExuS-HbcFQ466r7g"

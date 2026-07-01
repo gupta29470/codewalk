@@ -409,7 +409,7 @@ While indexing: `index_status: indexing` + `job_status: running` (or briefly `qu
 
 You can also use the Cloud Admin UI at `/admin` (register, list, trigger index, copy tokens, health/version).
 
-**Frontend note:** The local Codewalk frontend sidebar locks index-dependent tabs until `GET /index-status` reports `indexed: true`; it accepts an optional `?repo_path=` query parameter.
+**Frontend note:** The local Codewalk frontend `KineticShell` locks index-dependent tabs until `GET /index-status` reports `indexed: true`. The knowledge-graph filesystem routes accept an optional `?repoPath=` query parameter or the `CODEWALK_REPO_PATH` environment variable; `scripts/run-ui-for-repo.sh` sets this automatically.
 
 **Push during indexing:** Older jobs are marked `failed` (superseded); only the newest commit is published.
 

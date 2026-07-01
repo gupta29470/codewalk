@@ -75,33 +75,41 @@ export default function BlastRadiusPage() {
 
     if (loading) {
         return (
-            <div className="flex items-center justify-center min-h-[60vh]">
-                <Loader2 className="h-8 w-8 animate-spin text-muted-foreground" />
+            <div className="flex items-center justify-center min-h-full p-6">
+                <Loader2 className="h-8 w-8 animate-spin text-kinetic-primary" />
             </div>
         );
     }
 
     if (error) {
         return (
-            <div className="p-4 bg-destructive/10 text-destructive rounded-md">
-                {error}
+            <div className="p-6">
+                <div className="p-4 bg-kinetic-error/10 text-kinetic-error rounded-md border border-kinetic-error/20">
+                    {error}
+                </div>
             </div>
         );
     }
 
     return (
-        <div className="space-y-6">
+        <div className="p-6 space-y-6 max-w-6xl">
             <div className="flex items-center justify-between">
-                <h1 className="text-2xl font-bold">Blast Radius Explorer</h1>
+                <h1 className="text-2xl font-bold text-kinetic-on-surface">Blast Radius Explorer</h1>
                 <div className="flex items-center gap-2">
-                    <Button variant="outline" size="sm" onClick={fetchData} disabled={loading}>
+                    <Button
+                        variant="outline"
+                        size="sm"
+                        onClick={fetchData}
+                        disabled={loading}
+                        className="border-kinetic-border bg-kinetic-surface-container text-kinetic-on-surface hover:bg-kinetic-surface-container-high hover:text-kinetic-on-surface"
+                    >
                         <RefreshCw className={`h-4 w-4 mr-1 ${loading ? "animate-spin" : ""}`} />
                         Refresh
                     </Button>
                     <select
                         value={selectedModule}
                         onChange={(e) => setSelectedModule(e.target.value)}
-                        className="border rounded-md px-3 py-1.5 text-sm bg-background"
+                        className="border border-kinetic-border rounded-md px-3 py-1.5 text-sm bg-kinetic-surface-container text-kinetic-on-surface outline-none focus-visible:ring-1 focus-visible:ring-kinetic-primary"
                     >
                         <option value="">All modules</option>
                         {modules.map((m) => (
@@ -114,9 +122,9 @@ export default function BlastRadiusPage() {
             </div>
 
             {Object.entries(grouped).map(([level, files]) => (
-                <Card key={level}>
+                <Card key={level} className="border-kinetic-border bg-kinetic-surface-container-low">
                     <CardHeader className="pb-2">
-                        <CardTitle className="flex items-center gap-2 text-base">
+                        <CardTitle className="flex items-center gap-2 text-base text-kinetic-on-surface">
                             <RiskBadge level={level} />
                             <span>{files.length} files</span>
                         </CardTitle>
@@ -126,17 +134,17 @@ export default function BlastRadiusPage() {
                             <div key={file.file}>
                                 <button
                                     onClick={() => toggleExpand(file.file)}
-                                    className="w-full flex items-center justify-between py-2.5 text-left hover:bg-muted/50 rounded px-2 -mx-2"
+                                    className="w-full flex items-center justify-between py-2.5 text-left hover:bg-kinetic-surface-container rounded-md px-2 -mx-2 transition-colors"
                                 >
                                     <div className="flex items-center gap-2">
                                         {expanded.has(file.file) ? (
-                                            <ChevronDown className="h-4 w-4 text-muted-foreground" />
+                                            <ChevronDown className="h-4 w-4 text-kinetic-on-surface-variant" />
                                         ) : (
-                                            <ChevronRight className="h-4 w-4 text-muted-foreground" />
+                                            <ChevronRight className="h-4 w-4 text-kinetic-on-surface-variant" />
                                         )}
-                                        <span className="font-mono text-sm">{file.file}</span>
+                                        <span className="font-mono text-sm text-kinetic-on-surface">{file.file}</span>
                                     </div>
-                                    <span className="text-sm text-muted-foreground">
+                                    <span className="text-sm text-kinetic-on-surface-variant">
                                         {file.affected_files} affected
                                     </span>
                                 </button>
@@ -144,26 +152,26 @@ export default function BlastRadiusPage() {
                                 {expanded.has(file.file) && (
                                     <div className="ml-8 pb-2 space-y-1">
                                         {file.direct.length > 0 && (
-                                            <p className="text-xs text-muted-foreground">
-                                                <span className="font-medium">Direct:</span>{" "}
+                                            <p className="text-xs text-kinetic-on-surface-variant">
+                                                <span className="font-medium text-kinetic-on-surface">Direct:</span>{" "}
                                                 {file.direct.join(", ")}
                                             </p>
                                         )}
                                         {file.transitive.length > 0 && (
-                                            <p className="text-xs text-muted-foreground">
-                                                <span className="font-medium">Transitive:</span>{" "}
+                                            <p className="text-xs text-kinetic-on-surface-variant">
+                                                <span className="font-medium text-kinetic-on-surface">Transitive:</span>{" "}
                                                 {file.transitive.join(", ")}
                                             </p>
                                         )}
                                         {file.direct.length === 0 && file.transitive.length === 0 && (
-                                            <p className="text-xs text-muted-foreground">
+                                            <p className="text-xs text-kinetic-on-surface-variant">
                                                 No dependents — safe to change
                                             </p>
                                         )}
                                     </div>
                                 )}
 
-                                {idx < files.length - 1 && <Separator />}
+                                {idx < files.length - 1 && <Separator className="bg-kinetic-border" />}
                             </div>
                         ))}
                     </CardContent>

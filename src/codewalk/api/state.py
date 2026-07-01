@@ -13,6 +13,8 @@ from src.codewalk.analysis.module_detector import detect_modules
 from src.codewalk.config import settings
 from src.codewalk.log import log as _log
 
+from pathlib import Path as _Path
+
 from src.codewalk.graph.graph_store import GraphStore
 from src.codewalk.graph.graph_runtime import GraphRuntime
 
@@ -40,11 +42,28 @@ pending_update: str | None = None  # Set by MCP download_cloud_index_if_missing 
 
 
 def _resolve_repo_path(repo_path: str | None = None) -> str:
-    """Return the explicitly provided repo path or the current session state."""
-    path = (repo_path or _repo_path or "").strip()
-    if not path:
-        raise RuntimeError("repo_path is required but was not provided")
-    return path
+    """Return the explicitly provided repo path, current session state, or cwd discovery.
+
+    Falls back to discovering the repo root from the current working directory via
+    codewalk.yaml. This makes both MCP and API resilient when _repo_path has not
+    been explicitly set (e.g., after a server restart or a cloud pull).
+    """
+    global _repo_path
+    if repo_path:
+        return repo_path.rstrip("/")
+    if _repo_path:
+        return _repo_path.rstrip("/")
+
+    # Fallback: discover repo root from cwd without creating files.
+    from src.codewalk.repo_discovery import find_repo_root, RepoNotFoundError
+    try:
+        discovered = find_repo_root()
+        _repo_path = str(discovered)
+        return _repo_path.rstrip("/")
+    except RepoNotFoundError as e:
+        raise RuntimeError(
+            "repo_path is required but was not provided and no codewalk.yaml was found in cwd"
+        ) from e
 
 
 class _PgHelper:
@@ -311,8 +330,14 @@ def set_repo_path(repo_path: str) -> None:
 
 
 def get_repo_path() -> str:
-    """Return the current repo path from session state."""
-    return _resolve_repo_path()
+    """Return the current repo path from explicit session state.
+
+    Does NOT fall back to cwd discovery. Callers that need discovery should use
+    _resolve_repo_path() or ensure_initialized().
+    """
+    if _repo_path is None:
+        raise RuntimeError("Repo path not set. Call set_repo_path() or POST /analyze first.")
+    return _repo_path.rstrip("/")
 
 
 def get_collection_name() -> str:
@@ -370,28 +395,228 @@ def _collection_name_for_path(repo_path: str) -> str:
 
 
 def index_on_disk(repo_path: str | None = None) -> bool:
-    """True if .codewalk has the artifacts of a completed index run.
+    """True if .codewalk has both manifest.json and a chroma/ directory.
 
-    Fast path: manifest.json + chroma/ + graph.duckdb means the index completed.
-    Fallback: for indexes created before manifest.json was introduced, verify
-    chroma/ + graph.duckdb exist and chroma has at least one embedded chunk.
+    graph.duckdb and the knowledge-graph JSON are rebuilt from ChromaDB on every
+    analyze/reindex run, so they are NOT part of the existence check. A partial
+    index (chroma has chunks but manifest is missing) is intentionally treated
+    as incomplete so callers can resume it.
     """
     path = _resolve_repo_path(repo_path).rstrip("/")
     chroma = f"{path}/.codewalk/chroma"
-    duckdb = f"{path}/.codewalk/graph.duckdb"
     manifest = f"{path}/.codewalk/manifest.json"
 
-    if not os.path.isdir(chroma) or not os.path.isfile(duckdb):
+    return os.path.isdir(chroma) and os.path.isfile(manifest)
+
+
+def index_is_complete(repo_path: str | None = None) -> bool:
+    """True if manifest exists and ChromaDB contains every scannable file.
+
+    Always reads from disk so it survives MCP server / IDE restarts.
+    """
+    path = _resolve_repo_path(repo_path).rstrip("/")
+    manifest = f"{path}/.codewalk/manifest.json"
+    chroma = f"{path}/.codewalk/chroma"
+
+    if not os.path.isfile(manifest) or not os.path.isdir(chroma):
         return False
 
-    # Fast path: manifest.json is written at the end of every indexing run.
-    if os.path.isfile(manifest):
-        return True
+    try:
+        files = scan_repo_files(path)
+    except Exception:
+        return False
 
-    # Fallback for legacy indexes without manifest.json: actually count chunks.
+    expected = {f["file_path"] for f in files}
+    if not expected:
+        return False
+
     store = VectorStore(persist_dir=chroma)
     store.create_collection(_collection_name_for_path(path))
-    return store.chunk_count() > 0
+    indexed = store.get_all_indexed_files()
+    return expected.issubset(indexed)
+
+
+def analyze_or_reindex_index(
+    repo_path: str,
+    docs_path: str = "",
+    guidelines_path: str = "",
+    mode: str = "auto",
+) -> dict:
+    """Scan disk, check index status, or run a build/reindex.
+
+    Reads ChromaDB and manifest from disk every time; does not rely on in-memory
+    module state, so it works after an MCP server or IDE restart.
+
+    mode:
+      - auto:    no index → full build; partial → status="behind"; complete → ready
+      - reindex: always run incremental reindex over all files (changed/new/deleted)
+      - full:    wipe chroma + manifest and rebuild from scratch
+
+    Returns a summary dict with keys such as:
+      repo_path, files_scanned, files_reindexed, files_skipped, files_deleted,
+      chunks_embedded, missing_files, missing_count, total_time, status
+    """
+    from src.codewalk.pipeline import (
+        index_from_paths_parallel,
+        incremental_reindex,
+        write_manifest,
+    )
+
+    global _repo_path, _files, _store
+
+    repo_path = _resolve_repo_path(repo_path).rstrip("/")
+    _repo_path = repo_path
+    collection = _collection_name_for_path(repo_path)
+    chroma = f"{repo_path}/.codewalk/chroma"
+    index_dir = f"{repo_path}/.codewalk"
+
+    # 1. Always scan disk first to know what should be indexed.
+    files = scan_repo_files(repo_path)
+    _files = files
+    expected_paths = {f["file_path"] for f in files}
+
+    # 2. Open ChromaDB from disk (never use cached _store).
+    store = VectorStore(persist_dir=chroma)
+    store.create_collection(collection)
+    _store = store
+    indexed_files = store.get_all_indexed_files()
+    chunk_count = store.chunk_count()
+
+    # 3. Read manifest if present.
+    manifest_path = f"{index_dir}/manifest.json"
+    manifest_exists = os.path.isfile(manifest_path)
+    manifest_file_count = 0
+    if manifest_exists:
+        try:
+            with open(manifest_path) as f:
+                manifest_file_count = int(json.load(f).get("file_count", 0))
+        except (json.JSONDecodeError, OSError, ValueError):
+            manifest_exists = False
+
+    # 4. Decide state.
+    missing_files = expected_paths - indexed_files
+    extra_files = indexed_files - expected_paths
+    is_partial = (
+        chunk_count > 0
+        and (
+            not manifest_exists
+            or missing_files
+            or extra_files
+            or manifest_file_count != len(expected_paths)
+        )
+    )
+
+    # 5. AUTO mode: report behind or ready, build only when truly empty.
+    if mode == "auto":
+        if chunk_count == 0:
+            # Treat as no index: full build.
+            mode = "full"
+        elif is_partial:
+            _log(f"[analyze_or_reindex] Index behind: {len(indexed_files)}/{len(expected_paths)} files indexed")
+            sample = sorted(missing_files)[:10]
+            return {
+                "repo_path": repo_path,
+                "files_scanned": len(files),
+                "files_reindexed": 0,
+                "files_skipped": 0,
+                "files_deleted": 0,
+                "chunks_embedded": chunk_count,
+                "missing_count": len(missing_files),
+                "missing_files": sorted(missing_files),
+                "missing_sample": sample,
+                "total_time": "0.0s",
+                "status": "behind",
+            }
+        else:
+            # Complete index: load without re-embedding.
+            _log(f"[analyze_or_reindex] Index complete ({chunk_count} chunks) — loading")
+            load_scoped_analysis()
+            return {
+                "repo_path": repo_path,
+                "files_scanned": len(files),
+                "files_reindexed": 0,
+                "files_skipped": len(files),
+                "files_deleted": 0,
+                "chunks_embedded": chunk_count,
+                "missing_count": 0,
+                "missing_files": [],
+                "total_time": "0.0s",
+                "status": "ready",
+            }
+
+    # 6. REINDEX / FULL modes: run the appropriate indexing step.
+    built = False
+    if mode == "full":
+        _log(f"[analyze_or_reindex] Full build: {len(files)} files")
+        store.clear_collection()
+        index_result = index_from_paths_parallel(
+            [f["file_path"] for f in files],
+            repo_path,
+            collection,
+            persist_dir=chroma,
+        )
+        built = True
+    else:
+        # mode == "reindex"
+        _log(f"[analyze_or_reindex] Reindexing all files for changes")
+        config = load_codewalk_yaml(repo_path)
+        index_result = incremental_reindex(
+            [repo_path],
+            repo_path,
+            collection,
+            persist_dir=chroma,
+            codewalk_config=config,
+        )
+
+    # 7. Refresh store handle after incremental/index_from_paths may have recreated collections.
+    store = VectorStore(persist_dir=chroma)
+    store.create_collection(collection)
+
+    # 8. Fetch all chunks and rebuild DuckDB + knowledge graph from the complete index.
+    all_chunks = store.get_all_chunks()
+    force_extras = mode in ("full", "reindex")
+    rebuild_analysis_cache(
+        embedded_chunks=all_chunks,
+        guidelines_path=guidelines_path,
+        docs_path=docs_path,
+        force_reindex_extras=force_extras,
+        files=files,
+    )
+
+    # 9. Write manifest only after a successful build/reindex.
+    write_manifest(
+        index_dir,
+        file_count=len(files),
+        chunk_count=store.chunk_count(),
+        collection_name=collection,
+        index_version=_next_index_version(index_dir),
+    )
+
+    return {
+        "repo_path": repo_path,
+        "files_scanned": len(files),
+        "files_reindexed": index_result.get("files_reindexed", 0),
+        "files_skipped": index_result.get("files_skipped", 0),
+        "files_deleted": index_result.get("files_deleted", 0),
+        "chunks_embedded": index_result.get("chunks_embedded", 0),
+        "missing_count": 0,
+        "missing_files": [],
+        "total_time": index_result.get("total_time", "0.0s"),
+        "status": "built" if built else "reindexed",
+    }
+
+
+def _next_index_version(index_dir: str) -> int:
+    """Read existing manifest and return the next index_version, or 1."""
+    manifest_path = _Path(index_dir) / "manifest.json"
+    if manifest_path.exists():
+        try:
+            with open(manifest_path) as f:
+                data = json.load(f)
+            return int(data.get("index_version", 0)) + 1
+        except Exception:
+            pass
+    return 1
 
 
 def _wire_query_state():
@@ -551,7 +776,7 @@ def _check_upgrade_banner(repo_path: str):
         _log(
             f"\n"
             f"  ⚡ Codewalk v{current_version} — index was built with v{stored_version}\n"
-            f"     Run codewalk_analyze_codebase to rebuild with latest features.\n"
+            f"     Run codewalk_incremental_reindex to sync the index with the latest version.\n"
         )
 
     _banner_shown = True

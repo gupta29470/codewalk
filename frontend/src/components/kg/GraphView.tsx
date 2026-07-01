@@ -29,6 +29,7 @@ import {
   CONTAINER_HEADER_HEIGHT,
   CONTAINER_PADDING,
   mergeElkPositions,
+  applyForceLayout,
 } from "@/lib/kg/utils/layout";
 import { applyElkLayoutWorker } from "@/lib/kg/utils/elk-worker-client";
 import type { ElkChild, ElkEdge, ElkInput } from "@/lib/kg/utils/layout";
@@ -65,15 +66,15 @@ const LAYER_LAYOUT_OPTIONS = {
   "elk.layered.crossingMinimization.strategy": "LAYER_SWEEP",
 };
 
-const FILE_FLOW_LAYOUT_OPTIONS = {
+const TREE_LAYOUT_OPTIONS = {
   "elk.algorithm": "layered",
   "elk.direction": "DOWN",
-  "elk.spacing.nodeNodeBetweenLayers": "90",
-  "elk.spacing.nodeNode": "60",
-  "elk.layered.spacing.nodeNodeBetweenLayers": "90",
+  "elk.spacing.nodeNodeBetweenLayers": "70",
+  "elk.spacing.nodeNode": "40",
+  "elk.layered.spacing.nodeNodeBetweenLayers": "70",
   "elk.edgeRouting": "ORTHOGONAL",
   "elk.layered.crossingMinimization.strategy": "LAYER_SWEEP",
-  "elk.layered.nodePlacement.strategy": "NETWORK_SIMPLEX",
+  "elk.layered.nodePlacement.strategy": "BRANDES_KOEPF",
 };
 
 function hasBackendPositions(
@@ -120,7 +121,6 @@ function useOverviewGraph() {
   const nodesById = useKgStore((s) => s.nodesById);
   const nodeIdToLayerId = useKgStore((s) => s.nodeIdToLayerId);
   const searchResults = useKgStore((s) => s.searchResults);
-  const drillIntoLayer = useKgStore((s) => s.drillIntoLayer);
 
   const built = useMemo(() => {
     if (!graph) return null;
@@ -149,7 +149,6 @@ function useOverviewGraph() {
           aggregateComplexity: stats.aggregateComplexity,
           layerColorIndex: i,
           searchMatchCount: searchMatchByLayer.get(layer.id),
-          onDrillIn: drillIntoLayer,
         },
       };
     });
@@ -171,7 +170,7 @@ function useOverviewGraph() {
     }
 
     return { clusterNodes, flowEdges, dims };
-  }, [graph, nodesById, nodeIdToLayerId, searchResults, drillIntoLayer]);
+  }, [graph, nodesById, nodeIdToLayerId, searchResults]);
 
   const [overview, setOverview] = useState<{ nodes: Node[]; edges: Edge[] }>({ nodes: [], edges: [] });
 
@@ -548,7 +547,7 @@ function buildCustomFlowNode(
 }
 
 // eslint-disable-next-line @typescript-eslint/no-unused-vars
-function useLayerDetailGraph() {
+function useLayerDetailGraph(topo: LayerDetailTopology) {
   const selectedNodeId = useKgStore((s) => s.selectedNodeId);
   const searchResults = useKgStore((s) => s.searchResults);
   const tourHighlightedNodeIds = useKgStore((s) => s.tourHighlightedNodeIds);
@@ -560,7 +559,6 @@ function useLayerDetailGraph() {
   const affectedNodeIds = useKgStore((s) => s.affectedNodeIds);
 
   const handleNodeSelect = useCallback((nodeId: string) => selectNode(nodeId), [selectNode]);
-  const topo = useLayerDetailTopology();
 
   const handleContainerToggle = useCallback(
     (id: string) => {
@@ -617,7 +615,11 @@ function useLayerDetailGraph() {
         }
         return {
           ...n,
-          data: { ...data, isDiffAffected },
+          data: {
+            ...data,
+            isExpanded: expandedContainers.has(n.id),
+            isDiffAffected,
+          },
         };
       }
       if (n.type !== "custom") return n;
@@ -756,7 +758,30 @@ function useLayerDetailGraph() {
   return { ...output, containers: topo.containers };
 }
 
-function useLayerFileFlowGraph() {
+function centerNodes(nodes: Node[]): Node[] {
+  if (nodes.length === 0) return nodes;
+  let minX = Infinity;
+  let minY = Infinity;
+  let maxX = -Infinity;
+  let maxY = -Infinity;
+  for (const n of nodes) {
+    const w = (n.width ?? NODE_WIDTH);
+    const h = (n.height ?? NODE_HEIGHT);
+    minX = Math.min(minX, n.position.x);
+    minY = Math.min(minY, n.position.y);
+    maxX = Math.max(maxX, n.position.x + w);
+    maxY = Math.max(maxY, n.position.y + h);
+  }
+  const cx = (minX + maxX) / 2;
+  const cy = (minY + maxY) / 2;
+  return nodes.map((n) => ({
+    ...n,
+    position: { x: n.position.x - cx, y: n.position.y - cy },
+  }));
+}
+
+// eslint-disable-next-line @typescript-eslint/no-unused-vars
+function useLayerTreeGraph() {
   const graph = useKgStore((s) => s.graph);
   const nodesById = useKgStore((s) => s.nodesById);
   const activeLayerId = useKgStore((s) => s.activeLayerId);
@@ -764,19 +789,11 @@ function useLayerFileFlowGraph() {
   const searchResults = useKgStore((s) => s.searchResults);
   const tourHighlightedNodeIds = useKgStore((s) => s.tourHighlightedNodeIds);
   const nodeTypeFilters = useKgStore((s) => s.nodeTypeFilters);
-  const detailLevel = useKgStore((s) => s.detailLevel);
-  const showFunctionsInClassView = useKgStore((s) => s.showFunctionsInClassView);
   const selectNode = useKgStore((s) => s.selectNode);
-  const diffMode = useKgStore((s) => s.diffMode);
-  const changedNodeIds = useKgStore((s) => s.changedNodeIds);
-  const affectedNodeIds = useKgStore((s) => s.affectedNodeIds);
 
   const handleNodeSelect = useCallback(
-    (nodeId: string) => {
-      const current = useKgStore.getState().selectedNodeId;
-      selectNode(current === nodeId ? null : nodeId);
-    },
-    [selectNode],
+    (nodeId: string) => selectNode(nodeId === selectedNodeId ? null : nodeId),
+    [selectNode, selectedNodeId],
   );
 
   const built = useMemo(() => {
@@ -785,21 +802,6 @@ function useLayerFileFlowGraph() {
     if (!activeLayer) return null;
 
     const layerNodeIds = new Set(activeLayer.nodeIds);
-    const expandedIds = new Set(layerNodeIds);
-    if (detailLevel !== "file") {
-      for (const edge of graph.edges) {
-        if (edge.type === "contains" && layerNodeIds.has(edge.source)) {
-          const child = nodesById.get(edge.target);
-          if (!child) continue;
-          if (child.type === "class") {
-            expandedIds.add(edge.target);
-          } else if (child.type === "function" && showFunctionsInClassView) {
-            expandedIds.add(edge.target);
-          }
-        }
-      }
-    }
-
     const allVisibleTypes = new Set([
       "file", "module", "concept", "config", "document", "service", "table",
       "endpoint", "pipeline", "schema", "resource", "domain", "flow", "step",
@@ -807,53 +809,141 @@ function useLayerFileFlowGraph() {
     ]);
 
     const filteredNodes = graph.nodes.filter((n) => {
-      if (!expandedIds.has(n.id)) return false;
+      if (!layerNodeIds.has(n.id)) return false;
       if (!allVisibleTypes.has(n.type)) return false;
       const category = NODE_TYPE_TO_CATEGORY[n.type] ?? "code";
       return nodeTypeFilters[category] !== false;
     });
 
-    const filteredNodeIds = new Set(filteredNodes.map((n) => n.id));
-    const filteredEdges = graph.edges.filter(
-      (e) =>
-        filteredNodeIds.has(e.source) &&
-        filteredNodeIds.has(e.target) &&
-        e.type !== "contains",
-    );
+    interface TreeItem {
+      id: string;
+      name: string;
+      type: "folder" | "file";
+      nodeId?: string;
+      children: TreeItem[];
+    }
+
+    const root: TreeItem = { id: "tree:root", name: activeLayer.name, type: "folder", children: [] };
+    const itemByPath = new Map<string, TreeItem>();
+    itemByPath.set("", root);
+
+    for (const node of filteredNodes) {
+      if (node.filePath) {
+        const parts = node.filePath.split("/").filter(Boolean);
+        let currentPath = "";
+        for (let i = 0; i < parts.length; i++) {
+          const part = parts[i];
+          const parentPath = currentPath;
+          currentPath = currentPath ? `${currentPath}/${part}` : part;
+          const isFile = i === parts.length - 1;
+          let item = itemByPath.get(currentPath);
+          if (!item) {
+            item = {
+              id: isFile ? node.id : `tree:folder:${currentPath}`,
+              name: part,
+              type: isFile ? "file" : "folder",
+              nodeId: isFile ? node.id : undefined,
+              children: [],
+            };
+            itemByPath.set(currentPath, item);
+            const parent = itemByPath.get(parentPath)!;
+            parent.children.push(item);
+          }
+        }
+      } else {
+        root.children.push({
+          id: node.id,
+          name: node.name,
+          type: "file",
+          nodeId: node.id,
+          children: [],
+        });
+      }
+    }
 
     const searchMap = new Map(searchResults.map((r) => [r.nodeId, r.score]));
     const tourSet = new Set(tourHighlightedNodeIds);
 
-    const flowNodes: CustomFlowNode[] = filteredNodes.map((node) => {
-      const searchScore = searchMap.get(node.id);
-      const isTourHighlighted = tourSet.has(node.id);
-      const flowNode = buildCustomFlowNode(node, {
-        isSelected: false,
-        isNeighbor: false,
-        isSelectionFaded: false,
-        searchScore,
-        isTourHighlighted,
-        onNodeClick: handleNodeSelect,
-      });
-      flowNode.data.label = node.filePath ?? node.name;
-      return flowNode;
-    });
+    const flowNodes: Node[] = [];
+    const flowEdges: Edge[] = [];
 
-    flowNodes.forEach((n) => {
-      n.data.isDiffChanged = diffMode && changedNodeIds.has(n.id);
-      n.data.isDiffAffected = diffMode && affectedNodeIds.has(n.id);
-      n.data.isDiffFaded = diffMode && !n.data.isDiffChanged && !n.data.isDiffAffected;
-    });
+    function walk(item: TreeItem, parentId?: string) {
+      if (item.id === "tree:root") {
+        for (const child of item.children) walk(child);
+        return;
+      }
 
-    const flowEdges: Edge[] = filteredEdges.map((e, i) => ({
-      id: `fe-${i}`,
-      source: e.source,
-      target: e.target,
-      style: {
-        stroke: "var(--kg-accent)",
-        strokeWidth: 2,
-      },
-    }));
+      if (item.type === "folder") {
+        flowNodes.push({
+          id: item.id,
+          type: "custom",
+          position: { x: 0, y: 0 },
+          data: {
+            label: item.name,
+            nodeType: "folder",
+            summary: `${item.children.length} items`,
+            isHighlighted: false,
+            isSelected: false,
+            isTourHighlighted: false,
+            isDiffChanged: false,
+            isDiffAffected: false,
+            isDiffFaded: false,
+            isNeighbor: false,
+            isSelectionFaded: false,
+            onNodeClick: () => {},
+          } as CustomNodeData,
+        });
+      } else {
+        const graphNode = nodesById.get(item.nodeId!);
+        const searchScore = graphNode ? searchMap.get(graphNode.id) : undefined;
+        const isTourHighlighted = graphNode ? tourSet.has(graphNode.id) : false;
+        const isSelected = item.nodeId === selectedNodeId;
+        if (graphNode) {
+          flowNodes.push(
+            buildCustomFlowNode(graphNode, {
+              isSelected,
+              isNeighbor: false,
+              isSelectionFaded: false,
+              searchScore,
+              isTourHighlighted,
+              onNodeClick: handleNodeSelect,
+            }) as unknown as Node,
+          );
+        } else {
+          flowNodes.push({
+            id: item.id,
+            type: "custom",
+            position: { x: 0, y: 0 },
+            data: {
+              label: item.name,
+              nodeType: "file",
+              isHighlighted: false,
+              isSelected,
+              isTourHighlighted,
+              isDiffChanged: false,
+              isDiffAffected: false,
+              isDiffFaded: false,
+              isNeighbor: false,
+              isSelectionFaded: false,
+              onNodeClick: handleNodeSelect,
+            } as CustomNodeData,
+          });
+        }
+      }
+
+      if (parentId && parentId !== "tree:root") {
+        flowEdges.push({
+          id: `tree-${parentId}-${item.id}`,
+          source: parentId,
+          target: item.id,
+          style: { stroke: "var(--kg-border-subtle)", strokeWidth: 1 },
+        });
+      }
+
+      for (const child of item.children) walk(child, item.id);
+    }
+
+    walk(root);
 
     const dims = new Map<string, { width: number; height: number }>();
     for (const n of flowNodes) {
@@ -865,30 +955,26 @@ function useLayerFileFlowGraph() {
     graph,
     nodesById,
     activeLayerId,
+    selectedNodeId,
     searchResults,
     tourHighlightedNodeIds,
     nodeTypeFilters,
-    detailLevel,
-    showFunctionsInClassView,
     handleNodeSelect,
-    diffMode,
-    changedNodeIds,
-    affectedNodeIds,
   ]);
 
-  const [baseOutput, setBaseOutput] = useState<{ nodes: Node[]; edges: Edge[] }>({ nodes: [], edges: [] });
+  const [output, setOutput] = useState<{ nodes: Node[]; edges: Edge[] }>({ nodes: [], edges: [] });
 
   useEffect(() => {
     if (!built) {
-      setBaseOutput({ nodes: [], edges: [] });
+      setOutput({ nodes: [], edges: [] });
       return;
     }
     let cancelled = false;
     const { flowNodes, flowEdges, dims } = built;
-    const baseNodes = flowNodes as unknown as Node[];
+    const baseNodes = flowNodes;
     const elkInput: ElkInput = {
-      id: "file-flow",
-      layoutOptions: FILE_FLOW_LAYOUT_OPTIONS,
+      id: "layer-tree",
+      layoutOptions: TREE_LAYOUT_OPTIONS,
       children: baseNodes.map((n) => ({
         id: n.id,
         width: dims.get(n.id)!.width,
@@ -903,7 +989,7 @@ function useLayerFileFlowGraph() {
         ...n,
         position: backendMap.get(n.id) ?? { x: 0, y: 0 },
       }));
-      setBaseOutput({ nodes: positionedNodes, edges: flowEdges });
+      setOutput({ nodes: centerNodes(positionedNodes), edges: flowEdges });
       return () => {
         cancelled = true;
       };
@@ -912,10 +998,10 @@ function useLayerFileFlowGraph() {
     applyElkLayoutWorker(elkInput)
       .then(({ positioned }) => {
         if (cancelled) return;
-        setBaseOutput({ nodes: mergeElkPositions(baseNodes, positioned), edges: flowEdges });
+        setOutput({ nodes: centerNodes(mergeElkPositions(baseNodes, positioned)), edges: flowEdges });
       })
       .catch((err) => {
-        console.error("[file-flow ELK]", err);
+        console.error("[layer-tree ELK]", err);
         if (cancelled) return;
         const cols = Math.max(1, Math.ceil(Math.sqrt(baseNodes.length)));
         const fallbackNodes = baseNodes.map((n, idx) => ({
@@ -925,68 +1011,195 @@ function useLayerFileFlowGraph() {
             y: Math.floor(idx / cols) * (NODE_HEIGHT + 80),
           },
         }));
-        setBaseOutput({ nodes: fallbackNodes, edges: flowEdges });
+        setOutput({ nodes: centerNodes(fallbackNodes), edges: flowEdges });
       });
     return () => {
       cancelled = true;
     };
   }, [built, graph]);
 
-  const output = useMemo(() => {
-    if (baseOutput.nodes.length === 0) return baseOutput;
-
-    const neighborIds = new Set<string>();
-    if (selectedNodeId) {
-      for (const edge of baseOutput.edges) {
-        if (edge.source === selectedNodeId) neighborIds.add(edge.target);
-        if (edge.target === selectedNodeId) neighborIds.add(edge.source);
-      }
-    }
-
-    const nodes = baseOutput.nodes.map((n) => {
-      if (n.type !== "custom") return n;
-      const isSelected = n.id === selectedNodeId;
-      const isNeighbor = neighborIds.has(n.id);
-      const isSelectionFaded = !!selectedNodeId && !isSelected && !isNeighbor;
-      return {
-        ...n,
-        data: {
-          ...n.data,
-          isSelected,
-          isNeighbor,
-          isSelectionFaded,
-        },
-      };
-    });
-
-    const edges = baseOutput.edges.map((e) => {
-      const isConnected = !!selectedNodeId && (e.source === selectedNodeId || e.target === selectedNodeId);
-      return {
-        ...e,
-        animated: isConnected,
-        style: {
-          stroke: "var(--kg-accent)",
-          strokeWidth: isConnected ? 3 : 2,
-          opacity: selectedNodeId ? (isConnected ? 1 : 0.12) : 1,
-        },
-      };
-    });
-
-    return { nodes, edges };
-  }, [baseOutput, selectedNodeId]);
-
   return output;
 }
 
+function getNodeDimensions(edgeCount: number): { width: number; height: number } {
+  const scale = Math.min(1.5, Math.max(0.85, 0.85 + edgeCount * 0.03));
+  return {
+    width: Math.round(NODE_WIDTH * scale),
+    height: Math.round(NODE_HEIGHT * scale),
+  };
+}
+
+function computeLayerKnowledgeLayout(graph: KnowledgeGraph) {
+  const edgeCounts = new Map<string, number>();
+  for (const edge of graph.edges) {
+    edgeCounts.set(edge.source, (edgeCounts.get(edge.source) ?? 0) + 1);
+    edgeCounts.set(edge.target, (edgeCounts.get(edge.target) ?? 0) + 1);
+  }
+
+  const dims = new Map<string, { width: number; height: number }>();
+  for (const node of graph.nodes) {
+    dims.set(node.id, getNodeDimensions(edgeCounts.get(node.id) ?? 0));
+  }
+
+  const positionMap = new Map<string, { x: number; y: number }>();
+  const hasPrecomputedPositions = graph.nodes.length > 0 && graph.nodes.every(
+    (n) => typeof n.x === "number" && typeof n.y === "number",
+  );
+
+  if (hasPrecomputedPositions) {
+    for (const node of graph.nodes) {
+      positionMap.set(node.id, { x: node.x!, y: node.y! });
+    }
+  } else {
+    const tmpNodes: Node[] = graph.nodes.map((node) => ({
+      id: node.id,
+      type: "custom" as const,
+      position: { x: 0, y: 0 },
+      data: {},
+    }));
+
+    const tmpEdges: Edge[] = graph.edges.map((e, i) => ({
+      id: `ke-${i}`,
+      source: e.source,
+      target: e.target,
+    }));
+
+    const communityMap = new Map<string, number>();
+    graph.layers.forEach((layer, i) => {
+      for (const nodeId of layer.nodeIds) {
+        communityMap.set(nodeId, i);
+      }
+    });
+
+    const { nodes: layoutedNodes } = applyForceLayout(tmpNodes, tmpEdges, dims, communityMap);
+    for (const n of layoutedNodes) {
+      positionMap.set(n.id, n.position);
+    }
+  }
+
+  return { positionMap, edgeCounts };
+}
+
+function useLayerKnowledgeGraph(layerId: string | null) {
+  const graph = useKgStore((s) => s.graph);
+  const selectedNodeId = useKgStore((s) => s.selectedNodeId);
+  const focusNodeId = useKgStore((s) => s.focusNodeId);
+  const searchResultsRaw = useKgStore((s) => s.searchResults);
+  const tourHighlightedNodeIds = useKgStore((s) => s.tourHighlightedNodeIds);
+  const nodeTypeFilters = useKgStore((s) => s.nodeTypeFilters);
+  const diffMode = useKgStore((s) => s.diffMode);
+  const changedNodeIds = useKgStore((s) => s.changedNodeIds);
+  const affectedNodeIds = useKgStore((s) => s.affectedNodeIds);
+  const selectNode = useKgStore((s) => s.selectNode);
+
+  const searchResults = useMemo(
+    () => new Map(searchResultsRaw.map((r) => [r.nodeId, r.score])),
+    [searchResultsRaw],
+  );
+  const tourSet = useMemo(() => new Set(tourHighlightedNodeIds), [tourHighlightedNodeIds]);
+
+  const filteredGraph = useMemo((): KnowledgeGraph | null => {
+    if (!graph || !layerId) return null;
+    const activeLayer = graph.layers.find((l) => l.id === layerId);
+    if (!activeLayer) return null;
+    const layerNodeIds = new Set(activeLayer.nodeIds);
+
+    const filteredNodes = graph.nodes.filter((n) => {
+      if (!layerNodeIds.has(n.id)) return false;
+      const category = NODE_TYPE_TO_CATEGORY[n.type] ?? "code";
+      return nodeTypeFilters[category] !== false;
+    });
+    const filteredNodeIds = new Set(filteredNodes.map((n) => n.id));
+    const filteredEdges = graph.edges.filter(
+      (e) => filteredNodeIds.has(e.source) && filteredNodeIds.has(e.target),
+    );
+    return { ...graph, nodes: filteredNodes, edges: filteredEdges };
+  }, [graph, layerId, nodeTypeFilters]);
+
+  const { positionMap } = useMemo(() => {
+    if (!filteredGraph) return { positionMap: new Map(), edgeCounts: new Map() };
+    return computeLayerKnowledgeLayout(filteredGraph);
+  }, [filteredGraph]);
+
+  const { nodes, edges } = useMemo(() => {
+    if (!filteredGraph) return { nodes: [] as Node[], edges: [] as Edge[] };
+
+    const neighborIds = new Set<string>();
+    const focusId = focusNodeId ?? selectedNodeId;
+    if (focusId) {
+      for (const edge of filteredGraph.edges) {
+        if (edge.source === focusId) neighborIds.add(edge.target);
+        if (edge.target === focusId) neighborIds.add(edge.source);
+      }
+    }
+
+    const rfNodes: Node[] = filteredGraph.nodes.map((node) => {
+      const isSelected = node.id === selectedNodeId;
+      const isNeighbor = neighborIds.has(node.id);
+      const isSelectionFaded = !!focusId && !isSelected && !isNeighbor;
+      const searchScore = searchResults.get(node.id);
+      const isTourHighlighted = tourSet.has(node.id);
+
+      const flowNode = buildCustomFlowNode(node, {
+        isSelected,
+        isNeighbor,
+        isSelectionFaded,
+        searchScore,
+        isTourHighlighted,
+        onNodeClick: (id: string) => selectNode(id),
+      }) as unknown as Node;
+      flowNode.position = positionMap.get(node.id) ?? { x: 0, y: 0 };
+
+      const data = flowNode.data as CustomNodeData;
+      data.isDiffChanged = diffMode && changedNodeIds.has(node.id);
+      data.isDiffAffected = diffMode && affectedNodeIds.has(node.id);
+      data.isDiffFaded = diffMode && !data.isDiffChanged && !data.isDiffAffected;
+
+      return flowNode;
+    });
+
+    const rfEdges: Edge[] = filteredGraph.edges.map((e, i) => {
+      const connected = selectedNodeId && (e.source === selectedNodeId || e.target === selectedNodeId);
+      return {
+        id: `ke-${i}`,
+        source: e.source,
+        target: e.target,
+        label: e.type,
+        style: {
+          stroke: "var(--kg-accent)",
+          strokeWidth: connected ? 3 : 2,
+          opacity: selectedNodeId ? (connected ? 1 : 0.12) : 1,
+        },
+        labelStyle: { fill: "var(--kg-text-secondary)", fontSize: 10 },
+        labelShowBg: true,
+        labelBgStyle: { fill: "var(--kg-root)", fillOpacity: 0.8 },
+      };
+    });
+
+    return { nodes: rfNodes, edges: rfEdges };
+  }, [
+    filteredGraph,
+    selectedNodeId,
+    focusNodeId,
+    searchResults,
+    tourSet,
+    positionMap,
+    selectNode,
+    diffMode,
+    changedNodeIds,
+    affectedNodeIds,
+  ]);
+
+  return { nodes, edges };
+}
+
 // eslint-disable-next-line @typescript-eslint/no-unused-vars
-function useStage2Layout() {
+function useStage2Layout(topo: LayerDetailTopology) {
   const graph = useKgStore((s) => s.graph);
   const activeLayerId = useKgStore((s) => s.activeLayerId);
   const expandedContainers = useKgStore((s) => s.expandedContainers);
   const containerLayoutCache = useKgStore((s) => s.containerLayoutCache);
   const setContainerLayout = useKgStore((s) => s.setContainerLayout);
-
-  const topo = useLayerDetailTopology();
 
   useEffect(() => {
     if (!graph || !activeLayerId || topo.containers.length === 0) return;
@@ -1103,7 +1316,30 @@ function useStage2Layout() {
           };
         } catch (err) {
           console.error(`[Stage 2 ${containerId}]`, err);
-          return null;
+          // Synchronous grid fallback so children are still visible if ELK fails/times out.
+          const childPositions = new Map<string, { x: number; y: number }>();
+          let maxX = 0;
+          let maxY = 0;
+          const gap = 20;
+          const cols = Math.max(1, Math.ceil(Math.sqrt(children.length)));
+          for (let i = 0; i < children.length; i++) {
+            const ch = children[i];
+            const col = i % cols;
+            const row = Math.floor(i / cols);
+            const x = col * ((ch.width ?? NODE_WIDTH) + gap) + CONTAINER_PADDING / 2;
+            const y = row * ((ch.height ?? NODE_HEIGHT) + gap) + CONTAINER_HEADER_HEIGHT + CONTAINER_PADDING / 2;
+            childPositions.set(ch.id, { x, y });
+            maxX = Math.max(maxX, x + (ch.width ?? NODE_WIDTH));
+            maxY = Math.max(maxY, y + (ch.height ?? NODE_HEIGHT));
+          }
+          return {
+            containerId,
+            childPositions,
+            actualSize: {
+              width: Math.max(maxX + CONTAINER_PADDING / 2, 260),
+              height: Math.max(maxY + CONTAINER_PADDING / 2, 140),
+            },
+          };
         }
       }),
     ).then((results) => {
@@ -1164,6 +1400,7 @@ function useZoomAutoExpand() {
   }, [zoom, navigationLevel, nodes, expandedContainers, expandContainer]);
 }
 
+// eslint-disable-next-line @typescript-eslint/no-unused-vars
 function FitViewOnMount() {
   const { fitView } = useReactFlow();
   const nodes = useNodes();
@@ -1183,6 +1420,7 @@ function arraysEqual(a: string[], b: string[]) {
   return a.length === b.length && a.every((v, i) => v === b[i]);
 }
 
+// eslint-disable-next-line @typescript-eslint/no-unused-vars
 function useTourFitView() {
   const tourActive = useKgStore((s) => s.tourActive);
   const tourHighlightedNodeIds = useKgStore((s) => s.tourHighlightedNodeIds);
@@ -1217,48 +1455,46 @@ function useTourFitView() {
   }, [tourActive, tourHighlightedNodeIds, fitView, nodes]);
 }
 
+// eslint-disable-next-line @typescript-eslint/no-unused-vars
 function useFitViewOnNavigation() {
   const { fitView } = useReactFlow();
   const navigationLevel = useKgStore((s) => s.navigationLevel);
   const viewMode = useKgStore((s) => s.viewMode);
-  const nodes = useNodes();
+  const lastFittedRef = useRef<string>("");
 
   useEffect(() => {
-    if (nodes.length === 0) return;
+    const key = `${navigationLevel}-${viewMode}`;
+    if (lastFittedRef.current === key) return;
+    lastFittedRef.current = key;
     const timer = setTimeout(() => {
       fitView({ padding: 0.15, duration: 500 });
     }, 150);
     return () => clearTimeout(timer);
-  }, [navigationLevel, viewMode, nodes.length, fitView]);
+  }, [navigationLevel, viewMode, fitView]);
 }
 
 function GraphViewInner() {
   const graph = useKgStore((s) => s.graph);
   const navigationLevel = useKgStore((s) => s.navigationLevel);
+  const activeLayerId = useKgStore((s) => s.activeLayerId);
   const selectNode = useKgStore((s) => s.selectNode);
   const selectedNodeId = useKgStore((s) => s.selectedNodeId);
 
   const overview = useOverviewGraph();
-  const fileFlow = useLayerFileFlowGraph();
+  const layerDetail = useLayerKnowledgeGraph(activeLayerId);
 
   const isLayoutPending = useMemo(() => {
     if (navigationLevel === "overview") {
       return overview.nodes.length === 0;
     }
-    return fileFlow.nodes.length === 0;
-  }, [navigationLevel, overview.nodes.length, fileFlow.nodes.length]);
+    return layerDetail.nodes.length === 0;
+  }, [navigationLevel, overview.nodes.length, layerDetail.nodes.length]);
 
   // Handle export requests.
   useGraphExport();
 
-  // Follow tour highlights with the viewport.
-  useTourFitView();
-
-  // Re-fit the viewport whenever the user navigates or switches views.
-  useFitViewOnNavigation();
-
-  const nodes = navigationLevel === "overview" ? overview.nodes : fileFlow.nodes;
-  const edges = navigationLevel === "overview" ? overview.edges : fileFlow.edges;
+  const nodes = navigationLevel === "overview" ? overview.nodes : layerDetail.nodes;
+  const edges = navigationLevel === "overview" ? overview.edges : layerDetail.edges;
 
   const onNodeClick = useCallback(
     (_event: React.MouseEvent, node: Node) => {
@@ -1313,6 +1549,8 @@ function GraphViewInner() {
         proOptions={{ hideAttribution: true }}
         onNodeClick={onNodeClick}
         onPaneClick={onPaneClick}
+        fitView
+        fitViewOptions={{ padding: 0.15 }}
       >
         <Background
           variant={BackgroundVariant.Dots}
@@ -1321,7 +1559,6 @@ function GraphViewInner() {
           color="var(--kg-border-subtle)"
         />
         <Controls />
-        <FitViewOnMount />
       </ReactFlow>
       {isLayoutPending && (
         <div className="absolute inset-0 z-20 flex flex-col items-center justify-center gap-3 bg-kg-root/60 backdrop-blur-sm">

@@ -32,14 +32,14 @@ GraphStore.populate_from_analysis(files, deps, modules_result, embedded_chunks)
     ↓
 GraphRuntime(graph_store) → centrality, cycles, call chains
     ↓
-query/, generation/, rag/, review/
+query/, generation/, research/, rag/, review/
 ```
 
 ## Connections
 
 - `pipeline.build_full_analysis()` creates the DuckDB file and triggers knowledge-graph export.
 - `api/state.py` opens a `GraphStore` + `GraphRuntime` after analysis and stores them in module state.
-- `query/`, `rag/chain.py`, `review/`, `generation/`, and `mcp/server.py` read from the graph runtime/store.
+- `query/`, `rag/chain.py`, `review/`, `generation/`, `research/diagram_generator.py`, and `mcp/server.py` read from the graph runtime/store.
 
 ## Recent fixes
 

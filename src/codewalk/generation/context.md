@@ -1,4 +1,4 @@
-# `src/codewalk/generation/` — Report & Diagram Generation
+# `src/codewalk/generation/` — Report Generation
 
 This package produces high-level codebase artifacts from the module/graph data.
 
@@ -6,18 +6,17 @@ This package produces high-level codebase artifacts from the module/graph data.
 
 | File | Role |
 |------|------|
-| `diagram_generator.py` | `generate_module_diagram()` — creates a Mermaid module-dependency diagram. |
 | `overview_generator.py` | `generate_overview()` — LLM-powered codebase overview text. |
-| `flow_generator.py` | `generate_execution_flow()` — module-to-module or file-to-file execution-flow text. |
+| `flow_generator.py` | `generate_execution_flow()` — file-to-file execution-flow graph + narration. |
 
 ## Data flow
 
 ```
 modules_result + graph_runtime
     ↓
-generate_module_diagram() / generate_overview() / generate_execution_flow()
+generate_overview() / generate_execution_flow()
     ↓
-Mermaid/text output
+structured graph / text output
 ```
 
 ## Connections
