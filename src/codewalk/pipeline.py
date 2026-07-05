@@ -487,14 +487,13 @@ def build_full_analysis(
     db_path: str,
     files: list[dict],
     embedded_chunks: list[dict] | None = None,
-    guidelines_path: str = "",
     docs_path: str = "",
     force_reindex_extras: bool = False,
     repo_path: str = "",
     repo_name: str = "",
     collection_name: str | None = None,
 ) -> dict:
-    """Stateless analysis: deps → modules → DuckDB → knowledge-graph → docs → guidelines.
+    """Stateless analysis: deps → modules → DuckDB → knowledge-graph → docs.
 
     Caller must scan first (scan_directory or codewalk_scan_directory) and pass files.
     Shared by CLI, worker, MCP, and API — zero duplication.
@@ -503,9 +502,8 @@ def build_full_analysis(
         db_path:               Path to graph.duckdb.
         files:                 Scanned file list (required).
         embedded_chunks:       Optional chunks from ChromaDB indexing.
-        guidelines_path:       Folder with .md/.txt/.rst guidelines (absolute).
         docs_path:             Folder with .md/.pdf/.txt docs (absolute).
-        force_reindex_extras:  If True, wipe + re-embed docs/guidelines.
+        force_reindex_extras:  If True, wipe + re-embed docs.
         repo_path:             Repo root path (defaults to parent of db_path's parent).
         repo_name:             Repo name (defaults to repo_path basename).
         collection_name:       Code collection name used for this index; doc collection

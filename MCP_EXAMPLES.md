@@ -86,7 +86,15 @@ One module’s files, symbols, imports, exports.
 ## 3. Search & explanation
 
 ### `codewalk_search_codebase`
-Conceptual search by meaning, not just text.
+Conceptual search by meaning, not just text. Returns relevant code chunks for analysis.
+
+For every conceptual question, run 1-3 parallel calls with different phrasings and synthesize the chunks:
+
+```text
+@codewalk_search_codebase how does authentication work
+@codewalk_search_codebase authentication login flow
+@codewalk_search_codebase verify user credentials
+```
 
 ```text
 @codewalk How is authentication handled?

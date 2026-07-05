@@ -9,7 +9,7 @@ This is the top-level Python package for Codewalk. It wires together ingestion, 
 | `pipeline.py` | Central indexing/analysis orchestrator: `full_index_parallel`, `incremental_reindex`, `build_full_analysis`. Called by CLI, API, MCP, and cloud worker. |
 | `cli.py` | Typer CLI entry point (`codewalk analyze`, `codewalk reindex`, `codewalk refresh`, `codewalk generate-config`). |
 | `config.py` | Pydantic settings + `get_llm()` factory. Reads env vars for provider, model, embedding model, API keys, CORS, exclude paths. |
-| `codewalk_config.py` | Loads `codewalk.yaml` (`indexing.include`, `indexing.exclude`, `branches`, `guidelines_path`, `docs_path`) and provides `codewalk_scan_directory`. |
+| `codewalk_config.py` | Loads `codewalk.yaml` (`indexing.include`, `indexing.exclude`, `branches`, `docs_path`, `code_guidelines`) and provides `codewalk_scan_directory`. |
 | `staleness.py` | Compares local `.codewalk/manifest.json` against cloud manifest; version bump banners. |
 | `errors.py` | Error classification helper used by the API global exception handler. |
 | `log.py` | Project-wide logging helper. |

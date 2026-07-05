@@ -55,15 +55,13 @@ def build_index(
             codewalk_config=config,
         )
 
-        # 4. Analysis + DuckDB + docs + guidelines — one shared call
+        # 4. Analysis + DuckDB + docs — one shared call
         files = codewalk_scan_directory(work_dir, config)
-        guidelines_path = os.path.join(work_dir, config.guidelines_path) if config.guidelines_path else ""
         docs_path = os.path.join(work_dir, config.docs_path) if config.docs_path else ""
         build_full_analysis(
             db_path=os.path.join(incoming, "graph.duckdb"),
             files=files,
             embedded_chunks=result["embedded_chunks"],
-            guidelines_path=guidelines_path,
             docs_path=docs_path,
         )
 

@@ -6,7 +6,7 @@ This package exposes Codewalk as an HTTP API and manages shared in-memory state 
 
 | File | Role |
 |------|------|
-| `main.py` | FastAPI app, middleware (rate limit, cloud-mode block, staleness), and all REST endpoints: `/analyze`, `/analyze/stream`, `/chat`, `/chat/stream`, `/chat/approve`, `/research`, `/overview`, `/modules`, `/blast-radius`, `/reading-order`, `/execution-flow`, `/refresh`, `/incremental-reindex`, `/review`, `/review/file`, `/review/guidelines`, `/review/apply`, `/tools/static-analysis`, `/tools/run-tests`, `/semantic-search`, `/rag/expand-query`, `/rag/rerank`, `/rag/symbol-lookup`, `/docs/index`, `/docs/search`, `/docs/ask`, `/cycles`, `/architecture`, `/version`, `/staleness`, `/index-status`, `/health`. |
+| `main.py` | FastAPI app, middleware (rate limit, cloud-mode block, staleness), and all REST endpoints: `/analyze`, `/analyze/stream`, `/chat`, `/chat/stream`, `/chat/approve`, `/research`, `/overview`, `/modules`, `/blast-radius`, `/reading-order`, `/execution-flow`, `/refresh`, `/incremental-reindex`, `/review`, `/review/file`, `/review/guidelines`, `/review/apply`, `/tools/static-analysis`, `/tools/run-tests`, `/semantic-search`, `/rag/expand-query`, `/rag/rerank`, `/rag/symbol-lookup`, `/docs/index`, `/docs/search`, `/docs/ask`, `/cycles`, `/architecture`, `/version`, `/staleness`, `/index-status`, `/health`. The agent's `search_codebase` tool expands each query into 1–3 parallel search angles. |
 | `state.py` | Module-level shared state: `VectorStore`, `GraphStore`, `GraphRuntime`, agent, modules, files, Postgres helper (`_PgHelper`). |
 | `cloud.py` | GitHub webhook receiver, catch-up/index worker, atomic index publishing, cloud admin routes. |
 | `models.py` | Pydantic request/response models. |
@@ -43,9 +43,9 @@ query/review/chat endpoints read from state
 - Cloud `_clone_or_pull_repo()` now checks git return codes and surfaces clone/pull failures instead of silently continuing.
 - `/review/apply` now returns the declared `ApplyFixesResponse` model with a `failed` array, so partial failures are visible to the frontend.
 - `/docs/index` maps the internal store result keys to the frontend API contract (`files_indexed`, `chunks_created`).
-- `/review/file` accepts an explicit `guidelines_path` and validates that the resolved file path stays inside the repo.
 - Requests that resolve to a repo different from the currently loaded index are rejected instead of silently using a stale store.
-- Docs endpoints accept `repo_path`; `/review/guidelines` honours the requested guidelines path.
+- Docs endpoints accept `repo_path`; `/review/guidelines` indexes docs from the requested `docs_path`.
+- Review guidelines are resolved from `codewalk.yaml` (`code_guidelines` path, or `code_guidelines.*` inside `docs_path`).
 - `/semantic-search` uses the repo's stored collection and the shared `state.get_store()`.
 - `/analyze` (sync + stream) refreshes the `VectorStore` handle after indexing so `state.get_store()` always points at live Chroma collections.
 - `AnalyzeResponse` now includes a `message` field (used for the `behind` warning).
@@ -56,3 +56,5 @@ query/review/chat endpoints read from state
 
 - Incremental reindex updates Chroma incrementally, then fully rebuilds DuckDB and `knowledge-graph.json` from all Chroma chunks so the `chunks` table stays consistent.
 - `POST /analyze` with `index_mode="auto"` no longer silently resumes partial indexes; it returns `status="behind"` and a message telling the caller to use `POST /incremental-reindex` or `POST /analyze` with `index_mode="reindex"`.
+- Agent chat (`/chat`, `/chat/stream`) routes use `agent/tools.py`, where `search_codebase` internally expands the user query into 1–3 complementary retrieval angles and synthesizes the results.
+- `POST /docs/ask` expands the question into 1–3 complementary retrieval angles via `expand_query()`, merges deduplicated doc chunks via `DocStore.multi_search()`, and synthesizes the answer.

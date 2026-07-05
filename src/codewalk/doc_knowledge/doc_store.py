@@ -3,13 +3,29 @@ import logging
 
 import chromadb
 
-from src.codewalk.embeddings.embedder import get_embedding_model
+from src.codewalk.embeddings.embedder import (
+    _clear_gpu_cache,
+    _MAX_CHUNK_CHARS,
+    get_embedding_model,
+)
 from src.codewalk.doc_knowledge.doc_parser import parse_all_docs
 from src.codewalk.log import log as _log
 
 logger = logging.getLogger("codewalk")
 
 _CHROMA_BATCH = 500
+_DOC_EMBED_BATCH = 16
+_DOC_MPS_BATCH = 4
+_DOC_FALLBACK_BATCHES = (4, 1)
+
+
+def _doc_embed_batch_size(embedding_model) -> int:
+    """Use a smaller batch on MPS to avoid the 24GB allocation crash."""
+    device = getattr(embedding_model, "_device", "")
+    if device == "mps":
+        return _DOC_MPS_BATCH
+    return _DOC_EMBED_BATCH
+
 
 class DocStore:
     """ChromaDB-backed store for document chunks.
@@ -51,7 +67,7 @@ class DocStore:
         TEACH: This is the main entry point — equivalent to pipeline.py's
                index flow but for documents. Steps:
                  1. parse_all_docs() → list of chunks with text + metadata
-                 2. Embed all chunk texts in one batch
+                 2. Embed chunk texts in batches
                  3. Upsert into ChromaDB with stable IDs
 
         Args:
@@ -68,14 +84,28 @@ class DocStore:
         if not chunks:
             _log("[doc_store] No document chunks found.")
             return {"docs_found": 0, "chunks_stored": 0}
-        
-        # Step 2: Embed all texts in one batch
-        texts = [chunk["text"] for chunk in chunks]
-        _log(f"[doc_store] Embedding {len(texts)} doc chunks...")
-        embeddings = self.embedding_model.embed_documents(texts)
+
+        # Cap long chunks and sort by length so similar-length texts batch
+        # together. This reduces padding waste and lowers peak GPU memory.
+        for chunk in chunks:
+            chunk["text"] = chunk["text"][:_MAX_CHUNK_CHARS]
+        chunks.sort(key=lambda c: len(c["text"]))
+
+        total = len(chunks)
+        batch_size = _doc_embed_batch_size(self.embedding_model)
+
+        # Step 2: Embed texts in batches with MPS-safe fallback.
+        _log(f"[doc_store] Embedding {total} doc chunks in batches of {batch_size}...")
+        embeddings: list[list[float] | None] = [None] * total
+        for start in range(0, total, batch_size):
+            end = min(start + batch_size, total)
+            batch_chunks = chunks[start:end]
+            _log(f"[doc_store] Embedding doc chunks {start}-{end}/{total}...")
+            batch_embeddings = self._embed_batch(batch_chunks)
+            for offset, vector in enumerate(batch_embeddings):
+                embeddings[start + offset] = vector
 
         # Step 3: Upsert in batches
-        total = len(chunks)
         for start in range(0, total, _CHROMA_BATCH):
             end = min(start + _CHROMA_BATCH, total)
             batch_chunks = chunks[start:end]
@@ -95,6 +125,44 @@ class DocStore:
 
         _log(f"[doc_store] Indexed {len(unique_docs)} docs → {total} chunks")
         return {"docs_found": len(unique_docs), "chunks_stored": total}
+
+    def _embed_batch(self, batch_chunks: list[dict]) -> list[list[float]]:
+        """Embed one batch of chunks, falling back to smaller batches on errors."""
+        batch_texts = [chunk["text"] for chunk in batch_chunks]
+
+        try:
+            return self.embedding_model.embed_documents(batch_texts)
+        except Exception as e:
+            _log(f"[doc_store] Batch embed failed ({len(batch_chunks)} chunks): {e}")
+
+        for mini_size in _DOC_FALLBACK_BATCHES:
+            try:
+                _log(f"[doc_store] Retrying in mini-batches of {mini_size}...")
+                results: list[list[float]] = []
+                for mini_start in range(0, len(batch_chunks), mini_size):
+                    mini_end = mini_start + mini_size
+                    mini_texts = batch_texts[mini_start:mini_end]
+                    mini_vectors = self.embedding_model.embed_documents(mini_texts)
+                    results.extend(mini_vectors)
+                return results
+            except Exception as e2:
+                _log(f"[doc_store] Mini-batch size {mini_size} failed: {e2}")
+                _clear_gpu_cache()
+
+        # Last resort: embed one chunk at a time.
+        _log("[doc_store] Falling back to single-chunk embedding...")
+        results = []
+        for chunk in batch_chunks:
+            try:
+                vector = self.embedding_model.embed_query(chunk["text"])
+                results.append(vector)
+            except Exception as e3:
+                _clear_gpu_cache()
+                _log(f"[doc_store] SKIP {chunk['metadata'].get('doc_path')}::chunk{chunk['metadata'].get('chunk_index')}: {e3}")
+                dim = getattr(self.embedding_model, "_model", None)
+                dim = dim.get_embedding_dimension() if dim else 1536
+                results.append([0.0] * dim)
+        return results
     
     def search(self, query: str, n_results: int = 5) -> list[dict]:
         """Semantic search across document chunks.
@@ -107,7 +175,7 @@ class DocStore:
         """
         if not self.collection or self.collection.count() == 0:
             return []
-        
+
         query_vector = self.embedding_model.embed_query(query)
 
         results = self.collection.query(
@@ -115,8 +183,46 @@ class DocStore:
             n_results=n_results
         )
 
+        return self._format_results(results)
+
+    def multi_search(self, queries: list[str], n_results: int = 5) -> list[dict]:
+        """Run several search queries and return deduplicated, merged results.
+
+        Useful for broad doc questions where a single phrasing might miss
+        relevant chunks. Results are ordered by first appearance across queries.
+
+        Args:
+            queries: List of search phrasings for the same underlying question.
+            n_results: Number of results to fetch per query.
+
+        Returns:
+            [{"text": "...", "metadata": {...}, "distance": 0.23}, ...]
+        """
+        if not self.collection or self.collection.count() == 0:
+            return []
+
+        seen = set()
+        merged: list[dict] = []
+
+        for query in queries:
+            query_vector = self.embedding_model.embed_query(query)
+            results = self.collection.query(
+                query_embeddings=[query_vector],
+                n_results=n_results,
+            )
+            for item in self._format_results(results):
+                meta = item["metadata"]
+                key = (meta.get("doc_path"), meta.get("chunk_index"))
+                if key in seen:
+                    continue
+                seen.add(key)
+                merged.append(item)
+
+        return merged
+
+    def _format_results(self, results: dict) -> list[dict]:
+        """Convert a ChromaDB query result into a list of result dicts."""
         formatted = []
-        
         for index in range(len(results["ids"][0])):
             formatted.append({
                 "text": results["documents"][0][index],
@@ -127,7 +233,6 @@ class DocStore:
                     else None
                 ),
             })
-
         return formatted
     
     def delete_doc(self, doc_path: str):

@@ -843,7 +843,10 @@ def _load_code_guidelines_for_repo(repo_path: Path) -> str:
     """
     config = load_codewalk_yaml(str(repo_path))
     docs_path = config.docs_path
-    return load_code_guidelines_text(repo_path, docs_path, use_doc_collection=False)
+    code_guidelines = config.code_guidelines
+    return load_code_guidelines_text(
+        repo_path, docs_path, code_guidelines, use_doc_collection=False
+    )
 
 
 def run_review_context(

@@ -466,9 +466,14 @@ indexing:
     # Override an exclusion for a specific path
     - docs/architecture/**
 
-guidelines_path: docs/standards   # optional
-docs_path: docs                   # optional
+docs_path: docs                           # optional
+code_guidelines: docs/code_guidelines.md  # optional
 ```
+
+**Docs & guidelines details:**
+- `docs_path` indexes `.md`, `.pdf`, `.txt`, and `.rst` files for semantic search (`/docs/search`, `codewalk_search_docs`).
+- `code_guidelines` is an optional explicit path to the review-guidelines file. If unset, Codewalk looks for `code_guidelines.md` (or `.txt`/`.rst`) inside `docs_path` and loads it automatically in `codewalk_run_review` / `POST /review`.
+- For per-language/framework rubrics, add `.md` files under `.codewalk/rubrics/`. Examples: `.codewalk/rubrics/core.md`, `.codewalk/rubrics/python.md`, `.codewalk/rubrics/python_fastapi.md`, `.codewalk/rubrics/typescript_nextjs.md`. These override the built-in rubrics.
 
 | Pattern | Matches |
 |---------|---------|

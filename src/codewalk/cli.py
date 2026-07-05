@@ -52,16 +52,14 @@ def analyze(
     )
     typer.echo(f"Indexed {result['chunks_embedded']} chunks from {result['files_scanned']} files")
 
-    # 4. Analysis + DuckDB + docs + guidelines — one call, no duplication
+    # 4. Analysis + DuckDB + docs — one call, no duplication
     db_path = os.path.join(repo.rstrip("/"), ".codewalk", "graph.duckdb")
     files = codewalk_scan_directory(repo, config)
-    gl_path = os.path.join(repo, config.guidelines_path) if config.guidelines_path else ""
     docs_p = os.path.join(repo, config.docs_path) if config.docs_path else ""
     analysis = build_full_analysis(
         db_path=db_path,
         files=files,
         embedded_chunks=result.get("embedded_chunks"),
-        guidelines_path=gl_path,
         docs_path=docs_p,
     )
     module_names = list(analysis["modules_result"]["modules"].keys())
@@ -69,8 +67,6 @@ def analyze(
 
     if analysis.get("docs_indexed"):
         typer.echo(f"Docs: {analysis['docs_indexed']['chunks_stored']} chunks")
-    if analysis.get("guidelines_indexed"):
-        typer.echo(f"Guidelines: {analysis['guidelines_indexed']} chunks")
 
     typer.echo(f"Done. Index written to {repo}/.codewalk/")
 
@@ -115,16 +111,14 @@ def reindex(
         f"  Chunks embedded: {result['chunks_embedded']}"
     )
 
-    # 5. Rebuild analysis + DuckDB + re-index docs/guidelines
+    # 5. Rebuild analysis + DuckDB + re-index docs
     db_path = os.path.join(repo.rstrip("/"), ".codewalk", "graph.duckdb")
     files = codewalk_scan_directory(repo, config)
-    gl_path = os.path.join(repo, config.guidelines_path) if config.guidelines_path else ""
     docs_p = os.path.join(repo, config.docs_path) if config.docs_path else ""
     analysis = build_full_analysis(
         db_path=db_path,
         files=files,
         embedded_chunks=result.get("embedded_chunks"),
-        guidelines_path=gl_path,
         docs_path=docs_p,
         force_reindex_extras=True,
     )

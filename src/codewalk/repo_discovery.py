@@ -27,10 +27,14 @@ indexing:
     - main
     - master
 
-# Optional: paths to team guidelines and docs for review context.
+# Optional: docs folder for semantic search (.md/.pdf/.txt/.rst).
 # Relative to this file.
-# guidelines_path: docs/guidelines
 # docs_path: docs
+
+# Optional: explicit review-guidelines file. If unset, Codewalk searches
+# docs_path for code_guidelines.md / code_guidelines.txt / code_guidelines.rst.
+# Relative to this file.
+# code_guidelines: docs/code_guidelines.md
 
 # Optional: tool command overrides.
 # tools:

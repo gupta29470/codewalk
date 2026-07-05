@@ -12,6 +12,7 @@ from src.codewalk.analysis.dependency_graph import build_dependency_graph
 from src.codewalk.analysis.module_detector import detect_modules
 from src.codewalk.config import settings
 from src.codewalk.log import log as _log
+from src.codewalk.embeddings.chunker import read_file_content
 
 from pathlib import Path as _Path
 
@@ -250,7 +251,7 @@ def initialize(store: VectorStore, agent, modules_result: dict, analyze_result: 
                files: list[dict] | None = None, deps: dict | None = None,
                repo_path: str | None = None,
                embedded_chunks: list[dict] | None = None,
-               guidelines_path: str = "", docs_path: str = "",
+               docs_path: str = "",
                force_reindex_extras: bool = False):
     """Set all state after a successful /analyze."""
     global _store, _agent, _modules_result, _analyze_result, _files, _deps, _repo_path, _graph_store, _graph_runtime
@@ -262,7 +263,7 @@ def initialize(store: VectorStore, agent, modules_result: dict, analyze_result: 
         if repo_path:
             _repo_path = repo_path
 
-        # Build DuckDB + deps + modules + docs + guidelines via shared function
+        # Build DuckDB + deps + modules + docs via shared function
         if files:
             repo = _resolve_repo_path()
             db_path = f"{repo.rstrip('/')}/.codewalk/graph.duckdb"
@@ -273,7 +274,6 @@ def initialize(store: VectorStore, agent, modules_result: dict, analyze_result: 
                 db_path=db_path,
                 files=files,
                 embedded_chunks=embedded_chunks,
-                guidelines_path=guidelines_path,
                 docs_path=docs_path,
                 force_reindex_extras=force_reindex_extras,
                 collection_name=getattr(store, "_collection_prefix", None) or get_collection_name(),
@@ -364,6 +364,28 @@ def scan_repo_files(repo_path: str | None = None) -> list[dict]:
     return files
 
 
+def _file_is_indexable(file_info: dict) -> bool:
+    """Return True if a file has non-empty content that produces chunks.
+
+    Empty and whitespace-only files are intentionally skipped by the chunker,
+    so they should not be treated as missing during completeness checks.
+
+    If the absolute path is missing or unreadable, assume the file is indexable
+    rather than hiding a real problem.
+    """
+    path = file_info.get("absolute_path", "")
+    if not path:
+        return True
+    from pathlib import Path as _Path
+    try:
+        if _Path(path).stat().st_size == 0:
+            return False
+    except (OSError, FileNotFoundError):
+        return True
+    content = read_file_content(path) or ""
+    return bool(content.strip())
+
+
 def _rebuild_memory_caches():
     """Re-scan files and rebuild in-memory caches only. Does NOT touch DuckDB."""
     global _files, _deps, _modules_result, _repo_path
@@ -430,16 +452,19 @@ def index_is_complete(repo_path: str | None = None) -> bool:
     if not expected:
         return False
 
+    # Empty/whitespace-only files produce no ChromaDB chunks, so completeness
+    # only needs to verify that every indexable file is present.
+    indexable = {f["file_path"] for f in files if _file_is_indexable(f)}
+
     store = VectorStore(persist_dir=chroma)
     store.create_collection(_collection_name_for_path(path))
     indexed = store.get_all_indexed_files()
-    return expected.issubset(indexed)
+    return indexable.issubset(indexed)
 
 
 def analyze_or_reindex_index(
     repo_path: str,
     docs_path: str = "",
-    guidelines_path: str = "",
     mode: str = "auto",
 ) -> dict:
     """Scan disk, check index status, or run a build/reindex.
@@ -474,6 +499,9 @@ def analyze_or_reindex_index(
     files = scan_repo_files(repo_path)
     _files = files
     expected_paths = {f["file_path"] for f in files}
+    # Empty/whitespace-only files produce no chunks; exclude them from the
+    # missing-files check so a repo full of empty __init__.py files stays "ready".
+    indexable_paths = {f["file_path"] for f in files if _file_is_indexable(f)}
 
     # 2. Open ChromaDB from disk (never use cached _store).
     store = VectorStore(persist_dir=chroma)
@@ -494,7 +522,7 @@ def analyze_or_reindex_index(
             manifest_exists = False
 
     # 4. Decide state.
-    missing_files = expected_paths - indexed_files
+    missing_files = indexable_paths - indexed_files
     extra_files = indexed_files - expected_paths
     is_partial = (
         chunk_count > 0
@@ -574,10 +602,12 @@ def analyze_or_reindex_index(
 
     # 8. Fetch all chunks and rebuild DuckDB + knowledge graph from the complete index.
     all_chunks = store.get_all_chunks()
-    force_extras = mode in ("full", "reindex")
+    # Full mode wipes everything, so re-index docs too. Incremental reindex only
+    # updates code files; docs should be refreshed separately unless the caller
+    # explicitly wants them rebuilt.
+    force_extras = mode == "full"
     rebuild_analysis_cache(
         embedded_chunks=all_chunks,
-        guidelines_path=guidelines_path,
         docs_path=docs_path,
         force_reindex_extras=force_extras,
         files=files,
@@ -676,7 +706,7 @@ def load_scoped_analysis():
 
 
 def rebuild_analysis_cache(embedded_chunks: list[dict] | None = None,
-                           guidelines_path: str = "", docs_path: str = "",
+                           docs_path: str = "",
                            force_reindex_extras: bool = False,
                            files: list[dict] | None = None):
     """Re-scan files (or reuse ``files``), rebuild DuckDB, wire store + agent.
@@ -701,7 +731,6 @@ def rebuild_analysis_cache(embedded_chunks: list[dict] | None = None,
             db_path=db_path,
             files=files,
             embedded_chunks=embedded_chunks,
-            guidelines_path=guidelines_path,
             docs_path=docs_path,
             force_reindex_extras=force_reindex_extras,
             collection_name=get_collection_name(),

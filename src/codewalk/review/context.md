@@ -64,3 +64,5 @@ renderers/ format output for CLI / API / Markdown
 
 - The older monolithic `reviewer.py` has been split into `engine.py` + `reviewers/` + `pipeline/` + `renderers/`.
 - `run_review()` is the single entry point used by both the API `/review` endpoint and the MCP `codewalk_run_review` tool.
+- Team guidelines: set `code_guidelines` in `codewalk.yaml` to an explicit file path, or place `code_guidelines.md` (or `.txt`/`.rst`) inside `docs_path`; it is loaded automatically by `review/utils.py.load_code_guidelines_text()`.
+- Rubrics: team overrides go in `.codewalk/rubrics/<name>.md` (e.g. `core.md`, `python.md`, `python_fastapi.md`, `typescript_nextjs.md`). Built-in rubrics live in `src/codewalk/review/rubrics/`.

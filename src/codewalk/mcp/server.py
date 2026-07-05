@@ -47,8 +47,10 @@ Review architecture (batched, no external LLM calls):
   (status ready/built/reindexed). If the index is behind, it asks for reindex
   first and defers the stack-context prompt until the index is synced.
 
-  IMPORTANT: No MCP tool calls detect_stack() or any external LLM.
+  IMPORTANT: No MCP review tool calls detect_stack() or any external LLM.
   Stack context comes purely from the persistent file on disk.
+  For complex questions, the host LLM can call codewalk_search_codebase
+  1-3 times with different phrasings and synthesize the returned chunks.
 
   Session directory layout:
     .codewalk/review_session/<session>/
@@ -144,6 +146,7 @@ mcp = FastMCP(
         "- 'What does function X do?' → codewalk_explain_function(X) — line-by-line explanation\n"
         "- 'Explain class X / component X' → codewalk_explain_class(X) — line-by-line explanation\n"
         "- 'How does feature Y work?' → codewalk_search_codebase(Y) — returns code chunks for YOU to analyze\n"
+        "  Tip: for broad questions, call it 1-3 times with different phrasings and synthesize the chunks.\n"
         "- 'Give me an overview' → codewalk_get_overview\n"
         "- 'What's in module Z?' → codewalk_get_module_info(Z) — files + functions/classes\n"
         "- 'What breaks if I change X?' → codewalk_get_blast_radius_map(target=X) — "
@@ -159,6 +162,15 @@ mcp = FastMCP(
         "starts npm start on the requested port, and opens an interactive visualization "
         "in the browser (optional repo_path and port arguments)\n"
         "- 'Fix this bug / apply this change' → search + produce fix → codewalk_approve_action FIRST → then apply\n"
+        "\n"
+        "## MULTI-ANGLE SEARCH (use for question)\n"
+        "For any question, run 1-3 parallel calls to codewalk_search_codebase\n"
+        "with different phrasings, then synthesize the returned chunks into one answer.\n"
+        "Example for 'how does auth work?':\n"
+        "  1. codewalk_search_codebase('how does auth work')\n"
+        "  2. codewalk_search_codebase('authentication login flow')\n"
+        "  3. codewalk_search_codebase('verify user credentials')\n"
+        "Merge the chunks, remove duplicates, and answer from the combined context.\n"
         "\n"
         "## ANSWER QUALITY RULES\n"
         "- When quoting code with obvious typos or odd identifiers, explicitly flag them so the user knows they are real source issues.\n"
@@ -231,7 +243,10 @@ mcp = FastMCP(
         "## DOCUMENTATION SEARCH\n"
         "- codewalk_index_docs(docs_path) — index a folder of .md/.pdf/.txt docs for semantic search\n"
         "- codewalk_search_docs(query) — search indexed docs, returns raw chunks for browsing\n"
-        "- codewalk_ask_docs(question) — search + answer grounded in docs with citations\n"
+        "- codewalk_ask_docs(question) — single search + formatted context for YOU to answer\n"
+        "\n"
+        "For broad doc questions, call codewalk_search_docs or codewalk_ask_docs 1-3 times\n"
+        "with different phrasings and synthesize the merged chunks, just like codebase search.\n"
         "\n"
         "## QUERY ROUTING — pick the right tool first\n"
         "Route the user's question to the correct capability before calling a tool:\n"
@@ -293,8 +308,10 @@ mcp = FastMCP(
         "Foundational files being high-risk is expected and not actionable.\n"
         "\n"
         "## SEARCH & CORRECTIVE RAG\n"
-        "codewalk_search_codebase returns RAW code chunks, not a pre-made answer.\n"
-        "YOU must generate the answer from the chunks. Follow this flow:\n"
+        "codewalk_search_codebase expands your query into 1-3 complementary search\n"
+        "angles internally, retrieves raw code chunks for each, and returns the\n"
+        "merged, deduplicated chunks. It does NOT return a pre-made answer — YOU\n"
+        "must generate the answer from the chunks. Follow this flow:\n"
         "1. Call codewalk_search_codebase(query) — get filtered code chunks + confidence\n"
         "2. Read the chunks and generate your answer using ONLY the returned code\n"
         "3. If confidence < 0.3 or chunks seem irrelevant to the question:\n"
@@ -597,7 +614,6 @@ def codewalk_analyze_codebase(mode: str = "auto") -> str:
         result = state.analyze_or_reindex_index(
             repo_path,
             docs_path=docs_path,
-            guidelines_path=None,
             mode=mode,
         )
     except Exception as e:
@@ -727,14 +743,12 @@ def codewalk_generate_config(force: bool = False) -> str:
 def codewalk_search_codebase(query: str) -> str:
     """Search the codebase and return relevant code chunks for analysis.
 
-    Retrieves code chunks by deterministic symbol lookup, semantic similarity,
-    distance filtering, keyword grading, and graph expansion when retrieval is
-    weak. Returns the raw chunks — YOU (Copilot) generate the answer from them.
+    Performs one semantic search using symbol lookup, similarity, distance
+    filtering, keyword grading, and graph expansion. Returns raw context for
+    the host LLM to analyze.
 
-    This tool does NOT call an LLM. All retrieval is deterministic.
-
-    If confidence is low or chunks seem irrelevant, rephrase the query
-    and call this tool again (max 3 retries).
+    For every question, the host should call this tool 1-3 times
+    with different phrasings and synthesize the merged chunks into one answer.
 
     For a specific function/method by name, prefer codewalk_explain_function.
     For a specific class/component/type by name, prefer codewalk_explain_class.
@@ -750,6 +764,7 @@ def codewalk_search_codebase(query: str) -> str:
         return err
 
     _log(f"[codewalk_search_codebase] Query: {query}")
+
     chunks, confidence, retrieval_good = deterministic_search(
         query,
         state._store,
@@ -1124,7 +1139,6 @@ def codewalk_incremental_reindex() -> str:
     result = state.analyze_or_reindex_index(
         repo_path,
         docs_path=docs_path,
-        guidelines_path=None,
         mode="reindex",
     )
 
@@ -1135,7 +1149,7 @@ def codewalk_incremental_reindex() -> str:
         f"  Re-indexed:      {result['files_reindexed']}\n"
         f"  Deleted:         {result['files_deleted']}\n"
         f"  Chunks embedded: {result['chunks_embedded']}\n\n"
-        f"Analysis cache refreshed (docs re-indexed)."
+        f"Analysis cache refreshed. Docs/guidelines were not re-indexed; use codewalk_index_docs(path) to refresh docs."
     )
 
 
@@ -2216,9 +2230,10 @@ def codewalk_load_guidelines(docs_path: str | None = None) -> str:
     """Load project docs/standards for use in code reviews.
 
     Indexes .md/.txt/.rst/.pdf documents from the given directory into the
-    project's doc collection. Reviews will automatically include any file named
-    `code_guidelines` as code-review guidelines. Call this once per project or
-    after the docs change.
+    project's doc collection. Reviews will automatically include:
+      - an explicit `code_guidelines` file configured in codewalk.yaml, or
+      - any file named `code_guidelines.md`/`.txt`/`.rst` inside docs_path.
+    Call this once per project or after the docs change.
 
     Args:
         docs_path: Path to directory containing doc/guideline files.
@@ -2249,7 +2264,7 @@ def codewalk_load_guidelines(docs_path: str | None = None) -> str:
 
     return (
         f"✅ Indexed {count} doc chunks from {path}\n"
-        f"Any `code_guidelines` file will be used automatically in codewalk_run_review."
+        f"`code_guidelines` (configured in codewalk.yaml or found in this folder) will be used automatically in codewalk_run_review."
     )
 
 
@@ -2690,8 +2705,11 @@ def codewalk_index_docs(docs_path: str) -> str:
 def codewalk_search_docs(query: str, n_results: int = 5) -> str:
     """Search indexed documents for content matching a query.
 
-    Returns the most relevant document chunks with source citations.
-    Use this after codewalk_index_docs to find information in team docs.
+    Performs a single semantic search and returns the most relevant document
+    chunks with source citations. Use this after codewalk_index_docs.
+
+    For broad doc questions, call this tool 1-3 times with different phrasings
+    and synthesize the merged chunks.
 
     Args:
         query: What to search for (e.g. "deployment process", "API authentication").
@@ -2726,11 +2744,13 @@ def codewalk_search_docs(query: str, n_results: int = 5) -> str:
 # ─── TOOL 20 [DOCS]: codewalk_ask_docs ───────────────────────────────
 @mcp.tool()
 def codewalk_ask_docs(question: str, n_results: int = 5) -> str:
-    """Ask a question and get an answer grounded in indexed documents.
+    """Ask a question and get grounded context from indexed documents.
 
-    Retrieves relevant document chunks, formats them with source citations,
-    and returns context with instructions for answering. Use for questions
-    like "How do we deploy?" or "What's our API rate limit?"
+    Performs a single semantic search, formats the relevant chunks with source
+    citations, and returns a prompt for the host LLM to answer from.
+
+    For broad doc questions, call this tool 1-3 times with different phrasings,
+    merge the returned chunks, and synthesize one answer.
 
     Args:
         question: The question to answer from the docs.

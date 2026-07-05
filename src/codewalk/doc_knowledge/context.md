@@ -21,15 +21,16 @@ DocStore.index_docs() → chunks with metadata
     ↓
 ChromaDB collection {collection_name}_docs
     ↓
-DocStore.search() → results for /docs/ask or review context
+DocStore.search() / DocStore.multi_search() → results for /docs/ask or review context
 ```
 
 ## Connections
 
 - Called by `pipeline.build_full_analysis()` when `docs_path` is provided.
-- Called by API `/docs/index`, `/docs/search`, `/docs/ask`.
-- Called by MCP `codewalk_index_docs`, `codewalk_search_docs`, `codewalk_ask_docs`.
-- Guidelines for reviews are loaded via `review/utils.py` (`load_code_guidelines_text`) and `embeddings/vector_store.py`; the old `review/guidelines_loader.py` no longer exists.
+- Called by API `/docs/index`, `/docs/search`, `/docs/ask`. `/docs/ask` expands the question into 1–3 angles and uses `DocStore.multi_search()` to merge deduplicated chunks.
+- Called by MCP `codewalk_index_docs`, `codewalk_search_docs`, `codewalk_ask_docs`. MCP doc tools perform single searches; the host LLM should call them 1–3 times for broad doc questions and synthesize the results.
+- Guidelines for reviews are loaded via `review/utils.py` (`load_code_guidelines_text`): it first uses an explicit `code_guidelines` path from `codewalk.yaml`, then searches the indexed doc collection for a document whose path contains `code_guidelines`, then falls back to scanning `docs_path` on disk for `code_guidelines.md`, `code_guidelines.txt`, or `code_guidelines.rst`.
+- Language/framework rubrics for reviews are loaded by `review/rubric_loader.py` from `.codewalk/rubrics/<name>.md` (team override) or `src/codewalk/review/rubrics/<name>.md` (built-in), e.g. `core.md`, `python.md`, `python_fastapi.md`.
 
 ## Recent fixes
 

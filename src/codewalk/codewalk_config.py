@@ -14,8 +14,8 @@ class CodewalkConfig:
     exclude: list[str] = field(default_factory=list)
     include: list[str] = field(default_factory=list)  # override exclude + core filter
     branches: list[str] = field(default_factory=list)  # allowed index branches (fnmatch)
-    guidelines_path: str = ""   # relative to repo root
     docs_path: str = ""         # relative to repo root
+    code_guidelines: str = ""   # optional explicit path to review guidelines file
     tools: dict = field(default_factory=dict)  # tool command overrides (e.g. static_analysis, test_command)
 
 
@@ -43,8 +43,8 @@ def load_codewalk_yaml(repo_root: str) -> CodewalkConfig:
         exclude=indexing.get("exclude", []),
         include=indexing.get("include", []),
         branches=indexing.get("branches") or [],
-        guidelines_path=data.get("guidelines_path", ""),
         docs_path=data.get("docs_path", ""),
+        code_guidelines=data.get("code_guidelines", ""),
         tools=data.get("tools", {}),
     )
 

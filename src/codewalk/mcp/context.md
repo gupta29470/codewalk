@@ -49,3 +49,4 @@ See `MCP_EXAMPLES.md` in the Codewalk repo for example prompts per tool.
 
 - `_reset_state()` now closes the active `GraphStore` (DuckDB) connection and clears the cached reference, so switching repos (A → B → A) reopens the correct `graph.duckdb` instead of using a stale handle.
 - `codewalk_analyze_codebase(mode="auto")` no longer silently resumes partial indexes; it reports `status="behind"` and tells the host to run `codewalk_incremental_reindex`.
+- `codewalk_search_codebase` performs a single deterministic search. The MCP instructions now include a "MULTI-ANGLE SEARCH" section that tells the host LLM to call it 1–3 times with different phrasings for every conceptual question and synthesize the returned chunks.

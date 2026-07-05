@@ -1,5 +1,8 @@
 """LangGraph agent tool definitions for codebase Q&A and modifications."""
+from concurrent.futures import ThreadPoolExecutor
+
 from langchain_core.tools import tool
+from langchain_core.prompts import ChatPromptTemplate
 
 from src.codewalk.embeddings.vector_store import VectorStore
 from src.codewalk.graph.graph_store import GraphStore
@@ -10,7 +13,8 @@ from src.codewalk.query import (
     execution_flow_text,
 )
 from src.codewalk.rag.chain import ask_corrective
-from src.codewalk.config import settings
+from src.codewalk.rag.query_expander import expand_query
+from src.codewalk.config import settings, get_llm
 from src.codewalk.review.fix_applier import apply_fix_to_file
 from src.codewalk.tools.static_analysis import run_static_analysis
 from src.codewalk.tools.test_runner import run_tests
@@ -26,6 +30,84 @@ def format_write_tool_calls(tool_calls: list) -> str:
         f"• {tc.get('name', '?')}: {tc.get('args', {})}"
         for tc in writes
     )
+
+
+_MAX_SEARCH_QUERIES = 3
+
+
+def _synthesize_answers(question: str, answers: list[str]) -> str:
+    """Merge answers from multiple retrieval queries into one coherent response."""
+    if len(answers) == 1:
+        return answers[0]
+
+    llm = get_llm(temperature=0, reasoning=False)
+    prompt = ChatPromptTemplate.from_messages([
+        ("system", (
+            "You are a senior engineer answering a question about a codebase. "
+            "Below are partial answers produced from different search angles. "
+            "Synthesize them into one concise, coherent answer. Preserve file paths "
+            "and line numbers. Do not invent facts not present in the partial answers."
+        )),
+        ("human", (
+            f"Question: {question}\n\n"
+            + "\n\n---\n\n".join(f"Angle {i + 1}:\n{a}" for i, a in enumerate(answers))
+        )),
+    ])
+    chain = prompt | llm
+    response = chain.invoke({})
+    return response.content.strip()
+
+
+def _multi_query_search(query: str, store, graph_store=None) -> dict:
+    """Expand the query into 1-3 searches and merge the results.
+
+    Returns a dict matching ask_corrective's output shape:
+        answer, confident, retrieval_confidence, relevant_chunks, retries
+    """
+    try:
+        expanded = expand_query(query)
+        queries = expanded.queries[:_MAX_SEARCH_QUERIES]
+    except Exception:
+        queries = [query]
+
+    # Ensure the original query is always covered.
+    if query not in queries:
+        queries.insert(0, query)
+    queries = queries[:_MAX_SEARCH_QUERIES]
+
+    results: list[dict] = []
+    with ThreadPoolExecutor(max_workers=len(queries)) as executor:
+        futures = [executor.submit(ask_corrective, q, store, graph_store=graph_store) for q in queries]
+        for future in futures:
+            try:
+                results.append(future.result())
+            except Exception:
+                continue
+
+    if not results:
+        return {
+            "answer": "I couldn't retrieve any relevant code for that question.",
+            "confident": False,
+            "retrieval_confidence": 0.0,
+            "relevant_chunks": 0,
+            "retries": 0,
+        }
+
+    answers = [r.get("answer", "") for r in results if r.get("answer")]
+    synthesized = _synthesize_answers(query, answers) if len(answers) > 1 else (answers[0] if answers else "")
+
+    confidences = [r.get("retrieval_confidence", 0.0) or 0.0 for r in results]
+    chunks = [r.get("relevant_chunks", 0) or 0 for r in results]
+    retries = sum(r.get("retries", 0) or 0 for r in results)
+
+    return {
+        "answer": synthesized,
+        "confident": any(r.get("confident") for r in results),
+        "retrieval_confidence": max(confidences),
+        "relevant_chunks": sum(chunks),
+        "retries": retries,
+    }
+
 
 def create_tools(
     store: VectorStore,
@@ -56,13 +138,10 @@ def create_tools(
     def search_codebase(query: str) -> str:
         """Search the codebase and generate a verified answer.
 
-        Uses corrective RAG: retrieves code chunks, grades them for
-        relevance, generates an answer, and verifies it is faithful
-        to the retrieved code. Automatically retries with query
-        rewriting if the first attempt fails.
-
-        Falls back to graph-neighbor expansion when semantic search
-        alone is not enough.
+        Expands the query into 1-3 complementary search angles, runs
+        corrective RAG for each in parallel, then synthesizes the results
+        into a single answer. This improves recall compared to a single
+        search, especially for broad or ambiguous questions.
 
         Use this for ANY question about code, functions, features, or
         implementation details.
@@ -70,7 +149,7 @@ def create_tools(
         Args:
             query: Natural language question, e.g. "how does authentication work"
         """
-        result = ask_corrective(query, store, graph_store=graph_store)
+        result = _multi_query_search(query, store, graph_store=graph_store)
         confidence = result.get("retrieval_confidence")
         confidence_text = f"{confidence:.2f}" if confidence is not None else "N/A"
         meta = (
@@ -178,8 +257,9 @@ def create_tools(
         """Load project docs/standards for use in code reviews.
 
         Indexes .md/.txt/.rst/.pdf documents from the given directory. Reviews
-        will automatically include any file named `code_guidelines` as code-review
-        guidelines.
+        will automatically include an explicit `code_guidelines` file configured
+        in codewalk.yaml, or any file named `code_guidelines.md`/`.txt`/`.rst`
+        inside docs_path.
 
         Args:
             docs_path: Path to directory containing doc/guideline files.

@@ -123,15 +123,12 @@ def _ensure_repo_path(repo_path: str | None = None) -> str:
     return _resolve_repo_path(repo_path)
 
 
-def _resolve_extras_paths(repo_path: str, codewalk_config) -> tuple[str, str]:
-    """Resolve guidelines/docs paths from codewalk.yaml, relative to repo_path."""
-    guidelines_path = codewalk_config.guidelines_path
+def _resolve_extras_paths(repo_path: str, codewalk_config) -> str:
+    """Resolve docs_path from codewalk.yaml, relative to repo_path."""
     docs_path = codewalk_config.docs_path
-    if guidelines_path and not os.path.isabs(guidelines_path):
-        guidelines_path = os.path.join(repo_path, guidelines_path)
     if docs_path and not os.path.isabs(docs_path):
         docs_path = os.path.join(repo_path, docs_path)
-    return guidelines_path, docs_path
+    return docs_path
 
 
 # ─── Lifespan handler (replaces deprecated @app.on_event) ─────────────
@@ -281,12 +278,11 @@ def analyze(request: AnalyzeRequest):
         if not request.collection_name:
             request.collection_name = state.get_collection_name()
         codewalk_config = load_codewalk_yaml(request.repo_path)
-        guidelines_path, docs_path = _resolve_extras_paths(request.repo_path, codewalk_config)
+        docs_path = _resolve_extras_paths(request.repo_path, codewalk_config)
 
         result = state.analyze_or_reindex_index(
             request.repo_path,
             docs_path=docs_path,
-            guidelines_path=guidelines_path,
             mode=request.index_mode,
         )
 
@@ -339,7 +335,7 @@ def analyze_stream(request: AnalyzeRequest):
             if not request.collection_name:
                 request.collection_name = state.get_collection_name()
             codewalk_config = load_codewalk_yaml(request.repo_path)
-            guidelines_path, docs_path = _resolve_extras_paths(request.repo_path, codewalk_config)
+            docs_path = _resolve_extras_paths(request.repo_path, codewalk_config)
 
             yield f"data: {json.dumps({'step': 'init', 'message': 'Checking existing index...'})}\n\n"
 
@@ -347,7 +343,6 @@ def analyze_stream(request: AnalyzeRequest):
                 state.analyze_or_reindex_index,
                 request.repo_path,
                 docs_path=docs_path,
-                guidelines_path=guidelines_path,
                 mode=request.index_mode,
             )
 
@@ -742,12 +737,11 @@ def incremental_reindex_endpoint():
         repo_path = _require_repo_path(None)
         state.set_repo_path(repo_path)
         codewalk_config = load_codewalk_yaml(repo_path)
-        guidelines_path, docs_path = _resolve_extras_paths(repo_path, codewalk_config)
+        docs_path = _resolve_extras_paths(repo_path, codewalk_config)
 
         result = state.analyze_or_reindex_index(
             repo_path,
             docs_path=docs_path,
-            guidelines_path=guidelines_path,
             mode="reindex",
         )
 
@@ -1187,6 +1181,7 @@ def docs_search(req: DocsSearchRequest):
 async def docs_ask(req: DocsAskRequest):
     from src.codewalk.config import get_llm
     from src.codewalk.doc_knowledge.prompts import DOC_ASK_PROMPT
+    from src.codewalk.rag.query_expander import expand_query
 
     _ensure_repo_path(req.repo_path)
     store = state.get_doc_store()
@@ -1194,18 +1189,28 @@ async def docs_ask(req: DocsAskRequest):
     if store.chunk_count() == 0:
         raise HTTPException(status_code=400, detail="No documents indexed yet.")
 
-    results = store.search(req.question, n_results=req.n_results)
+    # Expand the question into 1-3 search angles for better recall.
+    try:
+        expanded = expand_query(req.question)
+        queries = expanded.queries[:3]
+    except Exception:
+        queries = [req.question]
+    if req.question not in queries:
+        queries.insert(0, req.question)
+    queries = queries[:3]
+
+    results = store.multi_search(queries, n_results=req.n_results)
 
     if not results:
         return {"answer": "No relevant documents found.", "sources": []}
-    
+
     # Build context
     context_parts = []
     for result in results:
         metadata = result["metadata"]
         source = f"{metadata.get('doc_path', '?')} > {metadata.get('section', '?')}"
         context_parts.append(f"--- {source} ---\n{result['text']}")
-    
+
     context = "\n\n".join(context_parts)
 
     prompt = DOC_ASK_PROMPT.format(context=context, question=req.question)

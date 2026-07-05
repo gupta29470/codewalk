@@ -742,10 +742,7 @@ def _analyze_repo(repo_path: Path, repo_full_name: str, run_id: str) -> dict:
             codewalk_config=config,
         )
 
-        guidelines_path = ""
         docs_path = ""
-        if config.guidelines_path:
-            guidelines_path = str(repo_path / config.guidelines_path)
         if config.docs_path:
             docs_path = str(repo_path / config.docs_path)
 
@@ -753,7 +750,6 @@ def _analyze_repo(repo_path: Path, repo_full_name: str, run_id: str) -> dict:
             db_path=db_path,
             files=index_result["files"],
             embedded_chunks=index_result.get("embedded_chunks"),
-            guidelines_path=guidelines_path,
             docs_path=docs_path,
             force_reindex_extras=True,
             collection_name=col,
@@ -802,10 +798,7 @@ def _run_incremental_index(repo_path: Path, repo_full_name: str, run_id: str) ->
         vs.create_collection(col)
         all_chunks = vs.get_all_chunks()
 
-        guidelines_path = ""
         docs_path = ""
-        if config.guidelines_path:
-            guidelines_path = str(repo_path / config.guidelines_path)
         if config.docs_path:
             docs_path = str(repo_path / config.docs_path)
 
@@ -813,7 +806,6 @@ def _run_incremental_index(repo_path: Path, repo_full_name: str, run_id: str) ->
             db_path=db_path,
             files=files,
             embedded_chunks=all_chunks,
-            guidelines_path=guidelines_path,
             docs_path=docs_path,
             force_reindex_extras=True,
             collection_name=col,

@@ -197,14 +197,16 @@ def _load_code_guidelines_from_doc_collection(
 def load_code_guidelines_text(
     repo_path: Path,
     docs_path: str | None = None,
+    code_guidelines: str | None = None,
     *,
     use_doc_collection: bool = True,
 ) -> str:
     """Load code guidelines text.
 
-    1. Search the indexed doc collection for a ``code_guidelines`` document (optional).
-    2. Fall back to scanning ``docs_path`` on disk.
-    3. Return empty string if neither finds it.
+    1. Use an explicit ``code_guidelines`` file path if provided.
+    2. Search the indexed doc collection for a ``code_guidelines`` document (optional).
+    3. Fall back to scanning ``docs_path`` on disk for ``code_guidelines.*``.
+    4. Return empty string if none of the above finds it.
 
     Args:
         use_doc_collection: If False, skip the ChromaDB doc collection lookup.
@@ -212,6 +214,17 @@ def load_code_guidelines_text(
     """
     guidelines = ""
 
+    # 1. Explicit file path wins.
+    if code_guidelines:
+        path = code_guidelines
+        if not os.path.isabs(path):
+            path = os.path.join(str(repo_path), path)
+        try:
+            return Path(path).read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            pass
+
+    # 2. Indexed doc collection lookup.
     if use_doc_collection:
         # Derive collection prefix from repo folder name or manifest.
         collection_prefix = repo_path.name or "codebase"
@@ -232,6 +245,7 @@ def load_code_guidelines_text(
         if guidelines:
             return guidelines
 
+    # 3. Fallback: scan docs_path on disk for code_guidelines.*
     if docs_path:
         if not os.path.isabs(docs_path):
             docs_path = os.path.join(str(repo_path), docs_path)

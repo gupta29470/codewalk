@@ -7,7 +7,7 @@ This package implements a LangGraph agent that can answer questions about the co
 | File | Role |
 |------|------|
 | `graph.py` | `create_agent()` — compiles the LangGraph state graph with tools, memory (SQLite/AsyncSqliteSaver checkpointer via `core/hitl`), and interrupt logic for human-in-the-loop. Also exposes `proposed_write_action()` to extract pending file edits from agent messages. |
-| `tools.py` | Agent tool definitions: search codebase, explain function, module info, overview, blast radius, reading order, execution flow, architecture health, review diff/file, apply fix, verify fix, run static analysis, run tests, load guidelines. |
+| `tools.py` | Agent tool definitions: search codebase (multi-query), explain function, module info, overview, blast radius, reading order, execution flow, architecture health, review diff/file, apply fix, verify fix, run static analysis, run tests, load guidelines. |
 | `prompts.py` | System prompts and prompt templates for the agent. |
 
 ## Data flow
@@ -34,4 +34,5 @@ apply_fix tool writes file
 ## Notes
 
 - `graph.py` compiles agents via `core/hitl.compile_with_hitl()`, which wraps the compiled graph in `_ThreadSafeGraph` to serialize access to the SQLite checkpointer across API worker threads. The async checkpointer variant is used by `research/deep_research.py`.
+- `search_codebase` in `tools.py` expands every user query into 1–3 complementary search angles via `expand_query()`, runs corrective RAG in parallel, and synthesizes the results into a single answer.
 - Per `AGENTS.md` / architecture rules: the agent lives in the API flow and may call `get_llm()`. MCP tools do not use this agent.

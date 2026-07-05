@@ -4,10 +4,11 @@
 # dependency folders here.
 
 # Optional review evidence sources (relative to repo root).
-# When these paths are configured, the indexer embeds them alongside the codebase.
-# During review, the indexed collection is used if present; otherwise the raw
+# docs_path is indexed for semantic search via /docs/search or codewalk_search_docs.
+# code_guidelines is an optional explicit path to the review-guidelines file.
+# During review, the indexed doc collection is used if present; otherwise the raw
 # files are read directly.
-guidelines_path: ""
+code_guidelines: ""
 docs_path: ""
 
 indexing:

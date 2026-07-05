@@ -42,7 +42,7 @@ Same as above, but when retrieval is weak it also uses `expand_query()` and `rew
 ## Connections
 
 - Consumes `embeddings/vector_store.py` and `graph/graph_store.py` / `graph_runtime.py`.
-- Used by `api/main.py` chat endpoints, `mcp/server.py` `codewalk_search_codebase`, `services/search_service.py`, `review/engine.py`, and `research/`.
+- Used by `api/main.py` chat endpoints (via `agent/tools.py` `search_codebase`), `services/search_service.py`, `review/engine.py`, and `research/`. `mcp/server.py` `codewalk_search_codebase` uses `services/search_service.py`, not `ask_corrective` directly.
 - `chunk_grader.py` uses `sklearn` stop-words for the free keyword grader.
 
 ## Recent fixes
