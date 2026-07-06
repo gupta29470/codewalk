@@ -20,7 +20,7 @@ from src.codewalk.log import log as _log
 from src.codewalk import __version__ as CODEWALK_VERSION
 
 _SENTINEL = object()
-EMBED_BATCH_SIZE = 128
+EMBED_BATCH_SIZE = 64
 
 logger = logging.getLogger("codewalk")
 
