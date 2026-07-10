@@ -212,8 +212,15 @@ def _run_catchup_indexing(logger):
             )
 
             try:
-                # Catch-up does a full index + full DuckDB rebuild to ensure consistency
-                result = _analyze_repo(repo_path, full_name, head_sha)
+                # Catch-up: use incremental if a previous index exists (same as webhook path),
+                # fall back to full if no previous index or incremental fails.
+                active = _active_index_dir(full_name)
+                if active and (active / "chroma").exists():
+                    logger.info(f"[catchup] {full_name}: incremental reindex (previous index found)")
+                    result = _run_incremental_index(repo_path, full_name, head_sha)
+                else:
+                    logger.info(f"[catchup] {full_name}: full index (no previous index)")
+                    result = _analyze_repo(repo_path, full_name, head_sha)
 
                 superseded = _abort_superseded_index(
                     db, full_name, head_sha, reason="superseded by catch-up"
