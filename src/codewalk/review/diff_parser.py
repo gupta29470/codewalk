@@ -1,9 +1,14 @@
 """Diff Parser utilities for Codewalk."""
+import os
 import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
 
 from src.codewalk.ingestion.scanner import detect_language
+
+# Untracked file limits
+_MAX_UNTRACKED_FILE_SIZE = 512 * 1024  # 512KB
+_BINARY_CHECK_BYTES = 8192             # first 8KB
 
 
 @dataclass
@@ -42,6 +47,95 @@ class DiffFile:
     removed_lines: int = 0
 
 
+def _has_head(repo_path: str | None) -> bool:
+    """Return True if the repo has at least one commit (HEAD exists)."""
+    return subprocess.run(
+        ["git", "rev-parse", "--verify", "HEAD"],
+        cwd=repo_path,
+        capture_output=True,
+        timeout=10,
+    ).returncode == 0
+
+
+def _synthetic_untracked_diff(repo_path: str | None) -> str:
+    """Generate unified-diff text for untracked files (new files not yet staged).
+
+    Runs ``git ls-files --others --exclude-standard`` and builds a synthetic
+    diff for each eligible file so that ``get_parsed_diff()`` can parse them
+    like any other diff hunk.
+
+    Skips binary files, symlinks, files > 512 KB, and files that fail UTF-8 decode.
+    """
+    result = subprocess.run(
+        ["git", "-c", "core.quotepath=false", "ls-files", "--others", "--exclude-standard"],
+        cwd=repo_path,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    if result.returncode != 0 or not result.stdout.strip():
+        return ""
+
+    parts: list[str] = []
+    base = Path(repo_path) if repo_path else Path.cwd()
+
+    for rel_path in result.stdout.strip().splitlines():
+        rel_path = rel_path.strip()
+        if not rel_path:
+            continue
+
+        full_path = base / rel_path
+
+        # Skip symlinks and non-files
+        if not full_path.is_file() or full_path.is_symlink():
+            continue
+
+        # Skip large files
+        try:
+            size = full_path.stat().st_size
+        except OSError:
+            continue
+        if size > _MAX_UNTRACKED_FILE_SIZE:
+            continue
+
+        # Skip binary files (null byte in first 8KB)
+        try:
+            with open(full_path, "rb") as f:
+                head = f.read(_BINARY_CHECK_BYTES)
+            if b"\x00" in head:
+                continue
+        except OSError:
+            continue
+
+        # Read as UTF-8
+        try:
+            content = full_path.read_text(encoding="utf-8")
+        except (UnicodeDecodeError, OSError):
+            continue
+
+        lines = content.splitlines()
+        line_count = len(lines)
+        if line_count == 0:
+            continue
+
+        # Build standard unified diff
+        diff_lines = [
+            f"diff --git a/{rel_path} b/{rel_path}",
+            "new file mode 100644",
+            "--- /dev/null",
+            f"+++ b/{rel_path}",
+            f"@@ -0,0 +1,{line_count} @@",
+        ]
+        for line in lines:
+            diff_lines.append(f"+{line}")
+
+        parts.append("\n".join(diff_lines))
+
+    if not parts:
+        return ""
+    return "\n" + "\n".join(parts) + "\n"
+
+
 def get_diff(
         staged: bool = False, target_branch: str | None = None,
         commit: str | None = None, since_commit: str | None = None,
@@ -49,20 +143,25 @@ def get_diff(
 ) -> str:
     """Run git diff and return raw unified diff text.
 
-      Args:
-          staged: If True, diff staged changes (--staged).
-          target_branch: Diff current HEAD against this branch.
-          commit: Show diff for a specific commit (SHA or ref like HEAD, HEAD~2).
-          since_commit: Diff ``since_commit..HEAD`` for incremental reviews.
-          repo_path: Working directory for git command.
+    Returns ALL changes by default — staged, unstaged, and untracked files.
+    The only narrow mode is ``staged=True`` (staged changes only).
 
-      Priority: commit > since_commit > target_branch > staged > unstaged (default).
+    Args:
+        staged: If True, diff only staged changes (--staged). No untracked files.
+        target_branch: Diff working tree against this branch (two-dot).
+            Shows committed + staged + unstaged + untracked changes.
+        commit: Show diff for a specific commit (SHA or ref). No untracked files.
+        since_commit: Diff from ``since_commit`` to working tree + untracked.
+        repo_path: Working directory for git command.
+
+    Priority: commit > since_commit > target_branch > staged > default.
     """
     cmd = ["git", "diff", "--unified=5"]
+    append_untracked = True
 
     if commit:
-        # Show what this specific commit changed (parent → commit).
-        # Fall back to git show for root commits that have no parent.
+        # Historical snapshot — no untracked files.
+        append_untracked = False
         has_parent = subprocess.run(
             ["git", "rev-parse", "--verify", f"{commit}~1"],
             cwd=repo_path,
@@ -74,13 +173,22 @@ def get_diff(
         else:
             cmd = ["git", "show", "--format=", "-p", commit]
     elif since_commit:
-        # Diff everything from the baseline commit to the current working tree.
-        # This captures both commits made since the baseline and uncommitted edits.
+        # Diff everything from the baseline to working tree.
         cmd = ["git", "diff", "--unified=5", since_commit]
     elif staged:
+        # Explicit narrow mode — staged only, no untracked.
+        append_untracked = False
         cmd.append("--staged")
     elif target_branch:
-        cmd.append(f"{target_branch}...HEAD")
+        # Two-dot: committed + staged + unstaged vs branch tip.
+        cmd.append(target_branch)
+    else:
+        # Default: all local changes (staged + unstaged) vs last commit.
+        if _has_head(repo_path):
+            cmd.append("HEAD")
+        else:
+            # Empty repo / first commit — show staged files.
+            cmd.append("--cached")
 
     result = subprocess.run(
         cmd,
@@ -90,7 +198,12 @@ def get_diff(
         cwd=repo_path,
     )
 
-    return result.stdout
+    diff_output = result.stdout
+
+    if append_untracked:
+        diff_output += _synthetic_untracked_diff(repo_path)
+
+    return diff_output
 
 def get_parsed_diff(diff_text: str) -> list[DiffFile]:
     """Parse raw unified diff text into structured DiffFile objects."""
@@ -142,8 +255,3 @@ def get_parsed_diff(diff_text: str) -> list[DiffFile]:
         ))
 
     return diff_files
-
-
-
-        
-                

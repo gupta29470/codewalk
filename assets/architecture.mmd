@@ -13,7 +13,7 @@ graph TD
 
     %% ── ENTRY POINTS ──
     UI["🌐 Next.js Frontend<br/>localhost:3000"]
-    MCPE["🧩 MCP Server<br/>42 tools · stdio"]
+    MCPE["🧩 MCP Server<br/>43 tools · stdio"]
     REST["📡 FastAPI REST<br/>localhost:8000"]
     VCLI["🎙️ Voice CLI<br/>mic → answer → speak"]
 
@@ -33,12 +33,12 @@ graph TD
         A6["Maintenance<br/>/refresh · /incremental-reindex<br/>/tools/*"]
     end
 
-    subgraph MCP["MCP Server · 42 tools"]
+    subgraph MCP["MCP Server · 43 tools"]
         direction LR
         M1["Setup<br/>analyze_codebase · generate_config"]
         M2["Query<br/>search · lookup_symbol · explain<br/>overview · blast-radius · reading-order<br/>execution-flow · module_info"]
         M3["Graph<br/>cycles · architecture_health<br/>call_chain · knowledge_graph"]
-        M4["Review + HITL<br/>run_review · review_file · verdict<br/>apply_accepted · approve_action · apply_fix"]
+        M4["Review + HITL<br/>run_review · re_review · review_file<br/>verdict · apply_accepted · approve_action"]
         M5["Docs / Maint / Cloud<br/>index_docs · reindex · refresh<br/>pull_index · connect_repo"]
     end
 
@@ -145,7 +145,7 @@ graph TD
     subgraph REVIEW["🔬 Code Review"]
         direction LR
         REV1["engine.py<br/>run_review"]
-        REV2["diff_parser.py · fix_applier.py"]
+        REV2["diff_parser.py<br/>staged+unstaged+untracked<br/>fix_applier.py"]
         REV3["neighborhood.py · static_analysis.py"]
         REV4["reviewers/ · pipeline/ · renderers/"]
     end

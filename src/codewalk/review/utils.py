@@ -387,7 +387,7 @@ def load_finding_by_session_and_index(
     session_id: str,
     finding_index: int,
 ) -> dict[str, Any] | None:
-    """Load a single finding from a session's findings.json by index."""
+    """Load a single finding from a session's llm_findings.json by index."""
     from src.codewalk.review.session_store import load_session, load_findings
 
     session = load_session(repo_path, session_id)

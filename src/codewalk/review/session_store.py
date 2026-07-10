@@ -11,8 +11,13 @@ where <folder_name> is descriptive, e.g.:
 
 Each session folder contains:
 
-    session.json   - full session metadata including a stable session_id
-    findings.json  - append-only array of findings (used for batched reviews)
+    session.json       - full session metadata including a stable session_id
+    llm_findings.json  - append-only array of LLM findings
+    llm_findings.md    - human-readable companion to llm_findings.json
+    static_findings.json - deterministic findings from static analysis
+    static_findings.md   - human-readable companion to static_findings.json
+
+JSON files remain the source of truth for programmatic access.
 """
 from __future__ import annotations
 
@@ -22,6 +27,7 @@ from pathlib import Path
 from typing import Any
 
 from src.codewalk.review.report import ReviewContextPackage, ReviewReport
+from src.codewalk.review.renderers.markdown import render_findings_markdown
 from src.codewalk.review.session import ReviewSession, SessionStatus
 
 
@@ -198,45 +204,6 @@ def _session_index_path(repo_path: Path) -> Path:
     return Path(repo_path) / REVIEW_SESSION_DIR / "index.json"
 
 
-def find_active_batch_session(
-    repo_path: Path,
-    target_branch: str | None,
-    commit: str | None,
-    staged: bool,
-) -> tuple[str, dict[str, Any]] | None:
-    """Find an existing active batch session for the same diff parameters.
-
-    Returns (session_id, batch_state) if found, else None.
-    Only matches sessions that:
-      - Have a batch_state.json (MCP batched flow)
-      - Match the same target_branch, commit, staged params
-      - Are not fully consumed (current_batch_index < total_batches)
-    """
-    for folder in _session_folders(repo_path):
-        batch_state_path = folder / "batch_state.json"
-        if not batch_state_path.exists():
-            continue
-        try:
-            batch_state = json.loads(batch_state_path.read_text(encoding="utf-8"))
-        except (json.JSONDecodeError, OSError):
-            continue
-
-        # Match same diff parameters
-        if (batch_state.get("target_branch") != target_branch or
-                batch_state.get("commit") != commit or
-                batch_state.get("staged", False) != staged):
-            continue
-
-        # Not fully consumed
-        if batch_state.get("current_batch_index", 0) >= batch_state.get("total_batches", 0):
-            continue
-
-        session_id = batch_state.get("session_id")
-        if session_id:
-            return session_id, batch_state
-
-    return None
-
 
 def _update_session_index(repo_path: Path, session_id: str, folder_name: str) -> None:
     """Append session_id → folder_name mapping to index file."""
@@ -301,6 +268,29 @@ def load_session(repo_path: Path, session_id: str) -> ReviewSession | None:
     return None
 
 
+def find_last_session(repo_path: Path, branch: str | None = None) -> ReviewSession | None:
+    """Find the most recent review session for a branch.
+
+    Sessions are sorted by folder mtime (most recently modified first).
+    If branch is None, returns the most recent session regardless of branch.
+    """
+    folders = _session_folders(repo_path)
+    if not folders:
+        return None
+
+    # Sort by mtime descending
+    folders.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+
+    for folder in folders:
+        session = load_session_by_folder(repo_path, folder.name)
+        if session is None:
+            continue
+        if branch is None or session.current_branch == branch or session.target_branch == branch:
+            return session
+
+    return None
+
+
 def load_session_by_folder(repo_path: Path, folder_name: str) -> ReviewSession | None:
     """Load a persisted session from disk by its descriptive folder name."""
     session_path = _session_dir(repo_path, folder_name) / "session.json"
@@ -330,10 +320,10 @@ def load_session_by_folder(repo_path: Path, folder_name: str) -> ReviewSession |
 
 
 def save_findings(repo_path: Path, folder_name: str, findings: list[dict[str, Any]]) -> None:
-    """Persist or overwrite the findings array for a session."""
+    """Persist or overwrite the LLM findings array for a session."""
     session_dir = _session_dir(repo_path, folder_name)
     session_dir.mkdir(parents=True, exist_ok=True)
-    findings_path = session_dir / "findings.json"
+    findings_path = session_dir / "llm_findings.json"
     temp = tempfile.NamedTemporaryFile(
         mode="w",
         dir=session_dir,
@@ -345,10 +335,21 @@ def save_findings(repo_path: Path, folder_name: str, findings: list[dict[str, An
     findings_path.write_text(Path(temp.name).read_text(), encoding="utf-8")
     Path(temp.name).unlink()
 
+    # Human-readable Markdown companion (read-only; JSON remains source of truth)
+    md_path = session_dir / "llm_findings.md"
+    md_path.write_text(
+        render_findings_markdown(
+            findings,
+            title="LLM Findings",
+            source_label="review LLM",
+        ),
+        encoding="utf-8",
+    )
+
 
 def load_findings(repo_path: Path, folder_name: str) -> list[dict[str, Any]]:
-    """Load the findings array for a session."""
-    findings_path = _session_dir(repo_path, folder_name) / "findings.json"
+    """Load the LLM findings array for a session."""
+    findings_path = _session_dir(repo_path, folder_name) / "llm_findings.json"
     if not findings_path.exists():
         return []
     try:
@@ -362,7 +363,7 @@ def append_findings(
     folder_name: str,
     new_findings: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
-    """Append new findings to a session's findings.json and return the merged list."""
+    """Append new findings to a session's llm_findings.json and return the merged list."""
     existing = load_findings(repo_path, folder_name)
     existing.extend(new_findings)
     save_findings(repo_path, folder_name, existing)
@@ -400,7 +401,7 @@ def save_checkpoint(
 
     Checkpoints are named ``findings.<phase>.json`` inside the session folder.
     They allow partial recovery and observability without interfering with the
-    main ``findings.json`` stream.
+    main ``llm_findings.json`` stream.
     """
     session_dir = _session_dir(repo_path, folder_name)
     session_dir.mkdir(parents=True, exist_ok=True)

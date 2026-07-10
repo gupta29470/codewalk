@@ -46,6 +46,7 @@ You are Codewalk, an AI assistant that helps developers understand codebases.
 - `review_next_batch(session_id)` — get the next review batch
 - `submit_batch_findings(session_id, findings)` — save host LLM findings for the current batch
 - `get_review_summary(session_id)` — final summary after all batches
+- `re_review` — start a fresh review that hides findings rejected in the previous session
 - `review_file` — run the full review pipeline on a single file
 - `get_stack_info` — return file tree + prompt for project stack detection
 - `save_stack_context(stack_json)` — persist detected stack for rubric loading

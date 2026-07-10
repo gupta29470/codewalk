@@ -69,6 +69,7 @@ from src.codewalk.review.report import (
     Verdict,
 )
 from src.codewalk.review.rubric_loader import Rubrics, build_rubrics
+from src.codewalk.review.renderers.markdown import render_findings_markdown
 from src.codewalk.review.session import ReviewSession, SessionStatus
 from src.codewalk.review.session_store import (
     append_findings,
@@ -1119,16 +1120,23 @@ def run_review(
             [_finding_to_dict(f) for f in all_findings],
         )
 
-        # Persist static_result and LLM findings separately (same format as MCP path)
+        # Persist static findings and their Markdown companion.
+        # LLM findings are already persisted by append_findings above and will be
+        # overwritten with the final combined list by save_findings at the end.
         from src.codewalk.review.session_store import _session_dir as _sd
         _api_session_dir = _sd(repo_path, session.folder_name)
         _api_session_dir.mkdir(parents=True, exist_ok=True)
+        static_findings_data = [_finding_to_dict(f) for f in static_findings]
         (_api_session_dir / "static_findings.json").write_text(
-            json.dumps([_finding_to_dict(f) for f in static_findings], indent=2),
+            json.dumps(static_findings_data, indent=2),
             encoding="utf-8",
         )
-        (_api_session_dir / "llm_findings.json").write_text(
-            json.dumps([_finding_to_dict(f) for f in all_findings], indent=2),
+        (_api_session_dir / "static_findings.md").write_text(
+            render_findings_markdown(
+                static_findings_data,
+                title="Static Findings",
+                source_label="deterministic static analysis",
+            ),
             encoding="utf-8",
         )
         save_checkpoint(

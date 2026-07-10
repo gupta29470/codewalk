@@ -183,8 +183,17 @@ def run_static_analysis(
 
     When ``use_cache`` is True and a cached result exists for the current repo
     state + diff target, return it directly.
+
+    Caching is skipped when the diff depends on the mutable working tree
+    (default mode, target_branch mode, since_commit mode) because HEAD SHA
+    doesn't change when files are edited — only when commits are made.
+    Cache is only valid for commit= mode where the diff is immutable.
     """
-    if use_cache:
+    # Only cache for immutable diffs (specific commit).
+    # Working-tree diffs (default, target_branch, since_commit) are mutable —
+    # user can edit files without HEAD changing, making the cache stale.
+    cacheable = commit is not None
+    if use_cache and cacheable:
         from src.codewalk.review.review_cache import (
             get_repo_cache_key,
             load_static_analysis_cache,
@@ -231,7 +240,7 @@ def run_static_analysis(
         total_removed=total_removed,
     )
 
-    if use_cache:
+    if use_cache and cacheable:
         save_static_analysis_cache(
             repo_path,
             repo_cache_key,

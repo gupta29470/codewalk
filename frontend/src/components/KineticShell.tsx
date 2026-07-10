@@ -34,7 +34,7 @@ const NAV_ITEMS: NavItem[] = [
   { href: "/", label: "Home", icon: Home, requiresIndex: false },
   { href: "/overview", label: "Overview", icon: LayoutDashboard, requiresIndex: true },
   { href: "/architecture", label: "Architecture", icon: Network, requiresIndex: true },
-  { href: "/knowledge-graph", label: "Knowledge Graph", icon: Share2, requiresIndex: true },
+  { href: "/knowledge-graph", label: "Knowledge Graph", icon: Share2, requiresIndex: false },
   { href: "/modules", label: "Modules", icon: Package, requiresIndex: true },
   { href: "/module", label: "Module Detail", icon: FileSearch, requiresIndex: true },
   { href: "/blast-radius", label: "Blast Radius", icon: Zap, requiresIndex: true },
@@ -104,8 +104,8 @@ export function KineticShell({
                   isActive
                     ? "bg-kinetic-primary/15 text-kinetic-primary"
                     : locked
-                    ? "text-kinetic-on-surface-variant/40 cursor-not-allowed"
-                    : "text-kinetic-on-surface-variant hover:bg-kinetic-surface-container-high hover:text-kinetic-on-surface"
+                      ? "text-kinetic-on-surface-variant/40 cursor-not-allowed"
+                      : "text-kinetic-on-surface-variant hover:bg-kinetic-surface-container-high hover:text-kinetic-on-surface"
                 )}
               >
                 <item.icon size={18} />

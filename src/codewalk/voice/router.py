@@ -50,8 +50,8 @@ TOOL_REGISTRY = {
     "codewalk_review_diff": {
         "description": "Review git diff for bugs, security, and style issues.",
         "parameters": {
-            "staged": {"type": "boolean", "description": "Review staged changes only", "default": False},
-            "target_branch": {"type": "string", "description": "Diff against branch", "default": None},
+            "staged": {"type": "boolean", "description": "Review ONLY staged changes (narrow mode). Default reviews everything.", "default": False},
+            "target_branch": {"type": "string", "description": "Diff working tree against this branch (committed + staged + unstaged + untracked)", "default": None},
         },
     },
     "codewalk_review_file": {

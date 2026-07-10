@@ -6,7 +6,7 @@ This package exposes Codewalk as an MCP server that IDE agents (Cursor, Copilot,
 
 | File | Role |
 |------|------|
-| `server.py` | FastMCP server with 42 tools: setup, query, architecture, review (including batched review: run_review, review_next_batch, submit_batch_findings, get_review_summary), docs, maintenance, voice, HITL, cloud index sync, config generation, version check, and knowledge-graph launch. |
+| `server.py` | FastMCP server with 43 tools: setup, query, architecture, review (including batched review: run_review, re_review, review_next_batch, submit_batch_findings, get_review_summary), docs, maintenance, voice, HITL, cloud index sync, config generation, version check, and knowledge-graph launch. |
 
 ## Data flow
 
@@ -50,3 +50,6 @@ See `MCP_EXAMPLES.md` in the Codewalk repo for example prompts per tool.
 - `_reset_state()` now closes the active `GraphStore` (DuckDB) connection and clears the cached reference, so switching repos (A → B → A) reopens the correct `graph.duckdb` instead of using a stale handle.
 - `codewalk_analyze_codebase(mode="auto")` no longer silently resumes partial indexes; it reports `status="behind"` and tells the host to run `codewalk_incremental_reindex`.
 - `codewalk_search_codebase` performs a single deterministic search. The MCP instructions now include a "MULTI-ANGLE SEARCH" section that tells the host LLM to call it 1–3 times with different phrasings for every conceptual question and synthesize the returned chunks.
+- Review sessions now write human-readable Markdown companions (`static_findings.md`, `llm_findings.md`) alongside the JSON source-of-truth files. The Markdown is hard-wrapped for easy reading; tools continue to read JSON.
+- `codewalk_re_review` starts a fresh batched review linked to the previous session. Findings the user rejected in the previous session are recorded in `batch_state.json` and filtered out of the re-review summary. Submitted findings now receive stable IDs so they can be matched across review runs.
+- MCP and API review flows both use `llm_findings.json` as the single source of truth for LLM findings.

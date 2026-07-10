@@ -63,7 +63,11 @@ class BlastRadiusResponse(BaseModel):
     files: list[dict]
 
 class ReviewRequest(BaseModel):
-    """POST /review — request body."""
+    """POST /review — request body.
+
+    By default reviews ALL changes: staged, unstaged, AND new untracked files.
+    Use ``staged=True`` for narrow staged-only mode.
+    """
     staged: bool = False
     target_branch: str | None = None
     commit: str | None = None
@@ -81,7 +85,11 @@ class CancelReviewResponse(BaseModel):
     message: str
 
 class ReviewStreamRequest(BaseModel):
-    """POST /review/stream — request body."""
+    """POST /review/stream — request body.
+
+    By default reviews ALL changes: staged, unstaged, AND new untracked files.
+    Use ``staged=True`` for narrow staged-only mode.
+    """
     staged: bool = False
     target_branch: str | None = None
     commit: str | None = None

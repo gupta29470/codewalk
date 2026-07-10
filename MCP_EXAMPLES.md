@@ -241,6 +241,15 @@ Combine Layer 0 architectural warnings and all submitted LLM findings into a fin
 @codewalk Run codewalk_get_review_summary('abc123...').
 ```
 
+### `codewalk_re_review`
+Start a fresh review after the user has accepted/rejected findings from a previous review. Findings marked `rejected` in the previous session are hidden from the new summary.
+
+```text
+@codewalk Re-review this diff after the rejected feedback.
+@codewalk Run codewalk_re_review().
+@codewalk Start a new review that hides the findings I rejected last time.
+```
+
 ### Review fixes / human-in-the-loop
 
 ```text

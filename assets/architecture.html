@@ -480,7 +480,7 @@
         const modules = {
             user: { label: '👤 User', group: 'entry', color: '#58a6ff', tier: 0, x: 0, y: -400, files: [], desc: 'End user — developer or team member exploring or changing a codebase.' },
             frontend: { label: '🌐 Next.js Frontend', group: 'entry', color: '#58a6ff', tier: 1, x: -320, y: -280, files: ['page.tsx', 'chat/page.tsx', 'overview/page.tsx', 'knowledge-graph/page.tsx + _components/*', 'research/page.tsx + _components/ResearchDiagram.tsx', 'review/page.tsx', 'voice/page.tsx', 'components/KineticShell.tsx', 'components/kinetic/*', 'api.ts'], desc: 'React/Next.js UI — localhost:3000. Knowledge graph, module browser, blast radius, chat, review, voice, research diagram, admin. Uses KineticShell and kinetic design tokens.' },
-            mcp_entry: { label: '🧩 MCP Server', group: 'entry', color: '#58a6ff', tier: 1, x: -110, y: -280, files: [], desc: 'Model Context Protocol entry — 42 tools exposed to Copilot / Claude Code / Cursor via stdio.' },
+            mcp_entry: { label: '🧩 MCP Server', group: 'entry', color: '#58a6ff', tier: 1, x: -110, y: -280, files: [], desc: 'Model Context Protocol entry — 43 tools exposed to Copilot / Claude Code / Cursor via stdio.' },
             api_entry: { label: '📡 FastAPI REST', group: 'entry', color: '#58a6ff', tier: 1, x: 110, y: -280, files: [], desc: 'HTTP API server — 35+ endpoints at localhost:8000. Serves the frontend and external integrations.' },
             voice_cli: { label: '🎙️ Voice CLI', group: 'entry', color: '#58a6ff', tier: 1, x: 320, y: -280, files: [], desc: 'Hands-free voice companion — mic → transcribe → route → execute → speak.' },
 
@@ -492,7 +492,7 @@
             },
 
             mcp: {
-                label: 'MCP · 42 tools', group: 'mcp', color: '#bc8cff', tier: 2, x: -160, y: -160,
+                label: 'MCP · 43 tools', group: 'mcp', color: '#bc8cff', tier: 2, x: -160, y: -160,
                 files: ['server.py — FastMCP server, 42 @mcp.tool() functions, system prompt'],
                 desc: 'Model Context Protocol server. Auto-init with codewalk_analyze_codebase. Workspace-change guards. Tool categories: setup, query, graph, review, docs, maintenance, voice, cloud, HITL.',
                 functions: ['SETUP: analyze_codebase, generate_config', 'QUERY: search_codebase, lookup_symbol, explain_function, explain_class, get_module_info, get_overview, get_blast_radius_map, get_reading_order, get_execution_flow', 'GRAPH: find_circular_dependencies, get_architecture_health, call_chain, show_knowledge_graph', 'REVIEW: run_review, review_file, get_review_details, finding_verdict, apply_accepted, approve_action, apply_fix, verify_fix, get_stack_info, load_guidelines', 'DOCS: index_docs, search_docs, ask_docs', 'MAINT: incremental_reindex, refresh_analysis, run_static_analysis, run_tests', 'VOICE: voice_ask, speak', 'CLOUD: pull_index, connect_repo, index_status, check_version']

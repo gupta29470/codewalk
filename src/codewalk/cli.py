@@ -181,8 +181,8 @@ def generate_config(
 @app_cli.command()
 def review(
     repo: Optional[str] = typer.Option(None, help="Path to repository root (default: discover from cwd)"),
-    target_branch: Optional[str] = typer.Option(None, help="Diff target branch (e.g. main)"),
-    staged: bool = typer.Option(False, help="Review staged changes only"),
+    target_branch: Optional[str] = typer.Option(None, help="Diff working tree against this branch (shows committed + staged + unstaged + untracked)"),
+    staged: bool = typer.Option(False, help="Review ONLY staged changes (narrow mode — no unstaged or untracked)"),
     incremental: bool = typer.Option(False, "--incremental", help="Review only files changed since the last review on this branch"),
     force_full_review: bool = typer.Option(False, "--force-full-review", help="Ignore cache and previous review; run a full review"),
     fail_on: Optional[str] = typer.Option(None, help="Exit non-zero if verdict is this or worse: blocking, warning"),

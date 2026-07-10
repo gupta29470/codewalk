@@ -1,4 +1,4 @@
-"""Codewalk MCP server — 42 tools for codebase onboarding, search, review,
+"""Codewalk MCP server — 43 tools for codebase onboarding, search, review,
 docs, voice, visualization, and cloud index management.
 
 Tool categories:
@@ -7,7 +7,7 @@ Tool categories:
                  lookup_symbol, get_overview, get_blast_radius_map,
                  find_circular_dependencies, get_reading_order, get_execution_flow
   ARCHITECTURE:  get_architecture_health, call_chain
-  REVIEW:        run_review, review_next_batch, submit_batch_findings,
+  REVIEW:        run_review, re_review, review_next_batch, submit_batch_findings,
                  get_review_summary, review_file, get_review_details,
                  get_stack_info, save_stack_context, finding_verdict,
                  apply_accepted
@@ -26,9 +26,13 @@ Review architecture (batched, no external LLM calls):
   After all batches, get_review_summary reads the persisted JSONs and returns
   a structured summary for the host to produce the final verdict.
 
-  If codewalk_run_review is called again for the same diff (same target_branch,
-  commit, staged), it reuses the existing active session instead of creating a
-  new one — preventing duplicate session folders.
+  Each codewalk_run_review call always creates a fresh session — there is no
+  automatic session reuse. Old sessions remain on disk and can be queried
+  via get_review_summary, finding_verdict, and apply_accepted.
+
+  Diff coverage: by default, get_diff() returns ALL changes (staged + unstaged
+  + untracked files). The only narrow mode is staged=True. target_branch uses
+  two-dot diff (committed + staged + unstaged + untracked vs branch tip).
 
   Stack detection flow (MCP path — NO LLM calls):
     1. Any tool that needs stack checks .codewalk/stack_context.json
@@ -57,7 +61,12 @@ Review architecture (batched, no external LLM calls):
     ├── session.json          # session metadata
     ├── batch_state.json      # batch queue, rubrics, index pointer
     ├── static_findings.json  # deterministic findings (written once at start)
-    └── llm_findings.json     # host LLM findings (appended per batch)
+    ├── static_findings.md    # human-readable companion to static_findings.json
+    ├── llm_findings.json     # host LLM findings (appended per batch)
+    └── llm_findings.md       # human-readable companion to llm_findings.json
+
+  JSON files are the source of truth for tools. Markdown files are read-only
+  and hard-wrapped for easy reading in any editor.
 """
 
 import inspect
@@ -185,7 +194,9 @@ mcp = FastMCP(
         "Codewalk review tools are called by YOU (the IDE agent) over MCP — not by the user directly.\n"
         "The review uses a batched approach: files are grouped into small batches so you can\n"
         "review each thoroughly without context overflow. Findings are persisted to disk\n"
-        "between batches so your context window stays clean.\n"
+        "between batches so your context window stays clean. A human-readable Markdown\n"
+        "companion (llm_findings.md / static_findings.md) is generated alongside the JSON\n"
+        "files for easy reading in any editor; tools continue to use the JSON files.\n"
         "\n"
         "Step 0: STACK CONTEXT (one-time setup per repo).\n"
         "        Several tools (run_review, review_file, get_overview,\n"
@@ -201,7 +212,8 @@ mcp = FastMCP(
         "        NOTE: codewalk_analyze_codebase also prompts you to do this after\n"
         "        indexing completes successfully — so if you follow that prompt, you're already set.\n"
         "\n"
-        "Step 1: START — call codewalk_run_review(target_branch='main') once.\n"
+        "Step 1: START — call codewalk_run_review() once.\n"
+        "        By default, reviews ALL changes: staged, unstaged, AND new untracked files.\n"
         "        Returns: session_id + first batch of 3-5 files with full context.\n"
         "        Layer 0 (deterministic) findings are saved to disk automatically.\n"
         "\n"
@@ -220,9 +232,14 @@ mcp = FastMCP(
         "Step 4: PRESENT to the user and COLLECT VERDICTS.\n"
         "        - Call codewalk_finding_verdict(session_id, index, 'accepted'/'rejected')\n"
         "\n"
-        "Step 5: APPLY — codewalk_apply_accepted(session_id) applies all accepted fixes.\n"
+        "Step 5 (optional): RE-REVIEW — codewalk_re_review().\n"
+        "        Starts a fresh review (staged + unstaged + untracked) and hides any finding the user rejected in the\n"
+        "        previous session. Pass target_branch='...' only when diffing against a branch. Use this after\n"
+        "        the user has addressed feedback and wants to verify the remaining issues.\n"
         "\n"
-        "Step 6 (optional): VERIFY — codewalk_verify_fix(file_paths=[...]) runs tests.\n"
+        "Step 6: APPLY — codewalk_apply_accepted(session_id) applies all accepted fixes.\n"
+        "\n"
+        "Step 7 (optional): VERIFY — codewalk_verify_fix(file_paths=[...]) runs tests.\n"
         "\n"
         "IMPORTANT: Do NOT carry findings in your context between batches.\n"
         "           Submit them with codewalk_submit_batch_findings, then forget them.\n"
@@ -270,6 +287,9 @@ mcp = FastMCP(
         "\n"
         "- Accept/reject findings after review\n"
         "  → codewalk_finding_verdict(session_id, index, verdict, reason?)\n"
+        "\n"
+        "- Re-review after addressing feedback (hides rejected findings)\n"
+        "  → codewalk_re_review(target_branch?, staged?, commit?, refresh_stack?)\n"
         "\n"
         "- Apply accepted fixes from review\n"
         "  → codewalk_apply_accepted(session_id?) — applies all accepted findings at once\n"
@@ -325,7 +345,7 @@ mcp = FastMCP(
         "parts connect (e.g. 'How does error handling work across the codebase?',\n"
         "'Explain the full auth flow end to end'), do NOT use a single search.\n"
         "Instead, follow this pattern:\n"
-        "1. DECOMPOSE: Break the question into 3-any number of independent sub-questions,\n"
+        "1. DECOMPOSE: Break the question into 3 or more independent sub-questions,\n"
         "   each targeting a different angle of the answer\n"
         "2. PARALLEL SEARCH: Call codewalk_search_codebase for EACH sub-question\n"
         "   simultaneously in one response (parallel tool calls)\n"
@@ -1178,6 +1198,211 @@ def codewalk_refresh_analysis() -> str:
     )
 
 
+def _finding_id_from_dict(finding: dict) -> str:
+    """Compute a stable ID for a raw finding dict submitted by the host LLM."""
+    import hashlib
+    import re
+
+    def _normalize(text: str) -> str:
+        return " ".join(text.lower().split())
+
+    def _extract_anchor(snippet: str | None) -> str | None:
+        if not snippet:
+            return None
+        patterns = [
+            r"^\s*(?:async\s+)?def\s+([a-zA-Z_][a-zA-Z0-9_]*)",
+            r"^\s*class\s+([a-zA-Z_][a-zA-Z0-9_]*)",
+            r"^\s*(?:public|private|protected|static|async)?\s*(?:function\s+)?([a-zA-Z_][a-zA-Z0-9_]*)\s*\(",
+            r"^\s*(?:void|int|String|bool|Future|Widget|[a-zA-Z_][a-zA-Z0-9_<>.\[\]]*)\s+([a-zA-Z_][a-zA-Z0-9_]*)\s*\(",
+        ]
+        for line in snippet.splitlines():
+            for pattern in patterns:
+                match = re.search(pattern, line)
+                if match:
+                    return match.group(1)
+        return None
+
+    snippets = [finding.get("current_code")]
+    for ev in finding.get("evidence") or []:
+        snippets.append(ev.get("snippet"))
+
+    anchor = None
+    for snippet in snippets:
+        anchor = _extract_anchor(snippet)
+        if anchor:
+            break
+
+    if not anchor:
+        title = _normalize(finding.get("title", ""))
+        title = re.sub(r"\b[a-z_][a-z0-9_]{0,2}\b", "", title)
+        title = re.sub(r"\d+", "", title)
+        anchor = "|".join([_normalize(title), finding.get("file_path", "")])
+
+    key = "|".join([
+        finding.get("category", "bug"),
+        finding.get("file_path", ""),
+        anchor.lower(),
+    ])
+    return hashlib.sha256(key.encode("utf-8")).hexdigest()[:16]
+
+
+class _NoChangesError(Exception):
+    """Raised when there are no diff files to review."""
+
+
+class _StackRequiredError(Exception):
+    """Raised when stack context is missing and must be provided by the host."""
+
+    def __init__(self, target_branch: str | None, staged: bool, commit: str | None):
+        self.target_branch = target_branch
+        self.staged = staged
+        self.commit = commit
+
+
+def _start_batched_review(
+    repo: Path,
+    target_branch: str | None,
+    staged: bool,
+    commit: str | None,
+    refresh_stack: bool,
+) -> dict:
+    """Shared setup for a batched review session.
+
+    Returns a dict with session, session_dir, batch_state, static_result,
+    batches, rubrics, stack_header, stack, diff_files, and auto_f.
+    """
+    from src.codewalk.review.engine import (
+        _build_common_context,
+        _build_static_findings,
+        group_files_for_review,
+    )
+    from src.codewalk.review.rubric_loader import build_rubrics
+    from src.codewalk.review.stack_detect import (
+        _load_cached,
+        format_stack_context_header,
+        get_rubric_names_from_stack,
+    )
+    from src.codewalk.review.session import ReviewSession, SessionStatus
+    from src.codewalk.review.session_store import save_session, _session_dir
+    from src.codewalk.review.utils import build_session_folder_name, get_current_branch
+    from src.codewalk.review.renderers.markdown import render_findings_markdown
+    from src.codewalk.codewalk_config import load_codewalk_yaml
+    from datetime import datetime, timezone
+    import json as _json
+
+    codewalk_yaml = load_codewalk_yaml(str(repo))
+
+    # Layer 0: deterministic context (once for all files)
+    static_result, diff_files, neighborhood, static_findings, architecture_flags, file_tree = _build_common_context(
+        repo, target_branch, commit, staged, codewalk_yaml,
+    )
+
+    if not diff_files:
+        raise _NoChangesError()
+
+    # Stack detection for MCP path:
+    # 1. Check .codewalk/stack_context.json (persistent across commits)
+    # 2. If missing (or refresh_stack=True), tell host to call
+    #    codewalk_get_stack_info -> codewalk_save_stack_context -> re-call us
+    cached_stack = None if refresh_stack else _load_cached(repo)
+    if not cached_stack:
+        raise _StackRequiredError(target_branch, staged, commit)
+
+    stack = {k: v for k, v in cached_stack.items() if not k.startswith("_")}
+    stack_header = format_stack_context_header(stack)
+    rubric_names = get_rubric_names_from_stack(stack)
+    rubrics = build_rubrics(repo, {df.file_path for df in diff_files}, detected_rubric_names=rubric_names)
+
+    # Group files into batches
+    batches = group_files_for_review(
+        diff_files,
+        risk_annotations=static_result.risk_annotations,
+        max_per_batch=5,
+    )
+
+    # Create session with batch queue
+    session_id = ReviewSession.generate_id()
+    current_branch = get_current_branch(repo)
+    created_at = datetime.now(timezone.utc)
+    folder_name = build_session_folder_name(created_at, current_branch, target_branch)
+
+    # Store batch queue in session
+    batch_queue = [[df.file_path for df in batch] for batch in batches]
+
+    session = ReviewSession(
+        session_id=session_id,
+        repo_path=str(repo),
+        target_branch=target_branch,
+        commit=commit,
+        staged=staged,
+        status=SessionStatus.ACTIVE,
+        folder_name=folder_name,
+        current_branch=current_branch,
+        created_at=created_at.isoformat(),
+        updated_at=created_at.isoformat(),
+    )
+    save_session(session)
+
+    # Save batch queue to session folder
+    session_dir = _session_dir(repo, folder_name)
+    session_dir.mkdir(parents=True, exist_ok=True)
+
+    batch_state = {
+        "session_id": session_id,
+        "total_files": len(diff_files),
+        "total_batches": len(batches),
+        "current_batch_index": 0,
+        "batch_queue": batch_queue,
+        "target_branch": target_branch,
+        "commit": commit,
+        "staged": staged,
+        "stack_header": stack_header,
+        "rubric_core": rubrics.core,
+        "rubric_language": rubrics.language,
+        "rubric_framework": rubrics.framework,
+        "rubric_fallback": rubrics.fallback,
+    }
+    (session_dir / "batch_state.json").write_text(
+        _json.dumps(batch_state, indent=2), encoding="utf-8"
+    )
+
+    # Write static_findings.json — deterministic findings persisted once
+    auto_f = _build_static_findings(static_result)
+    static_findings_data = [f.to_dict() for f in auto_f]
+    (session_dir / "static_findings.json").write_text(
+        _json.dumps(static_findings_data, indent=2),
+        encoding="utf-8",
+    )
+    (session_dir / "static_findings.md").write_text(
+        render_findings_markdown(
+            static_findings_data,
+            title="Static Findings",
+            source_label="deterministic static analysis",
+        ),
+        encoding="utf-8",
+    )
+
+    # Initialize empty llm_findings.json for host LLM to append to
+    (session_dir / "llm_findings.json").write_text("[]", encoding="utf-8")
+    (session_dir / "llm_findings.md").write_text(
+        render_findings_markdown([], title="LLM Findings", source_label="review LLM"),
+        encoding="utf-8",
+    )
+
+    return {
+        "session": session,
+        "session_dir": session_dir,
+        "batch_state": batch_state,
+        "static_result": static_result,
+        "batches": batches,
+        "rubrics": rubrics,
+        "stack_header": stack_header,
+        "stack": stack,
+        "diff_files": diff_files,
+        "auto_f": auto_f,
+    }
+
+
 # ─── TOOL 11 [MAINT · user+AI]: codewalk_run_review ─────────
 @mcp.tool()
 def codewalk_run_review(
@@ -1195,10 +1420,17 @@ def codewalk_run_review(
     After reviewing the first batch, call codewalk_review_next_batch(session_id)
     repeatedly to get the remaining batches until all files are reviewed.
 
+    By default, reviews ALL local changes: staged, unstaged, AND new untracked
+    files. No flags needed — "review my changes" means everything.
+
     Args:
-        target_branch: Diff against a branch (e.g. "main"). If None, reviews working-tree changes.
-        staged: If True, review only staged changes. Default: unstaged/uncommitted.
-        commit: Review a specific commit by SHA or ref.
+        target_branch: Diff working tree against this branch (e.g. "main").
+            Shows committed + staged + unstaged + untracked changes.
+            If None, reviews local changes since the last commit.
+        staged: If True, review ONLY staged changes (narrow mode). No untracked
+            files. This is the only escape hatch for a narrower diff.
+        commit: Review a specific commit by SHA or ref. Historical snapshot —
+            no untracked files.
         refresh_stack: If True, ignore the existing .codewalk/stack_context.json
             and re-prompt for stack detection. Use when the project's tech stack
             has changed (e.g. new framework added).
@@ -1227,180 +1459,215 @@ def codewalk_run_review(
         )
 
     try:
-        from src.codewalk.review.engine import (
-            _build_common_context,
-            group_files_for_review,
-        )
-        from src.codewalk.review.rubric_loader import build_rubrics
-        from src.codewalk.review.stack_detect import (
-            format_stack_context_header,
-            get_rubric_names_from_stack,
-        )
-        from src.codewalk.review.utils import get_full_file_tree
-        from src.codewalk.review.session import ReviewSession, SessionStatus
-        from src.codewalk.review.session_store import save_session, find_active_batch_session
-        from src.codewalk.codewalk_config import load_codewalk_yaml
-        from datetime import datetime, timezone
-        import json as _json
-
         repo = Path(repo_path)
 
-        # Check for an existing active session with the same diff parameters.
-        # Skip reuse if refresh_stack=True — the user wants to re-detect the stack,
-        # which requires creating a new session with fresh rubrics.
-        existing = None if refresh_stack else find_active_batch_session(repo, target_branch, commit, staged)
-        if existing:
-            existing_session_id, existing_batch_state = existing
-            current_idx = existing_batch_state.get("current_batch_index", 0)
-            total = existing_batch_state.get("total_batches", 0)
-            remaining = total - current_idx - 1
-            return (
-                f"{warning}"
-                f"**Active review session found: `{existing_session_id}`**\n\n"
-                f"- {existing_batch_state.get('total_files', 0)} files in {total} batches\n"
-                f"- Currently on batch {current_idx + 1}/{total}\n"
-                f"- {remaining} batches remaining\n\n"
-                f"Call `codewalk_review_next_batch('{existing_session_id}')` to continue reviewing.\n"
-                f"Or call `codewalk_get_review_summary('{existing_session_id}')` if you're done."
-            )
+        result = _start_batched_review(repo, target_branch, staged, commit, refresh_stack)
 
-        codewalk_yaml = load_codewalk_yaml(str(repo))
+    except _NoChangesError:
+        return warning + "✅ No changes found to review."
+    except _StackRequiredError as e:
+        # No stack context file — host must fill it before we can proceed
+        review_args = f"target_branch='{e.target_branch or ''}'"
+        if e.staged:
+            review_args += ", staged=True"
+        if e.commit:
+            review_args += f', commit="{e.commit}"'
 
-        # Layer 0: deterministic context (once for all files)
-        static_result, diff_files, neighborhood, static_findings, architecture_flags, file_tree = _build_common_context(
-            repo, target_branch, commit, staged, codewalk_yaml,
+        return (
+            f"{warning}"
+            f"## Stack Context Required\n\n"
+            f"No `.codewalk/stack_context.json` found. Codewalk needs to know the "
+            f"project's architecture, state management, and frameworks to load the "
+            f"correct review rubrics.\n\n"
+            f"**Steps:**\n"
+            f"1. Call `codewalk_get_stack_info()` to get the file tree + prompt\n"
+            f"2. Analyze it and produce a JSON describing the stack\n"
+            f"3. Call `codewalk_save_stack_context(your_json)` to save it\n"
+            f"4. Call `codewalk_run_review({review_args})` again to start the review\n\n"
+            f"This only happens **once per repo** — the file persists across all commits.\n"
+            f"To refresh later: `codewalk_run_review({review_args}, refresh_stack=True)`"
         )
-
-        if not diff_files:
-            return warning + "✅ No changes found to review."
-
-        # Stack detection for MCP path:
-        # 1. Check .codewalk/stack_context.json (persistent across commits)
-        # 2. If missing (or refresh_stack=True), tell host to call
-        #    codewalk_get_stack_info → codewalk_save_stack_context → re-call us
-        from src.codewalk.review.stack_detect import _load_cached
-
-        cached_stack = None if refresh_stack else _load_cached(repo)
-        if not cached_stack:
-            # No stack context file — host must fill it before we can proceed
-            review_args = f"target_branch='{target_branch or ''}'"
-            if staged:
-                review_args += ", staged=True"
-            if commit:
-                review_args += f', commit="{commit}"'
-
-            return (
-                f"{warning}"
-                f"## Stack Context Required\n\n"
-                f"No `.codewalk/stack_context.json` found. Codewalk needs to know the "
-                f"project's architecture, state management, and frameworks to load the "
-                f"correct review rubrics.\n\n"
-                f"**Steps:**\n"
-                f"1. Call `codewalk_get_stack_info()` to get the file tree + prompt\n"
-                f"2. Analyze it and produce a JSON describing the stack\n"
-                f"3. Call `codewalk_save_stack_context(your_json)` to save it\n"
-                f"4. Call `codewalk_run_review({review_args})` again to start the review\n\n"
-                f"This only happens **once per repo** — the file persists across all commits.\n"
-                f"To refresh later: `codewalk_run_review({review_args}, refresh_stack=True)`"
-            )
-
-        stack = {k: v for k, v in cached_stack.items() if not k.startswith("_")}
-        stack_header = format_stack_context_header(stack)
-        rubric_names = get_rubric_names_from_stack(stack)
-        rubrics = build_rubrics(repo, {df.file_path for df in diff_files}, detected_rubric_names=rubric_names)
-
-        # Group files into batches
-        batches = group_files_for_review(
-            diff_files,
-            risk_annotations=static_result.risk_annotations,
-            max_per_batch=5,
-        )
-
-        # Create session with batch queue
-        session_id = ReviewSession.generate_id()
-        from src.codewalk.review.utils import build_session_folder_name, get_current_branch
-        current_branch = get_current_branch(repo)
-        created_at = datetime.now(timezone.utc)
-        folder_name = build_session_folder_name(created_at, current_branch, target_branch)
-
-        # Store batch queue in session
-        batch_queue = [[df.file_path for df in batch] for batch in batches]
-
-        session = ReviewSession(
-            session_id=session_id,
-            repo_path=str(repo),
-            target_branch=target_branch,
-            commit=commit,
-            staged=staged,
-            status=SessionStatus.ACTIVE,
-            folder_name=folder_name,
-            current_branch=current_branch,
-            created_at=created_at.isoformat(),
-            updated_at=created_at.isoformat(),
-        )
-        save_session(session)
-
-        # Save batch queue to session folder
-        from src.codewalk.review.session_store import _session_dir
-        session_dir = _session_dir(repo, folder_name)
-        session_dir.mkdir(parents=True, exist_ok=True)
-        batch_state = {
-            "session_id": session_id,
-            "total_files": len(diff_files),
-            "total_batches": len(batches),
-            "current_batch_index": 0,
-            "batch_queue": batch_queue,
-            "target_branch": target_branch,
-            "commit": commit,
-            "staged": staged,
-            "stack_header": stack_header,
-            "rubric_core": rubrics.core,
-            "rubric_language": rubrics.language,
-            "rubric_framework": rubrics.framework,
-            "rubric_fallback": rubrics.fallback,
-        }
-        (session_dir / "batch_state.json").write_text(
-            _json.dumps(batch_state, indent=2), encoding="utf-8"
-        )
-
-        # Write static_findings.json — deterministic findings persisted once
-        from src.codewalk.review.engine import _build_static_findings
-        auto_f = _build_static_findings(static_result)
-        (session_dir / "static_findings.json").write_text(
-            _json.dumps([f.to_dict() for f in auto_f], indent=2),
-            encoding="utf-8",
-        )
-
-        # Initialize empty llm_findings.json for host LLM to append to
-        (session_dir / "llm_findings.json").write_text("[]", encoding="utf-8")
-
-        # Build first batch context
-        first_batch_context = _build_batch_context_for_host(
-            repo, batches[0], static_result, stack_header, rubrics,
-        )
-
-        lines = [warning]
-        lines.append(f"# Review Session: `{session_id}`\n")
-        lines.append(f"- **{len(diff_files)} files** in **{len(batches)} batches** (3-5 files each, grouped by feature)")
-        lines.append(f"- Stack: {', '.join(stack.get('languages', []))} + {', '.join(stack.get('frameworks', []))}")
-        lines.append(f"- Branch: `{current_branch}` → `{target_branch or 'working tree'}`")
-        if auto_f:
-            lines.append(f"- **{len(auto_f)} architectural warnings** (high-impact files detected)")
-        lines.append("")
-        lines.append(f"## Batch 1/{len(batches)}\n")
-        lines.append(first_batch_context)
-        lines.append("")
-        lines.append("---")
-        lines.append("**After reviewing this batch:**")
-        lines.append(f"1. Call `codewalk_submit_batch_findings('{session_id}', findings=[...])` with your findings")
-        lines.append(f"2. Call `codewalk_review_next_batch('{session_id}')` to get the next batch")
-        lines.append(f"**{len(batches) - 1} batches remaining.**")
-
-        return "\n".join(lines)
-
     except Exception as e:
         _log(f"[codewalk_run_review] error: {e}")
         return warning + f"❌ Review failed: {e}"
+
+    session = result["session"]
+    batches = result["batches"]
+    static_result = result["static_result"]
+    stack_header = result["stack_header"]
+    rubrics = result["rubrics"]
+    stack = result["stack"]
+    diff_files = result["diff_files"]
+    auto_f = result["auto_f"]
+
+    # Build first batch context
+    first_batch_context = _build_batch_context_for_host(
+        repo, batches[0], static_result, stack_header, rubrics,
+    )
+
+    lines = [warning]
+    lines.append(f"# Review Session: `{session.session_id}`\n")
+    lines.append(f"- **{len(diff_files)} files** in **{len(batches)} batches** (3-5 files each, grouped by feature)")
+    lines.append(f"- Stack: {', '.join(stack.get('languages', []))} + {', '.join(stack.get('frameworks', []))}")
+    lines.append(f"- Branch: `{session.current_branch}` → `{target_branch or 'working tree'}`")
+    if auto_f:
+        lines.append(f"- **{len(auto_f)} architectural warnings** (high-impact files detected)")
+    lines.append("")
+    lines.append(f"## Batch 1/{len(batches)}\n")
+    lines.append(first_batch_context)
+    lines.append("")
+    lines.append("---")
+    lines.append("**After reviewing this batch:**")
+    lines.append(f"1. Call `codewalk_submit_batch_findings('{session.session_id}', findings=[...])` with your findings")
+    lines.append(f"2. Call `codewalk_review_next_batch('{session.session_id}')` to get the next batch")
+    lines.append(f"**{len(batches) - 1} batches remaining.**")
+
+    return "\n".join(lines)
+
+
+# ─── TOOL 11a [REVIEW · AI]: codewalk_re_review ─────────
+@mcp.tool()
+def codewalk_re_review(
+    target_branch: str | None = None,
+    staged: bool = False,
+    commit: str | None = None,
+    refresh_stack: bool = False,
+) -> str:
+    """Start a fresh review while hiding findings the user rejected in the last session.
+
+    This is useful after the user has accepted/rejected findings from a previous
+    codewalk_run_review: it creates a new review session, re-scans the diff, and
+    suppresses any finding whose ID matches a previously rejected finding. New or
+    still-present issues will be reported normally.
+
+    Args:
+        target_branch: Diff working tree against this branch (e.g. "main").
+            Shows committed + staged + unstaged + untracked changes.
+            If None, reviews local changes since the last commit.
+        staged: If True, review ONLY staged changes (narrow mode).
+        commit: Review a specific commit by SHA or ref.
+        refresh_stack: If True, ignore the existing .codewalk/stack_context.json
+            and re-prompt for stack detection.
+
+    Returns:
+        New session info + first batch context. Rejected findings from the previous
+        session are filtered out of the final summary.
+    """
+    repo_path = state.get_repo_path()
+    if not repo_path:
+        return "❌ No repository path available. Run codewalk_analyze_codebase first."
+
+    index_ready = False
+    try:
+        index_ready = state.ensure_initialized()
+    except Exception as e:
+        _log(f"[codewalk_re_review] ensure_initialized failed: {e}")
+
+    warning = ""
+    if not index_ready:
+        warning = (
+            "⚠️ **Codebase index not loaded** (no embeddings in ChromaDB).\n\n"
+            "The review will still use the dependency graph (DuckDB) for risk annotations, "
+            "blast radius, and cycle detection. However, neighborhood context (callers, tests, "
+            "interfaces) will be limited. Run `codewalk_analyze_codebase` for full context.\n\n"
+            "---\n\n"
+        )
+
+    try:
+        from src.codewalk.review.session_store import (
+            find_last_session,
+            load_findings,
+        )
+
+        repo = Path(repo_path)
+
+        # Find the most recent review session for this branch
+        previous_session = find_last_session(repo, target_branch)
+        if previous_session is None:
+            return (
+                f"{warning}❌ No previous review session found for "
+                f"branch `{target_branch or 'current'}`. Run `codewalk_run_review` first."
+            )
+
+        previous_folder = previous_session.folder_name or previous_session.session_id
+        previous_findings = load_findings(repo, previous_folder)
+        rejected_ids = {
+            f.get("id") for f in previous_findings
+            if f.get("user_verdict") == "rejected" and f.get("id")
+        }
+
+        result = _start_batched_review(repo, target_branch, staged, commit, refresh_stack)
+
+    except _NoChangesError:
+        return warning + "✅ No changes found to re-review."
+    except _StackRequiredError as e:
+        review_args = f"target_branch='{e.target_branch or ''}'"
+        if e.staged:
+            review_args += ", staged=True"
+        if e.commit:
+            review_args += f', commit="{e.commit}"'
+
+        return (
+            f"{warning}"
+            f"## Stack Context Required\n\n"
+            f"No `.codewalk/stack_context.json` found. Codewalk needs to know the "
+            f"project's architecture, state management, and frameworks to load the "
+            f"correct review rubrics.\n\n"
+            f"**Steps:**\n"
+            f"1. Call `codewalk_get_stack_info()` to get the file tree + prompt\n"
+            f"2. Analyze it and produce a JSON describing the stack\n"
+            f"3. Call `codewalk_save_stack_context(your_json)` to save it\n"
+            f"4. Call `codewalk_re_review({review_args})` again to start the re-review\n\n"
+            f"This only happens **once per repo** — the file persists across all commits.\n"
+            f"To refresh later: `codewalk_re_review({review_args}, refresh_stack=True)`"
+        )
+    except Exception as e:
+        _log(f"[codewalk_re_review] error: {e}")
+        return warning + f"❌ Re-review failed: {e}"
+
+    session = result["session"]
+    session_dir = result["session_dir"]
+    batch_state = result["batch_state"]
+    batches = result["batches"]
+    static_result = result["static_result"]
+    stack_header = result["stack_header"]
+    rubrics = result["rubrics"]
+    stack = result["stack"]
+    diff_files = result["diff_files"]
+    auto_f = result["auto_f"]
+
+    # Persist re-review linkage and rejected IDs
+    batch_state["previous_session_id"] = previous_session.session_id
+    batch_state["rejected_ids"] = sorted(rejected_ids)
+    (session_dir / "batch_state.json").write_text(
+        json.dumps(batch_state, indent=2), encoding="utf-8"
+    )
+
+    # Build first batch context
+    first_batch_context = _build_batch_context_for_host(
+        repo, batches[0], static_result, stack_header, rubrics,
+    )
+
+    lines = [warning]
+    lines.append(f"# Re-Review Session: `{session.session_id}`\n")
+    lines.append(f"- **{len(diff_files)} files** in **{len(batches)} batches** (3-5 files each, grouped by feature)")
+    lines.append(f"- Stack: {', '.join(stack.get('languages', []))} + {', '.join(stack.get('frameworks', []))}")
+    lines.append(f"- Branch: `{session.current_branch}` → `{target_branch or 'working tree'}`")
+    if auto_f:
+        lines.append(f"- **{len(auto_f)} architectural warnings** (high-impact files detected)")
+    if rejected_ids:
+        lines.append(f"- **{len(rejected_ids)} previously rejected finding(s)** will be hidden in the summary")
+    lines.append("")
+    lines.append(f"## Batch 1/{len(batches)}\n")
+    lines.append(first_batch_context)
+    lines.append("")
+    lines.append("---")
+    lines.append("**After reviewing this batch:**")
+    lines.append(f"1. Call `codewalk_submit_batch_findings('{session.session_id}', findings=[...])` with your findings")
+    lines.append(f"2. Call `codewalk_review_next_batch('{session.session_id}')` to get the next batch")
+    lines.append(f"**{len(batches) - 1} batches remaining.**")
+
+    return "\n".join(lines)
 
 
 def _build_batch_context_for_host(
@@ -1609,7 +1876,8 @@ def codewalk_submit_batch_findings(session_id: str, findings: list[dict]) -> str
     """Save findings from the current batch to persistent storage.
 
     Call this after reviewing each batch. Findings are appended to llm_findings.json
-    so your context window stays clean between batches.
+    so your context window stays clean between batches. A human-readable
+    llm_findings.md companion is regenerated at the same time.
 
     Each finding should be a dict with:
       - file_path: str (required)
@@ -1660,12 +1928,26 @@ def codewalk_submit_batch_findings(session_id: str, findings: list[dict]) -> str
     for f in findings:
         f["batch"] = batch_num
         f.setdefault("source", "llm")
+        f.setdefault("id", _finding_id_from_dict(f))
 
     existing.extend(findings)
 
     # Write back
     llm_findings_path.write_text(
         _json.dumps(existing, indent=2), encoding="utf-8"
+    )
+
+    # Keep human-readable Markdown companion in sync
+    from src.codewalk.review.renderers.markdown import render_findings_markdown
+
+    md_path = session_dir / "llm_findings.md"
+    md_path.write_text(
+        render_findings_markdown(
+            existing,
+            title="LLM Findings",
+            source_label="review LLM",
+        ),
+        encoding="utf-8",
     )
 
     return (
@@ -1682,8 +1964,11 @@ def codewalk_get_review_summary(session_id: str) -> str:
     Call this after all batches are reviewed and findings submitted.
     Returns a structured summary for you to present the final verdict to the user.
 
+    If this session was created by codewalk_re_review, any findings whose IDs
+    match previously rejected findings are hidden from the summary.
+
     Args:
-        session_id: Session ID from codewalk_run_review.
+        session_id: Session ID from codewalk_run_review or codewalk_re_review.
 
     Returns:
         Combined findings summary with Layer 0 architectural warnings + all LLM
@@ -1716,14 +2001,25 @@ def codewalk_get_review_summary(session_id: str) -> str:
     if llm_path.exists():
         llm_findings = _json.loads(llm_path.read_text(encoding="utf-8"))
 
+    # Load re-review state and filter out previously rejected findings
+    batch_state_path = session_dir / "batch_state.json"
+    batch_state = {}
+    if batch_state_path.exists():
+        batch_state = _json.loads(batch_state_path.read_text(encoding="utf-8"))
+
+    rejected_ids = set(batch_state.get("rejected_ids", []))
+    filtered_count = 0
+    if rejected_ids:
+        before = len(llm_findings)
+        llm_findings = [f for f in llm_findings if f.get("id") not in rejected_ids]
+        filtered_count = before - len(llm_findings)
+
     # Build summary
     parts: list[str] = []
     parts.append(f"# Review Summary — Session `{session_id}`\n")
 
-    batch_state_path = session_dir / "batch_state.json"
-    if batch_state_path.exists():
-        bs = _json.loads(batch_state_path.read_text(encoding="utf-8"))
-        parts.append(f"- **{bs['total_files']} files** reviewed in **{bs['total_batches']} batches**")
+    if batch_state:
+        parts.append(f"- **{batch_state['total_files']} files** reviewed in **{batch_state['total_batches']} batches**")
 
     # Stats
     total = len(static_findings) + len(llm_findings)
@@ -1733,6 +2029,8 @@ def codewalk_get_review_summary(session_id: str) -> str:
     suggestions = sum(1 for f in llm_findings if f.get("severity") == "suggestion")
 
     parts.append(f"- **{total} total findings** ({len(static_findings)} architectural + {len(llm_findings)} from review)")
+    if filtered_count:
+        parts.append(f"- **{filtered_count} previously rejected finding(s)** hidden in this re-review summary")
     if blocking:
         parts.append(f"- **{blocking} BLOCKING** (must fix before merge)")
     parts.append(f"- Blocker: {blockers} | Error: {errors} | Suggestion: {suggestions}")
@@ -1821,8 +2119,9 @@ def codewalk_review_file(
 
     Args:
         file_path: Relative path to the file to review (e.g. "src/auth/login.py").
-        target_branch: Diff against this branch. If None, uses working-tree changes.
-        staged: If True, review only staged changes for this file.
+        target_branch: Diff working tree against this branch. Shows committed +
+            staged + unstaged + untracked changes. If None, reviews local changes.
+        staged: If True, review ONLY staged changes for this file (narrow mode).
 
     Returns:
         Markdown context package for the host LLM to review.
@@ -1928,7 +2227,7 @@ def codewalk_finding_verdict(
 
     Args:
         session_id: Session ID from the review (returned in review output).
-        finding_index: 0-based index of the finding in the session's findings list.
+        finding_index: 0-based index of the finding in the session's llm_findings.json.
         verdict: "accepted" or "rejected".
         reason: Optional reason for the verdict (e.g. "validated by middleware upstream").
 
@@ -1953,15 +2252,12 @@ def codewalk_finding_verdict(
 
     folder = session.folder_name or session.session_id
 
-    # Use llm_findings.json (MCP path) if it exists, else fall back to findings.json (API path)
     session_dir = _session_dir(Path(repo_path), folder)
     llm_path = session_dir / "llm_findings.json"
-    use_llm_file = llm_path.exists()
+    if not llm_path.exists():
+        return f"❌ No llm_findings.json found for session `{session_id}`."
 
-    if use_llm_file:
-        findings = _json.loads(llm_path.read_text(encoding="utf-8"))
-    else:
-        findings = load_findings(Path(repo_path), folder)
+    findings = _json.loads(llm_path.read_text(encoding="utf-8"))
 
     if not findings or finding_index < 0 or finding_index >= len(findings):
         return f"❌ Finding index {finding_index} out of range (0-{len(findings) - 1 if findings else 0})."
@@ -1971,10 +2267,15 @@ def codewalk_finding_verdict(
     if reason:
         findings[finding_index]["verdict_reason"] = reason
 
-    if use_llm_file:
-        llm_path.write_text(_json.dumps(findings, indent=2), encoding="utf-8")
-    else:
-        save_findings(Path(repo_path), folder, findings)
+    llm_path.write_text(_json.dumps(findings, indent=2), encoding="utf-8")
+
+    # Keep Markdown companion in sync
+    from src.codewalk.review.renderers.markdown import render_findings_markdown
+
+    (session_dir / "llm_findings.md").write_text(
+        render_findings_markdown(findings, title="LLM Findings", source_label="review LLM"),
+        encoding="utf-8",
+    )
 
     title = findings[finding_index].get("title", "Untitled")
     emoji = "✅" if verdict == "accepted" else "❌"
@@ -1987,7 +2288,7 @@ def codewalk_finding_verdict(
 def codewalk_apply_accepted(session_id: str = "") -> str:
     """Apply all accepted fixes from a review session.
 
-    Reads the session's findings.json, finds all findings where
+    Reads the session's llm_findings.json, finds all findings where
     user_verdict="accepted" AND recommended_code is present, and applies
     each fix to disk. Runs syntax validation after each apply.
 
@@ -2029,13 +2330,12 @@ def codewalk_apply_accepted(session_id: str = "") -> str:
             return "❌ Could not load the latest review session."
         folder = session.folder_name or session.session_id
 
-    # Use llm_findings.json (MCP path) if it exists, else findings.json (API path)
     session_dir = _session_dir(Path(repo_path), folder)
     llm_path = session_dir / "llm_findings.json"
-    if llm_path.exists():
-        findings = _json.loads(llm_path.read_text(encoding="utf-8"))
-    else:
-        findings = load_findings(Path(repo_path), folder)
+    if not llm_path.exists():
+        return f"❌ No llm_findings.json found for session `{session_id or folder}`."
+
+    findings = _json.loads(llm_path.read_text(encoding="utf-8"))
 
     if not findings:
         return "❌ No findings in this session."
@@ -2501,7 +2801,7 @@ def codewalk_voice_ask() -> str:
         f"   - User asks about risk or what breaks → `codewalk_get_blast_radius_map(target)`\n"
         f"   - User asks about dependencies or execution flow → `codewalk_get_execution_flow()`\n"
         f"   - User asks where to start reading → `codewalk_get_reading_order()`\n"
-        f"   - User asks to review changes → call codewalk_run_review(target_branch='main' if comparing to a branch) and review the returned raw context with the host LLM\n"
+        f"   - User asks to review changes → call codewalk_run_review() (pass target_branch='...' only if comparing to a branch) and review the returned raw context with the host LLM\n"
         f"   - User says 'apply that fix' / 'make that change' → `codewalk_approve_action(proposed_action=<fix>)` first, wait for yes\n"
         f"   - User asks about docs/guides/runbooks → `codewalk_ask_docs(question)`\n"
         f"   - User asks to index/load documents → `codewalk_index_docs(path)`\n"
@@ -2825,7 +3125,7 @@ def codewalk_apply_fix(
     You can apply a fix in two ways:
       1. Pass explicit file_path, old_code, and new_code.
       2. Pass session_id and finding_index to load the fix from the session's
-         findings.json (old_code and new_code are taken from the finding).
+         llm_findings.json (old_code and new_code are taken from the finding).
 
     Performs an exact text replacement: searches for old_code in the file and
     replaces it with new_code. Fails if old_code is not found or appears multiple
@@ -2837,7 +3137,7 @@ def codewalk_apply_fix(
         new_code: The replacement code
         approval_token: Token from codewalk_approve_action (single-use)
         session_id: Optional. Session ID from codewalk_run_review's context package.
-        finding_index: Optional. Index of the finding in the session's findings.json.
+        finding_index: Optional. Index of the finding in the session's llm_findings.json.
 
     Returns:
         Success message with the applied change, or error message if replacement failed.
@@ -2857,7 +3157,7 @@ def codewalk_apply_fix(
 
     repo_path = state.get_repo_path()
 
-    # If session_id + finding_index are provided, load the finding from findings.json.
+    # If session_id + finding_index are provided, load the finding from llm_findings.json.
     if session_id is not None and finding_index is not None:
         finding = load_finding_by_session_and_index(Path(repo_path), session_id, finding_index)
         if finding is None:

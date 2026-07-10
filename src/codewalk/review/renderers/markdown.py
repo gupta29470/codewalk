@@ -1,6 +1,7 @@
 """Markdown renderer for review reports and context packages."""
 from __future__ import annotations
 
+import textwrap
 from pathlib import Path
 from typing import Any
 
@@ -10,6 +11,164 @@ from src.codewalk.review.report import (
     ReviewContextPackage,
     ReviewReport,
 )
+
+
+WRAP_WIDTH = 88
+
+
+def _wrap_text(text: str | None, width: int = WRAP_WIDTH) -> str:
+    """Hard-wrap text for readable raw Markdown files."""
+    if not text:
+        return ""
+    # Preserve existing line breaks by wrapping each paragraph independently.
+    paragraphs = text.split("\n")
+    wrapped = []
+    for para in paragraphs:
+        if not para.strip():
+            wrapped.append("")
+        else:
+            wrapped.append(textwrap.fill(para, width=width))
+    return "\n".join(wrapped)
+
+
+def _language_for_file(file_path: str) -> str:
+    """Guess a code-block language from a file extension."""
+    ext = Path(file_path).suffix.lower()
+    mapping = {
+        ".py": "python",
+        ".js": "javascript",
+        ".ts": "typescript",
+        ".tsx": "tsx",
+        ".jsx": "jsx",
+        ".go": "go",
+        ".rs": "rust",
+        ".java": "java",
+        ".kt": "kotlin",
+        ".rb": "ruby",
+        ".php": "php",
+        ".cpp": "cpp",
+        ".c": "c",
+        ".h": "c",
+        ".cs": "csharp",
+        ".swift": "swift",
+        ".scala": "scala",
+        ".sh": "bash",
+        ".yaml": "yaml",
+        ".yml": "yaml",
+        ".json": "json",
+        ".md": "markdown",
+        ".sql": "sql",
+    }
+    return mapping.get(ext, "")
+
+
+def render_findings_markdown(
+    findings: list[dict[str, Any]],
+    title: str = "Review Findings",
+    source_label: str = "",
+) -> str:
+    """Render a list of finding dicts as a hard-wrapped Markdown document.
+
+    This is intended as a human-readable companion to the machine-readable
+    ``llm_findings.json`` / ``static_findings.json`` files. JSON stays the
+    source of truth; Markdown is read-only.
+    """
+    lines: list[str] = [f"# {title}", ""]
+    if source_label:
+        lines.extend([f"**Source:** {source_label}", ""])
+
+    if not findings:
+        lines.append("_No findings._")
+        lines.append("")
+        return "\n".join(lines)
+
+    for idx, f in enumerate(findings, start=1):
+        severity = f.get("severity", "error")
+        category = f.get("category", "")
+        subcategory = f.get("subcategory", "")
+        file_path = f.get("file_path", "unknown")
+        line_number = f.get("line_number")
+        title_text = f.get("title", "Untitled")
+        confidence = f.get("confidence", "medium")
+        source = f.get("source", "")
+        finding_id = f.get("id", "")
+        blocking = f.get("blocking", False)
+        status = f.get("status", "new")
+        user_verdict = f.get("user_verdict")
+        verifier_notes = f.get("verifier_notes")
+
+        lines.append(f"## {idx}. [{severity}] {title_text}")
+        lines.append("")
+
+        meta_parts = []
+        if finding_id:
+            meta_parts.append(f"**ID:** `{finding_id}`")
+        loc = f"`{file_path}"
+        if line_number:
+            loc += f":{line_number}"
+        loc += "`"
+        meta_parts.append(f"**File:** {loc}")
+        if category:
+            cat_label = subcategory if subcategory else category
+            meta_parts.append(f"**Category:** {cat_label}")
+        if confidence:
+            meta_parts.append(f"**Confidence:** {confidence}")
+        if source:
+            meta_parts.append(f"**Source:** {source}")
+        if status and status != "new":
+            meta_parts.append(f"**Status:** {status}")
+        if blocking:
+            meta_parts.append("**Blocking:** true")
+        if user_verdict:
+            meta_parts.append(f"**Verdict:** {user_verdict}")
+
+        if meta_parts:
+            lines.append(" · ".join(meta_parts))
+            lines.append("")
+
+        explanation = _wrap_text(f.get("explanation", ""))
+        if explanation:
+            lines.append(explanation)
+            lines.append("")
+
+        current_code = f.get("current_code")
+        if current_code:
+            lang = _language_for_file(file_path)
+            lines.append("### Current code")
+            lines.append(f"```{lang}")
+            lines.append(current_code.rstrip("\n"))
+            lines.append("```")
+            lines.append("")
+
+        recommended_code = f.get("recommended_code")
+        if recommended_code:
+            lang = _language_for_file(file_path)
+            lines.append("### Recommended code")
+            lines.append(f"```{lang}")
+            lines.append(recommended_code.rstrip("\n"))
+            lines.append("```")
+            lines.append("")
+
+        if verifier_notes:
+            lines.append("### Verifier notes")
+            lines.append(_wrap_text(verifier_notes))
+            lines.append("")
+
+        evidence = f.get("evidence") or []
+        if evidence:
+            lines.append("### Evidence")
+            for ev in evidence:
+                if isinstance(ev, dict):
+                    ev_text = ev.get("text") or ev.get("summary") or str(ev)
+                else:
+                    ev_text = str(ev)
+                lines.append(f"- {_wrap_text(ev_text)}")
+            lines.append("")
+
+        lines.append("---")
+        lines.append("")
+
+    return "\n".join(lines)
 
 
 def _format_finding(finding: Finding, idx: int) -> list[str]:

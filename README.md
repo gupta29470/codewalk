@@ -76,7 +76,7 @@ Codewalk's review engine is built on top of the codebase intelligence layer. It 
 git diff → Static Analysis (graph risk, PageRank, cycles, blast radius)
          → Batch files (3-5 per batch, grouped by feature)
          → Host LLM reviews each batch with full context
-         → Submit findings to disk per batch (context stays clean)
+         → Submit findings to disk per batch (JSON + Markdown, context stays clean)
          → Final summary: all findings + verdict
 ```
 
@@ -115,19 +115,20 @@ Review runs on **any git repo** — no `codewalk_analyze_codebase` needed. The i
 
 ### MCP review flow
 
-1. `codewalk_run_review(target_branch='main')` → session + first batch
-2. Host reviews batch → `codewalk_submit_batch_findings(session_id, [...])` → saved to disk
+1. `codewalk_run_review()` → session + first batch (reviews ALL changes by default: staged + unstaged + untracked; pass `target_branch='...'` to diff against a branch)
+2. Host reviews batch → `codewalk_submit_batch_findings(session_id, [...])` → saved to disk as JSON; a hard-wrapped Markdown companion is also written for easy reading
 3. `codewalk_review_next_batch(session_id)` → next batch (context window is clean)
 4. Repeat until all batches done
 5. `codewalk_get_review_summary(session_id)` → structured summary for final verdict
 6. User accepts/rejects → `codewalk_finding_verdict` → `codewalk_apply_accepted`
+7. (Optional) `codewalk_re_review()` → fresh review that hides rejected findings
 
 ### API review flow
 
 ```bash
 curl -X POST http://localhost:8000/review \
   -H "Content-Type: application/json" \
-  -d '{"target_branch": "master"}'
+  -d '{}'
 ```
 
 Runs: static analysis → batch review (parallel LLM) → dedup → verify → cluster → rank → verdict.
@@ -147,7 +148,7 @@ Runs: static analysis → batch review (parallel LLM) → dedup → verify → c
 | 🔎 **Semantic Search** | ChromaDB vector search on embedded code chunks (RAG) |
 | 🔬 **Code Review** | Multi-stage review pipeline: test coverage, blast radius, guidelines RAG, context-enriched deep analysis |
 | 🔄 **Incremental Reindex** | Content hash comparison — only re-embeds changed files, skips unchanged |
-| 🧩 **MCP Server** | 42 MCP tools for VS Code Copilot / Claude Code / Cursor / Codex |
+| 🧩 **MCP Server** | 43 MCP tools for VS Code Copilot / Claude Code / Cursor / Codex |
 | 🎙️ **Voice Interface** | Talk to your codebase — mic recording, local STT (faster-whisper), agent-driven routing (MCP + API), TTS response |
 | 🔬 **Graph Intelligence** | DuckDB persistent graph + igraph C-speed traversal: cycle detection, centrality, import chain tracing |
 | 🧬 **Corrective RAG** | Distance-based chunk filtering (free) + LLM answer grading + query rewriting for reliable answers |
@@ -203,7 +204,7 @@ If you need deep cross-file reasoning, blast-radius analysis, or AI review insid
 | **Refactor shared code** | Grep for imports | Dependency graph + blast radius showing transitive impact |
 | **Onboard a new developer** | Read wiki pages | Reading order + module map generated from actual code |
 | **Team knowledge** | Search Confluence/Notion | Index docs alongside code and ask with citations |
-| **AI agent tooling** | Write custom scripts or prompts | 42 MCP tools the agent can call directly |
+| **AI agent tooling** | Write custom scripts or prompts | 43 MCP tools the agent can call directly |
 
 ---
 
@@ -1066,7 +1067,7 @@ or
 
 #### "Review my changes for bugs"
 
-**Tool:** `codewalk_run_review` — optional: `staged=true`, `target_branch="master"`
+**Tool:** `codewalk_run_review` — reviews ALL changes by default; optional: `staged=true` (narrow), `target_branch="master"` (branch diff)
 
 You're about to push a PR and want an automated code review.
 
@@ -1708,8 +1709,8 @@ curl -X POST http://localhost:8000/review \
 }
 ```
 
-- `staged`: If `true`, review only staged changes (`--staged`). Default: `false`.
-- `target_branch`: Diff against a branch (e.g. `"master"` for full PR review). Default: `null` (unstaged changes).
+- `staged`: If `true`, review ONLY staged changes (narrow mode). Default: `false` (reviews staged + unstaged + untracked).
+- `target_branch`: Diff working tree against a branch (e.g. `"master"`). Shows committed + staged + unstaged + untracked. Default: `null` (local changes since last commit).
 - `incremental`: Carry forward previous findings when `true`. Default: `false`.
 - `narrative_summary`: Set `true` for an LLM-written narrative summary (slower). Default: `false`.
 
@@ -2131,7 +2132,7 @@ codewalk/
 │   │   └── fanout_agent.py        #   Fan-out graph experiments
 │   ├── cli.py                     #   Command-line interface
 │   └── mcp/                       # Model Context Protocol
-│       └── server.py              #   42 MCP tools (stdio)
+│       └── server.py              #   43 MCP tools (stdio)
 │
 ├── frontend/                      # Next.js 14 web UI
 │   └── src/app/
