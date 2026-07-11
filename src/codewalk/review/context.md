@@ -36,6 +36,9 @@ git diff or single file content
     ↓
 diff_parser.py → DiffFile list
     ↓
+engine._load_graph_runtime() → loads or builds dependency graph on-the-fly
+    (if no .codewalk/graph.duckdb: scan → deps → modules → DuckDB ~5s, cached after)
+    ↓
 neighborhood.py → expanded context + blast radius
     ↓
 static_analysis.py → deterministic auto-findings (+ review_cache lookup/save)

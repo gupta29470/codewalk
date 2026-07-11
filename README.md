@@ -92,17 +92,17 @@ git diff → Static Analysis (graph risk, PageRank, cycles, blast radius)
 | **Fix application** | Suggests only | ✅ Accept/reject → apply atomically → verify with tests |
 | **Severity levels** | varies | `blocker` · `error` · `suggestion` |
 
-### Works without indexing
+### Zero-setup review
 
-Review runs on **any git repo** — no `codewalk_analyze_codebase` needed. The intelligence layer enhances it when available:
+Review runs on **any git repo** — no `codewalk_analyze_codebase` needed. The dependency graph is built automatically on first review (~5s) and cached:
 
-| Component | Without index | With index (after analyze) |
-|-----------|--------------|---------------------------|
+| Component | Auto (graph-only) | Full index (after analyze) |
+|-----------|-------------------|---------------------------|
 | Git diff + file content | ✅ | ✅ |
 | Rubrics + team guidelines | ✅ | ✅ |
 | Stack detection | ✅ (from file extensions) | ✅ (cached) |
-| Risk annotations | ⚠️ Diff-size proxy | ✅ PageRank, fan-in, cycles |
-| Neighborhood (callers, tests) | ⚠️ Empty | ✅ From DuckDB graph |
+| Blast radius, PageRank, cycles | ✅ Built on-the-fly (~5s) | ✅ From cached DuckDB |
+| Neighborhood (callers, tests) | ⚠️ Tests + interfaces only | ✅ Full (from ChromaDB) |
 | Blast radius warnings | ⚠️ Not available | ✅ Transitive impact |
 
 ### Severity levels

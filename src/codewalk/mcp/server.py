@@ -34,6 +34,13 @@ Review architecture (batched, no external LLM calls):
   + untracked files). The only narrow mode is staged=True. target_branch uses
   two-dot diff (committed + staged + unstaged + untracked vs branch tip).
 
+  Graph-on-the-fly: if no .codewalk/graph.duckdb exists when a review starts,
+  _load_graph_runtime() automatically builds the dependency graph (~3-7s) and
+  persists it to .codewalk/graph.duckdb. This gives the review full architecture
+  awareness (blast radius, PageRank, cycles, bottlenecks) without requiring
+  codewalk_analyze_codebase. No ChromaDB, no embeddings, no model download.
+  Subsequent reviews load the cached graph in ~100ms.
+
   Stack detection flow (MCP path — NO LLM calls):
     1. Any tool that needs stack checks .codewalk/stack_context.json
     2. If file exists → use it (persists across ALL commits)
@@ -213,6 +220,8 @@ mcp = FastMCP(
         "        indexing completes successfully — so if you follow that prompt, you're already set.\n"
         "\n"
         "Step 1: START — call codewalk_run_review() once.\n"
+        "        No setup required — the dependency graph is built automatically on first\n"
+        "        review (~5s) and cached for subsequent calls.\n"
         "        By default, reviews ALL changes: staged, unstaged, AND new untracked files.\n"
         "        Returns: session_id + first batch of 3-5 files with full context.\n"
         "        Layer 0 (deterministic) findings are saved to disk automatically.\n"
@@ -1451,10 +1460,9 @@ def codewalk_run_review(
     warning = ""
     if not index_ready:
         warning = (
-            "⚠️ **Codebase index not loaded** (no embeddings in ChromaDB).\n\n"
-            "The review will still use the dependency graph (DuckDB) for risk annotations, "
-            "blast radius, and cycle detection. However, neighborhood context (callers, tests, "
-            "interfaces) will be limited. Run `codewalk_analyze_codebase` for full context.\n\n"
+            "ℹ️ **Dependency graph built on-the-fly** (~5s first review, instant after).\n\n"
+            "Review includes blast radius, PageRank, cycle detection, and bottleneck analysis. "
+            "For additional neighborhood context (callers, tests), run `codewalk_analyze_codebase`.\n\n"
             "---\n\n"
         )
 
@@ -1566,10 +1574,9 @@ def codewalk_re_review(
     warning = ""
     if not index_ready:
         warning = (
-            "⚠️ **Codebase index not loaded** (no embeddings in ChromaDB).\n\n"
-            "The review will still use the dependency graph (DuckDB) for risk annotations, "
-            "blast radius, and cycle detection. However, neighborhood context (callers, tests, "
-            "interfaces) will be limited. Run `codewalk_analyze_codebase` for full context.\n\n"
+            "ℹ️ **Dependency graph built on-the-fly** (~5s first review, instant after).\n\n"
+            "Review includes blast radius, PageRank, cycle detection, and bottleneck analysis. "
+            "For additional neighborhood context (callers, tests), run `codewalk_analyze_codebase`.\n\n"
             "---\n\n"
         )
 

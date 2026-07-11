@@ -472,10 +472,47 @@ def _build_static_findings(static_result: StaticAnalysisResult) -> list[Finding]
 _build_layer0_findings = _build_static_findings
 
 
+def _build_graph_only(repo_path: Path) -> None:
+    """Build dependency graph + DuckDB for a repo that has no .codewalk/ index.
+
+    Creates .codewalk/graph.duckdb and .codewalk/knowledge-graph.json.
+    Does NOT create ChromaDB, embed chunks, or download any models.
+    Takes ~3-7 seconds for a typical repo.
+    """
+    from src.codewalk.ingestion.scanner import scan_directory
+    from src.codewalk.pipeline import build_full_analysis
+
+    try:
+        from src.codewalk.codewalk_config import load_codewalk_yaml, codewalk_scan_directory
+        config = load_codewalk_yaml(str(repo_path))
+        files = codewalk_scan_directory(str(repo_path), config)
+    except Exception:
+        files = scan_directory(str(repo_path))
+
+    if not files:
+        raise ValueError("No indexable files found")
+
+    codewalk_dir = repo_path / ".codewalk"
+    codewalk_dir.mkdir(parents=True, exist_ok=True)
+    db_path = str(codewalk_dir / "graph.duckdb")
+
+    logger.info(f"[review] Building dependency graph on-the-fly ({len(files)} files)...")
+    build_full_analysis(
+        db_path=db_path,
+        files=files,
+        embedded_chunks=None,
+        docs_path="",
+        repo_path=str(repo_path),
+    )
+    logger.info(f"[review] Graph ready at {db_path}")
+
+
 def _load_graph_runtime(repo_path: Path) -> tuple[Any | None, bool]:
     """Return a GraphRuntime for the repo and whether we own its store.
 
     Prefers the API/MCP global state; falls back to the on-disk DuckDB graph.
+    If no graph exists, builds one on-the-fly from the repo's source files
+    (~3-7s) and persists it to .codewalk/graph.duckdb for future use.
     When loaded from disk, the caller is responsible for closing the store.
     """
     try:
@@ -488,6 +525,15 @@ def _load_graph_runtime(repo_path: Path) -> tuple[Any | None, bool]:
         pass
 
     db_path = repo_path / ".codewalk" / "graph.duckdb"
+
+    # Build graph on-the-fly if no DuckDB exists
+    if not db_path.exists():
+        try:
+            _build_graph_only(repo_path)
+        except Exception as e:
+            logger.warning(f"[review] On-the-fly graph build failed: {e}")
+            return None, False
+
     if not db_path.exists():
         return None, False
 
