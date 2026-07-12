@@ -1,4 +1,4 @@
-"""Codewalk MCP server — 43 tools for codebase onboarding, search, review,
+"""Codewalk MCP server — 41 tools for codebase onboarding, search, review,
 docs, voice, visualization, and cloud index management.
 
 Tool categories:
@@ -9,13 +9,13 @@ Tool categories:
   ARCHITECTURE:  get_architecture_health, call_chain
   REVIEW:        run_review, re_review, review_next_batch, submit_batch_findings,
                  get_review_summary, review_file, get_review_details,
-                 get_stack_info, save_stack_context, finding_verdict,
-                 apply_accepted
+                 get_stack_info, save_stack_context,
+                 apply_and_verify_fix
   MAINTENANCE:   incremental_reindex, refresh_analysis,
                  load_guidelines, run_static_analysis, run_tests
   VOICE:         voice_ask, speak
   DOCS:          index_docs, search_docs, ask_docs
-  HITL:          approve_action, apply_fix, verify_fix
+  HITL:          approve_action, apply_fix
   CLOUD:         pull_index, index_status, connect_repo, check_version
   VISUALIZATION: show_knowledge_graph
 
@@ -28,7 +28,7 @@ Review architecture (batched, no external LLM calls):
 
   Each codewalk_run_review call always creates a fresh session — there is no
   automatic session reuse. Old sessions remain on disk and can be queried
-  via get_review_summary, finding_verdict, and apply_accepted.
+  via get_review_summary and apply_and_verify_fix.
 
   Diff coverage: by default, get_diff() returns ALL changes (staged + unstaged
   + untracked files). The only narrow mode is staged=True. target_branch uses
@@ -238,17 +238,18 @@ mcp = FastMCP(
         "        Returns: all Layer 0 warnings + all your LLM findings across batches.\n"
         "        Use this to produce the final verdict (approve / request_changes).\n"
         "\n"
-        "Step 4: PRESENT to the user and COLLECT VERDICTS.\n"
-        "        - Call codewalk_finding_verdict(session_id, index, 'accepted'/'rejected')\n"
+        "Step 4: USER VERDICTS \u2014 user edits llm_findings.json directly,\n"
+        "        setting user_verdict to 'accepted' or 'rejected' for each finding.\n"
+        "        The file is initialized with user_verdict: null for every finding.\n"
         "\n"
         "Step 5 (optional): RE-REVIEW — codewalk_re_review().\n"
         "        Starts a fresh review (staged + unstaged + untracked) and hides any finding the user rejected in the\n"
         "        previous session. Pass target_branch='...' only when diffing against a branch. Use this after\n"
         "        the user has addressed feedback and wants to verify the remaining issues.\n"
         "\n"
-        "Step 6: APPLY — codewalk_apply_accepted(session_id) applies all accepted fixes.\n"
-        "\n"
-        "Step 7 (optional): VERIFY — codewalk_verify_fix(file_paths=[...]) runs tests.\n"
+        "Step 6: APPLY + VERIFY — codewalk_apply_and_verify_fix(session_id) applies all\n"
+        "        accepted fixes AND runs static analysis + tests in one call. Persists\n"
+        "        verification status (fixed/still_present) back to findings JSON.\n"
         "\n"
         "IMPORTANT: Do NOT carry findings in your context between batches.\n"
         "           Submit them with codewalk_submit_batch_findings, then forget them.\n"
@@ -257,7 +258,7 @@ mcp = FastMCP(
         "ALTERNATIVE: For non-review manual fixes (user says 'change X to Y'):\n"
         "        - codewalk_approve_action(proposed_action='...') → get token\n"
         "        - codewalk_apply_fix(file_path, old_code, new_code, approval_token) → apply\n"
-        "        - codewalk_verify_fix(file_paths=[...]) → verify\n"
+        "        - codewalk_run_static_analysis + codewalk_run_tests → verify\n"
         "\n"
         "- codewalk_load_guidelines(docs_path) — load team coding standards/docs (run once per project)\n"
         "- codewalk_get_review_details(session_id) — retrieve a previous review context\n"
@@ -295,13 +296,13 @@ mcp = FastMCP(
         "  → codewalk_review_file(file_path) (single file deep review)\n"
         "\n"
         "- Accept/reject findings after review\n"
-        "  → codewalk_finding_verdict(session_id, index, verdict, reason?)\n"
+        "  → User edits llm_findings.json: set user_verdict to 'accepted' or 'rejected'\n"
         "\n"
         "- Re-review after addressing feedback (hides rejected findings)\n"
         "  → codewalk_re_review(target_branch?, staged?, commit?, refresh_stack?)\n"
         "\n"
         "- Apply accepted fixes from review\n"
-        "  → codewalk_apply_accepted(session_id?) — applies all accepted findings at once\n"
+        "  → codewalk_apply_and_verify_fix(session_id?) — apply + static analysis + tests in one step\n"
         "\n"
         "If unsure whether a question is about code or docs, prefer codewalk_search_docs for\n"
         "process/convention questions and codewalk_search_codebase for implementation questions.\n"
@@ -317,8 +318,8 @@ mcp = FastMCP(
         "You call Codewalk over MCP; approval UX is provided by your host (not by Codewalk tools).\n"
         "\n"
         "For REVIEW FINDINGS (after codewalk_run_review):\n"
-        "  - Use codewalk_finding_verdict to record accept/reject per finding.\n"
-        "  - Use codewalk_apply_accepted(session_id) to apply all accepted fixes at once.\n"
+        "  - User edits llm_findings.json to set user_verdict ('accepted'/'rejected') per finding.\n"
+        "  - Use codewalk_apply_and_verify_fix(session_id) to apply + verify in one step.\n"
         "  - No approve_action/token needed — the verdict IS the approval.\n"
         "\n"
         "For NON-REVIEW code changes (manual edits, user says 'change X to Y'):\n"
@@ -1936,6 +1937,7 @@ def codewalk_submit_batch_findings(session_id: str, findings: list[dict]) -> str
         f["batch"] = batch_num
         f.setdefault("source", "llm")
         f.setdefault("id", _finding_id_from_dict(f))
+        f.setdefault("user_verdict", None)
 
     existing.extend(findings)
 
@@ -2076,7 +2078,7 @@ def codewalk_get_review_summary(session_id: str) -> str:
     parts.append("- If only warnings/suggestions → `approve` with comments")
     parts.append("")
     parts.append("**Present findings to user, then for each finding ask: accept or reject?**")
-    parts.append(f"Use `codewalk_finding_verdict('{session_id}', finding_index, 'accepted'/'rejected')` for each.")
+    parts.append(f"**Edit `llm_findings.json` to set `user_verdict` to 'accepted' or 'rejected' for each finding, then call `codewalk_apply_and_verify_fix('{session_id}')`.**")
 
     return "\n".join(parts)
 
@@ -2218,120 +2220,52 @@ def codewalk_review_file(
         return f"❌ Review failed for `{file_path}`: {e}"
 
 
-# ─── TOOL 11e [MAINT · AI]: codewalk_finding_verdict ─────────────────
+# ─── TOOL 11k [REVIEW · AI]: codewalk_apply_and_verify_fix ───────────
 @mcp.tool()
-def codewalk_finding_verdict(
-    session_id: str,
-    finding_index: int,
-    verdict: str,
-    reason: str = "",
-) -> str:
-    """Record a user verdict (accepted/rejected) for a review finding.
+def codewalk_apply_and_verify_fix(session_id: str = "") -> str:
+    """Apply all accepted fixes and verify with static analysis + tests in one step.
 
-    After the host LLM presents findings to the user, call this tool for each
-    finding the user explicitly accepts or rejects. This feedback is persisted
-    in the session and used by future reviews to learn user preferences.
+    Reads verdicts from llm_findings.json (user edits user_verdict field directly),
+    applies each accepted fix (current_code → recommended_code),
+    runs static analysis and tests on modified files, then persists verification
+    status back to the session JSON.
 
-    Args:
-        session_id: Session ID from the review (returned in review output).
-        finding_index: 0-based index of the finding in the session's llm_findings.json.
-        verdict: "accepted" or "rejected".
-        reason: Optional reason for the verdict (e.g. "validated by middleware upstream").
+    No approval token needed — the verdict IS the approval.
 
-    Returns:
-        Confirmation message.
-    """
-    from datetime import datetime, timezone
-
-    if verdict not in ("accepted", "rejected"):
-        return f"❌ Invalid verdict: `{verdict}`. Must be 'accepted' or 'rejected'."
-
-    repo_path = state.get_repo_path()
-    if not repo_path:
-        return "❌ No repository path available."
-
-    from src.codewalk.review.session_store import load_findings, save_findings, load_session, _session_dir
-    import json as _json
-
-    session = load_session(Path(repo_path), session_id)
-    if session is None:
-        return f"❌ Session `{session_id}` not found."
-
-    folder = session.folder_name or session.session_id
-
-    session_dir = _session_dir(Path(repo_path), folder)
-    llm_path = session_dir / "llm_findings.json"
-    if not llm_path.exists():
-        return f"❌ No llm_findings.json found for session `{session_id}`."
-
-    findings = _json.loads(llm_path.read_text(encoding="utf-8"))
-
-    if not findings or finding_index < 0 or finding_index >= len(findings):
-        return f"❌ Finding index {finding_index} out of range (0-{len(findings) - 1 if findings else 0})."
-
-    findings[finding_index]["user_verdict"] = verdict
-    findings[finding_index]["verdict_at"] = datetime.now(timezone.utc).isoformat()
-    if reason:
-        findings[finding_index]["verdict_reason"] = reason
-
-    llm_path.write_text(_json.dumps(findings, indent=2), encoding="utf-8")
-
-    # Keep Markdown companion in sync
-    from src.codewalk.review.renderers.markdown import render_findings_markdown
-
-    (session_dir / "llm_findings.md").write_text(
-        render_findings_markdown(findings, title="LLM Findings", source_label="review LLM"),
-        encoding="utf-8",
-    )
-
-    title = findings[finding_index].get("title", "Untitled")
-    emoji = "✅" if verdict == "accepted" else "❌"
-    reason_text = f" — {reason}" if reason else ""
-    return f"{emoji} Finding #{finding_index} ({title}) marked as **{verdict}**{reason_text}."
-
-
-# ─── TOOL 11f [MAINT · AI]: codewalk_apply_accepted ──────────────────
-@mcp.tool()
-def codewalk_apply_accepted(session_id: str = "") -> str:
-    """Apply all accepted fixes from a review session.
-
-    Reads the session's llm_findings.json, finds all findings where
-    user_verdict="accepted" AND recommended_code is present, and applies
-    each fix to disk. Runs syntax validation after each apply.
-
-    If no session_id is provided, uses the most recent session on the
-    current branch.
+    If no session_id is provided, uses the most recent session on the current branch.
 
     Args:
         session_id: Optional session ID. If empty, uses the latest session.
 
     Returns:
-        Summary of applied/skipped/failed fixes.
+        Combined markdown: applied/failed/skipped fixes + static analysis
+        + test results + per-finding verification status.
     """
     import os
     import json as _json
     from src.codewalk.review.fix_applier import apply_fix_to_file
-    from src.codewalk.review.session_store import load_findings, load_session, _session_dir
+    from src.codewalk.review.session_store import load_session, _session_dir
     from src.codewalk.review.finding_store import find_last_review
     from src.codewalk.review.utils import get_current_branch
+    from src.codewalk.tools.static_analysis import run_static_analysis as _run_sa
+    from src.codewalk.tools.test_runner import run_tests as _run_tests
+    from src.codewalk.review.renderers.markdown import render_findings_markdown
 
     repo_path = state.get_repo_path()
     if not repo_path:
         return "❌ No repository path available."
 
-    # Resolve session
+    # ── 1. Resolve session ──────────────────────────────────────────
     if session_id:
         session = load_session(Path(repo_path), session_id)
         if session is None:
             return f"❌ Session `{session_id}` not found."
         folder = session.folder_name or session.session_id
     else:
-        # Find latest session on current branch
         branch = get_current_branch(Path(repo_path))
         last_store = find_last_review(Path(repo_path), branch)
         if not last_store:
             return "❌ No previous review session found on this branch."
-        # Load session by review_id
         session = load_session(Path(repo_path), last_store.review_id)
         if session is None:
             return "❌ Could not load the latest review session."
@@ -2343,11 +2277,10 @@ def codewalk_apply_accepted(session_id: str = "") -> str:
         return f"❌ No llm_findings.json found for session `{session_id or folder}`."
 
     findings = _json.loads(llm_path.read_text(encoding="utf-8"))
-
     if not findings:
         return "❌ No findings in this session."
 
-    # Filter: accepted + has recommended_code
+    # ── 2. Filter accepted findings with code ───────────────────────
     to_apply = [
         (i, f) for i, f in enumerate(findings)
         if f.get("user_verdict") == "accepted"
@@ -2359,12 +2292,14 @@ def codewalk_apply_accepted(session_id: str = "") -> str:
     if not to_apply:
         accepted_count = sum(1 for f in findings if f.get("user_verdict") == "accepted")
         if accepted_count == 0:
-            return "⚠️ No findings marked as accepted. Use codewalk_finding_verdict first."
+            return "⚠️ No findings marked as accepted. Edit llm_findings.json and set user_verdict to 'accepted' first."
         return f"⚠️ {accepted_count} finding(s) accepted but none have both current_code and recommended_code to apply."
 
-    applied: list[str] = []
-    failed: list[str] = []
-    skipped: list[str] = []
+    # ── 3. Apply each fix ───────────────────────────────────────────
+    applied: list[tuple[int, dict]] = []
+    applied_labels: list[str] = []
+    failed_labels: list[str] = []
+    modified_files: list[str] = []
 
     for idx, finding in to_apply:
         file_path = finding["file_path"]
@@ -2376,28 +2311,93 @@ def codewalk_apply_accepted(session_id: str = "") -> str:
         resolved_repo = os.path.realpath(repo_path)
         resolved_target = os.path.realpath(full_path)
         if not resolved_target.startswith(resolved_repo + os.sep) and resolved_target != resolved_repo:
-            failed.append(f"#{idx} {file_path}: path traversal blocked")
+            failed_labels.append(f"#{idx} {file_path}: path traversal blocked")
             continue
 
         result = apply_fix_to_file(repo_path, file_path, old_code, new_code)
         if result["ok"]:
-            applied.append(f"#{idx} {file_path}: {finding.get('title', 'fix applied')}")
+            applied.append((idx, finding))
+            applied_labels.append(f"#{idx} {file_path}: {finding.get('title', 'fix applied')}")
+            if file_path not in modified_files:
+                modified_files.append(file_path)
         else:
-            failed.append(f"#{idx} {file_path}: {result.get('error', 'unknown error')}")
+            failed_labels.append(f"#{idx} {file_path}: {result.get('error', 'unknown error')}")
 
-    # Build summary
-    lines = [f"## Apply Accepted Fixes — Session `{session_id or folder}`\n"]
-    lines.append(f"**{len(applied)} applied**, {len(failed)} failed, {len(to_apply) - len(applied) - len(failed)} skipped\n")
+    # ── 4. Run verification on modified files ───────────────────────
+    sa_issues = []
+    test_result = None
 
-    if applied:
+    if modified_files:
+        sa_issues = _run_sa(repo_path, modified_files)
+        test_result = _run_tests(repo_path, modified_files)
+
+    # ── 5. Determine verification status ────────────────────────────
+    # Static analysis severity values: "critical", "warning", "info" (standard),
+    # "high", "medium", "low" (bandit). Flag anything above informational.
+    has_sa_errors = any(
+        getattr(i, "severity", "").lower() in ("critical", "high", "warning")
+        for i in sa_issues
+    )
+    tests_passed = test_result is None or test_result.ok
+    verification_passed = not has_sa_errors and tests_passed
+
+    # ── 6. Persist status back to findings JSON ─────────────────────
+    sa_summary = f"{len(sa_issues)} issue(s)" if sa_issues else "clean"
+    test_summary = "pass" if tests_passed else "fail"
+
+    for idx, _finding in applied:
+        findings[idx]["status"] = "fixed" if verification_passed else "still_present"
+        findings[idx]["verifier_notes"] = f"SA: {sa_summary}, Tests: {test_summary}"
+
+    llm_path.write_text(_json.dumps(findings, indent=2), encoding="utf-8")
+    (session_dir / "llm_findings.md").write_text(
+        render_findings_markdown(findings, title="LLM Findings", source_label="review LLM"),
+        encoding="utf-8",
+    )
+
+    # ── 7. Build combined report ────────────────────────────────────
+    lines = [f"## Apply & Verify — Session `{session_id or folder}`\n"]
+
+    # Applied / failed
+    lines.append(f"**{len(applied)} applied**, {len(failed_labels)} failed\n")
+    if applied_labels:
         lines.append("### ✅ Applied:")
-        for a in applied:
+        for a in applied_labels:
             lines.append(f"- {a}")
-
-    if failed:
+    if failed_labels:
         lines.append("\n### ❌ Failed:")
-        for f in failed:
+        for f in failed_labels:
             lines.append(f"- {f}")
+
+    # Static analysis
+    lines.append(f"\n### Static Analysis — {len(sa_issues)} issue(s)")
+    if sa_issues:
+        for issue in sa_issues[:25]:
+            loc = f"{issue.file_path}:{issue.line}" if issue.line else issue.file_path
+            lines.append(f"- **{issue.severity}** {loc} — {issue.message} ({issue.tool})")
+    else:
+        lines.append("✅ No static-analysis issues found.")
+
+    # Tests
+    if test_result is not None:
+        test_status = "✅ PASSED" if test_result.ok else "❌ FAILED"
+        lines.append(f"\n### Test Results — {test_status}")
+        cmd_str = " ".join(test_result.command) if test_result.command else "(none)"
+        lines.append(f"Command: `{cmd_str}`")
+        if test_result.stdout:
+            lines.extend(["", "```", test_result.stdout[-2000:], "```"])
+        if test_result.stderr:
+            lines.extend(["", "stderr:", "```", test_result.stderr[-1000:], "```"])
+        if test_result.error:
+            lines.append(f"\nError: {test_result.error}")
+
+    # Verification summary
+    if verification_passed:
+        lines.append(f"\n### ✅ Verification Passed")
+        lines.append(f"All {len(applied)} applied fix(es) verified successfully.")
+    else:
+        lines.append(f"\n### ⚠️ Verification Issues Detected")
+        lines.append(f"Fixes applied but verification found issues. Review the static analysis and test results above.")
 
     return "\n".join(lines)
 
@@ -3218,53 +3218,6 @@ def codewalk_apply_fix(
         f"---\n\n"
         f"Moving to the next issue..."
     )
-
-
-# ─── TOOL 21c [HITL · AI]: codewalk_verify_fix ─────
-@mcp.tool()
-def codewalk_verify_fix(file_paths: list[str] | None = None) -> str:
-    """Run static analysis + tests to verify a fix didn't break anything.
-
-    Call this AFTER codewalk_apply_fix. If no file_paths are provided,
-    it runs the full test suite.
-
-    Args:
-        file_paths: Optional list of relative paths to focus verification on.
-
-    Returns:
-        Markdown summary of static-analysis and test results.
-    """
-    from src.codewalk.tools.static_analysis import run_static_analysis
-    from src.codewalk.tools.test_runner import run_tests
-
-    repo_path = state.get_repo_path()
-    paths = file_paths or []
-
-    # Static analysis
-    sa_issues = run_static_analysis(repo_path, paths)
-    sa_lines = [f"## Static Analysis — {len(sa_issues)} issue(s)"]
-    if sa_issues:
-        for issue in sa_issues[:25]:
-            loc = f"{issue.file_path}:{issue.line}" if issue.line else issue.file_path
-            sa_lines.append(f"- **{issue.severity}** {loc} — {issue.message} ({issue.tool})")
-    else:
-        sa_lines.append("✅ No static-analysis issues found.")
-
-    # Tests
-    test_result = run_tests(repo_path, paths)
-    status = "✅ PASSED" if test_result.ok else "❌ FAILED"
-    test_lines = [
-        f"## Test Results — {status}",
-        f"Command: `{' '.join(test_result.command)}`" if test_result.command else "Command: (none)",
-    ]
-    if test_result.stdout:
-        test_lines.extend(["", "```", test_result.stdout[-2000:], "```"])
-    if test_result.stderr:
-        test_lines.extend(["", "stderr:", "```", test_result.stderr[-1000:], "```"])
-    if test_result.error:
-        test_lines.append(f"\nError: {test_result.error}")
-
-    return "\n".join(sa_lines + [""] + test_lines)
 
 
 # ─── TOOL 22 [CLOUD · AI]: codewalk_pull_index ─────

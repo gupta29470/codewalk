@@ -233,6 +233,15 @@ export interface ReviewFileResponse {
     file_path: string;
 }
 
+export interface ApplyAndVerifyResponse {
+    applied: string[];
+    failed: string[];
+    total_accepted: number;
+    static_analysis_issues: number;
+    tests_passed: boolean | null;
+    verification_passed: boolean | null;
+}
+
 export interface IncrementalReindexResponse {
     repo_path: string;
     files_on_disk: number;
@@ -479,6 +488,12 @@ export const api = {
         apiFetch<ApplyFixesResponse>("/review/apply", {
             method: "POST",
             body: JSON.stringify({ fixes }),
+        }),
+
+    applyAndVerify: (sessionId: string, verdicts: Record<string, string>) =>
+        apiFetch<ApplyAndVerifyResponse>("/review/apply-and-verify", {
+            method: "POST",
+            body: JSON.stringify({ session_id: sessionId, verdicts }),
         }),
 
     indexDocs: (docsPath: string) =>

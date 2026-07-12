@@ -61,7 +61,7 @@ renderers/ format output for CLI / API / Markdown
 - `neighborhood.py` uses `src.codewalk.analysis.blast_radius` and `src.codewalk.graph.graph_runtime` for graph-based context expansion.
 - `static_analysis.py` uses `src.codewalk.graph.graph_runtime` for PageRank/fan-in/cycle data and `src.codewalk.analysis.dependency_graph` for import parsing.
 - API endpoints in `src/codewalk/api/main.py` call into `engine.run_review()`, `engine.run_review_context()`, and `fix_applier.apply_fix_to_file()`.
-- MCP tools in `src/codewalk/mcp/server.py` expose `codewalk_run_review` (context), `codewalk_re_review` (fresh review linked to previous session, hides rejected findings), `codewalk_review_file` (full pipeline), `codewalk_get_review_details`, `codewalk_get_stack_info`, `codewalk_finding_verdict`, `codewalk_apply_accepted`, `codewalk_approve_action`, `codewalk_apply_fix`, and `codewalk_verify_fix`.
+- MCP tools in `src/codewalk/mcp/server.py` expose `codewalk_run_review` (context), `codewalk_re_review` (fresh review linked to previous session, hides rejected findings), `codewalk_review_file` (full pipeline), `codewalk_get_review_details`, `codewalk_get_stack_info`, `codewalk_apply_and_verify_fix` (apply + static analysis + tests in one call), `codewalk_approve_action`, and `codewalk_apply_fix`.
 
 ## Notes
 

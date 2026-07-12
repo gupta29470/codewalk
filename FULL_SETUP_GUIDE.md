@@ -548,7 +548,7 @@ curl -s https://api.codewalk.xyz/indexes/gupta29470/codewalk/manifest \
 
 Codewalk does not ship its own approve/reject UI. You talk to your **IDE agent** (Cursor, Copilot, Claude Code, etc.); the agent calls **Codewalk MCP tools**. Each host shows its own approval experience (Cursor approval cards, chat yes/no, etc.).
 
-The MCP server exposes **43 tools**. Every tool is wrapped with a workspace-change guard that re-discovers the cwd and resets state when you switch workspaces. Cloud-specific tools include `codewalk_pull_index`, `codewalk_connect_repo`, `codewalk_index_status`, `codewalk_check_version`, and `codewalk_show_knowledge_graph`. Recently added local tools include `codewalk_lookup_symbol`, `codewalk_find_circular_dependencies`, `codewalk_run_static_analysis`, `codewalk_run_tests`, `codewalk_generate_config`, `codewalk_explain_class`, `codewalk_get_stack_info`, `codewalk_get_review_details`, `codewalk_review_next_batch`, `codewalk_submit_batch_findings`, `codewalk_get_review_summary`, `codewalk_finding_verdict`, `codewalk_apply_accepted`, and `codewalk_re_review`.
+The MCP server exposes **41 tools**. Every tool is wrapped with a workspace-change guard that re-discovers the cwd and resets state when you switch workspaces. Cloud-specific tools include `codewalk_pull_index`, `codewalk_connect_repo`, `codewalk_index_status`, `codewalk_check_version`, and `codewalk_show_knowledge_graph`. Recently added local tools include `codewalk_lookup_symbol`, `codewalk_find_circular_dependencies`, `codewalk_run_static_analysis`, `codewalk_run_tests`, `codewalk_generate_config`, `codewalk_explain_class`, `codewalk_get_stack_info`, `codewalk_get_review_details`, `codewalk_review_next_batch`, `codewalk_submit_batch_findings`, `codewalk_get_review_summary`, `codewalk_apply_and_verify_fix`, and `codewalk_re_review`.
 
 **Canonical review flow:**
 
@@ -556,9 +556,9 @@ The MCP server exposes **43 tools**. Every tool is wrapped with a workspace-chan
 2. Agent: `codewalk_run_review` (returns session + first batch context for the host LLM to review)
 3. For each batch: review files, then `codewalk_submit_batch_findings(session_id, findings=[...])` → `codewalk_review_next_batch(session_id)` until all batches are done. Each submission updates `llm_findings.json` and its hard-wrapped `llm_findings.md` companion.
 4. Agent: `codewalk_get_review_summary(session_id)` to produce the final verdict
-5. For each finding: accept/reject via `codewalk_finding_verdict`
-6. Apply accepted fixes: `codewalk_apply_accepted` (or per-fix: `codewalk_approve_action` → `codewalk_apply_fix(..., approval_token=<token>)`)
-7. Verify: `codewalk_verify_fix`
+5. User edits `llm_findings.json`: set `user_verdict` to `accepted` or `rejected` for each finding
+6. Apply + verify accepted fixes: `codewalk_apply_and_verify_fix` (apply + static analysis + tests in one step), or per-fix: `codewalk_approve_action` → `codewalk_apply_fix(..., approval_token=<token>)`
+7. (Optional) Run linters/tests standalone: `codewalk_run_static_analysis` + `codewalk_run_tests`
 8. Re-review after fixes: `codewalk_re_review()` starts a fresh review (staged + unstaged + untracked) and hides any finding marked `rejected` in the previous session. Pass `target_branch='...'` to diff against a branch.
 9. After edits: `codewalk_incremental_reindex`
 

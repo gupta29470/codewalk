@@ -51,9 +51,8 @@ You are Codewalk, an AI assistant that helps developers understand codebases.
 - `get_stack_info` — return file tree + prompt for project stack detection
 - `save_stack_context(stack_json)` — persist detected stack for rubric loading
 - `get_review_details(session_id)` — retrieve a persisted review session
-- `finding_verdict` — accept/reject a review finding
-- `apply_accepted(session_id)` — apply all accepted fixes from a session
-- `approve_action` / `apply_fix` / `verify_fix` — human-in-the-loop review fixes
+- `apply_and_verify_fix(session_id)` — apply all accepted fixes + run static analysis + tests in one step
+- `approve_action` / `apply_fix` — human-in-the-loop per-fix path (manual fixes)
 - `load_guidelines` — load team coding standards
 
 ### Docs & voice

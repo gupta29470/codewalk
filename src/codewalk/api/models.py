@@ -128,15 +128,19 @@ class ReviewVerdictResponse(BaseModel):
     success: bool
     message: str
 
-class ApplyAcceptedRequest(BaseModel):
-    """POST /review/apply-accepted — apply all accepted fixes."""
+class ApplyAndVerifyRequest(BaseModel):
+    """POST /review/apply-and-verify — batch verdicts + apply + verify in one call."""
     session_id: str = ""  # empty = use latest session on branch
+    verdicts: dict[str, str] = {}  # {finding_index: "accepted"|"rejected"}, unset = null
 
-class ApplyAcceptedResponse(BaseModel):
-    """POST /review/apply-accepted — response."""
+class ApplyAndVerifyResponse(BaseModel):
+    """POST /review/apply-and-verify — response."""
     applied: list[str]
     failed: list[str]
     total_accepted: int
+    static_analysis_issues: int = 0
+    tests_passed: bool | None = None
+    verification_passed: bool | None = None
 
 class GuidelinesRequest(BaseModel):
     """POST /review/guidelines — request body."""

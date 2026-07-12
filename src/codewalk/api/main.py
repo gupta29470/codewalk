@@ -22,7 +22,7 @@ from fastapi.responses import JSONResponse
 
 from src.codewalk.api.models import (
     AnalyzeRequest, AnalyzeResponse,
-    ApplyAcceptedRequest, ApplyAcceptedResponse,
+    ApplyAndVerifyRequest, ApplyAndVerifyResponse,
     CancelReviewRequest, CancelReviewResponse,
     ChatRequest, ChatResponse,
     ModuleResponse, OverviewResponse,
@@ -943,15 +943,25 @@ def review_verdict_endpoint(request: ReviewVerdictRequest):
     return {"success": True, "message": f"Finding #{request.finding_index} ({title}) marked as {request.verdict}"}
 
 
-# ─── POST /review/apply-accepted ─────────────────────────────────────
-@app.post("/review/apply-accepted")
-def apply_accepted_endpoint(request: ApplyAcceptedRequest):
-    """Apply all accepted fixes from a review session."""
+# ─── POST /review/apply-and-verify ───────────────────────────────────
+@app.post("/review/apply-and-verify")
+def apply_and_verify_endpoint(request: ApplyAndVerifyRequest):
+    """Batch-set verdicts, apply accepted fixes, and run verification in one call.
+
+    Accepts a dict of {finding_index: verdict} to set verdicts, then applies
+    all accepted fixes, runs static analysis + tests, and persists verification
+    status back to the session JSON.
+    """
     import os
+    import json as _json
+    from datetime import datetime, timezone
     from src.codewalk.review.fix_applier import apply_fix_to_file
-    from src.codewalk.review.session_store import load_findings, load_session
+    from src.codewalk.review.session_store import load_session, _session_dir
     from src.codewalk.review.finding_store import find_last_review
     from src.codewalk.review.utils import get_current_branch
+    from src.codewalk.tools.static_analysis import run_static_analysis
+    from src.codewalk.tools.test_runner import run_tests
+    from src.codewalk.review.renderers.markdown import render_findings_markdown
 
     repo_path = state.get_repo_path()
     if not repo_path:
@@ -973,11 +983,27 @@ def apply_accepted_endpoint(request: ApplyAcceptedRequest):
             raise HTTPException(status_code=404, detail="Could not load latest review session")
         folder = session.folder_name or session.session_id
 
-    findings = load_findings(Path(repo_path), folder)
+    session_dir = _session_dir(Path(repo_path), folder)
+    llm_path = session_dir / "llm_findings.json"
+    if not llm_path.exists():
+        raise HTTPException(status_code=400, detail="No llm_findings.json found for this session")
+
+    findings = _json.loads(llm_path.read_text(encoding="utf-8"))
     if not findings:
         raise HTTPException(status_code=400, detail="No findings in this session")
 
-    # Filter: accepted + has code
+    # Step 1: Write verdicts from the request
+    now = datetime.now(timezone.utc).isoformat()
+    for idx_str, verdict in request.verdicts.items():
+        try:
+            idx = int(idx_str)
+        except ValueError:
+            continue
+        if 0 <= idx < len(findings) and verdict in ("accepted", "rejected"):
+            findings[idx]["user_verdict"] = verdict
+            findings[idx]["verdict_at"] = now
+
+    # Step 2: Filter accepted findings with code
     to_apply = [
         (i, f) for i, f in enumerate(findings)
         if f.get("user_verdict") == "accepted"
@@ -987,31 +1013,77 @@ def apply_accepted_endpoint(request: ApplyAcceptedRequest):
     ]
 
     if not to_apply:
-        return {"applied": [], "failed": [], "total_accepted": 0}
+        # Still persist the verdicts even if nothing to apply
+        llm_path.write_text(_json.dumps(findings, indent=2), encoding="utf-8")
+        (session_dir / "llm_findings.md").write_text(
+            render_findings_markdown(findings, title="LLM Findings", source_label="review LLM"),
+            encoding="utf-8",
+        )
+        return ApplyAndVerifyResponse(applied=[], failed=[], total_accepted=0)
 
-    applied: list[str] = []
-    failed: list[str] = []
+    # Step 3: Apply each fix
+    applied_labels: list[str] = []
+    failed_labels: list[str] = []
+    applied_indices: list[int] = []
+    modified_files: list[str] = []
 
     for idx, finding in to_apply:
         file_path = finding["file_path"]
         old_code = finding["current_code"]
         new_code = finding["recommended_code"]
 
-        # Path safety
         full_path = os.path.join(repo_path, file_path)
         resolved_repo = os.path.realpath(repo_path)
         resolved_target = os.path.realpath(full_path)
         if not resolved_target.startswith(resolved_repo + os.sep) and resolved_target != resolved_repo:
-            failed.append(f"#{idx} {file_path}: path traversal blocked")
+            failed_labels.append(f"#{idx} {file_path}: path traversal blocked")
             continue
 
         result = apply_fix_to_file(repo_path, file_path, old_code, new_code)
         if result["ok"]:
-            applied.append(f"#{idx} {file_path}: {finding.get('title', 'applied')}")
+            applied_indices.append(idx)
+            applied_labels.append(f"#{idx} {file_path}: {finding.get('title', 'applied')}")
+            if file_path not in modified_files:
+                modified_files.append(file_path)
         else:
-            failed.append(f"#{idx} {file_path}: {result.get('error', 'unknown')}")
+            failed_labels.append(f"#{idx} {file_path}: {result.get('error', 'unknown')}")
 
-    return {"applied": applied, "failed": failed, "total_accepted": len(to_apply)}
+    # Step 4: Run verification
+    sa_issues = []
+    test_result = None
+    if modified_files:
+        sa_issues = run_static_analysis(repo_path, modified_files)
+        test_result = run_tests(repo_path, modified_files)
+
+    has_sa_errors = any(
+        getattr(i, "severity", "").lower() in ("critical", "high", "warning")
+        for i in sa_issues
+    )
+    tests_passed = test_result is None or test_result.ok
+    verification_passed = not has_sa_errors and tests_passed
+
+    # Step 5: Persist status back to findings
+    sa_summary = f"{len(sa_issues)} issue(s)" if sa_issues else "clean"
+    test_summary = "pass" if tests_passed else "fail"
+
+    for idx in applied_indices:
+        findings[idx]["status"] = "fixed" if verification_passed else "still_present"
+        findings[idx]["verifier_notes"] = f"SA: {sa_summary}, Tests: {test_summary}"
+
+    llm_path.write_text(_json.dumps(findings, indent=2), encoding="utf-8")
+    (session_dir / "llm_findings.md").write_text(
+        render_findings_markdown(findings, title="LLM Findings", source_label="review LLM"),
+        encoding="utf-8",
+    )
+
+    return ApplyAndVerifyResponse(
+        applied=applied_labels,
+        failed=failed_labels,
+        total_accepted=len(to_apply),
+        static_analysis_issues=len(sa_issues),
+        tests_passed=tests_passed,
+        verification_passed=verification_passed,
+    )
 
 
 # ─── POST /review/guidelines ─────────────────────────────────────────

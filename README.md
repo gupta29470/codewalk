@@ -120,7 +120,7 @@ Review runs on **any git repo** — no `codewalk_analyze_codebase` needed. The d
 3. `codewalk_review_next_batch(session_id)` → next batch (context window is clean)
 4. Repeat until all batches done
 5. `codewalk_get_review_summary(session_id)` → structured summary for final verdict
-6. User accepts/rejects → `codewalk_finding_verdict` → `codewalk_apply_accepted`
+6. User edits `llm_findings.json` → sets `user_verdict` to `accepted`/`rejected` → `codewalk_apply_and_verify_fix` (apply + test in one step)
 7. (Optional) `codewalk_re_review()` → fresh review that hides rejected findings
 
 ### API review flow
@@ -583,9 +583,9 @@ No cloud — index runs locally via `codewalk_analyze_codebase`. After `rebuild_
 You talk to your **IDE agent**; the agent calls **Codewalk MCP tools**. Codewalk does not render UI — each host has its own approve/reject experience (Cursor approval cards, Copilot chat, Claude Code prompts, etc.). The agent must present each fix and wait for your approval through that host UI (or yes/no in chat).
 
 1. Agent runs `codewalk_run_review` (returns enriched context for the host LLM to review) or `codewalk_review_file` (runs the full pipeline on one file)
-2. For each finding: `codewalk_finding_verdict` records whether you **accept** or **reject** it
-3. Apply accepted fixes: `codewalk_apply_accepted` applies every accepted finding with `recommended_code` in one call; or use `codewalk_approve_action` → `codewalk_apply_fix(..., approval_token=<token>)` for a single fix
-4. After edits: `codewalk_verify_fix` → `codewalk_incremental_reindex`
+2. User edits `llm_findings.json`: set `user_verdict` to `accepted` or `rejected` for each finding
+3. Apply + verify accepted fixes: `codewalk_apply_and_verify_fix` applies every accepted finding and runs static analysis + tests in one call; or `codewalk_approve_action` → `codewalk_apply_fix(..., approval_token=<token>)` for a single manual fix
+4. After edits: `codewalk_incremental_reindex`
 
 Full agent rules: `src/codewalk/mcp/server.py` FastMCP `instructions` (sent on MCP connect).
 
@@ -604,10 +604,9 @@ Full agent rules: `src/codewalk/mcp/server.py` FastMCP `instructions` (sent on M
 | `codewalk_get_architecture_health` | Yes | Graph stats + cycles |
 | `codewalk_incremental_reindex`, `codewalk_refresh_analysis` | Yes | |
 | `codewalk_run_review`, `codewalk_review_file`, `codewalk_get_stack_info` | Soft / Yes | Better with index; `run_review` returns context for the host LLM |
-| `codewalk_get_review_details`, `codewalk_finding_verdict` | Yes | Reads persisted session |
+| `codewalk_get_review_details` | Yes | Reads persisted session |
 | `codewalk_approve_action` / `codewalk_apply_fix` | No / edits files | Token required for `apply_fix` |
-| `codewalk_apply_accepted` | Yes | Applies all accepted findings from a session |
-| `codewalk_verify_fix` | No | Runs static analysis + tests |
+| `codewalk_apply_and_verify_fix` | Yes | Applies accepted fixes + runs static analysis + tests in one step |
 | `codewalk_run_static_analysis` | No | ruff/mypy/eslint/etc. |
 | `codewalk_run_tests` | No | pytest/npm test/etc. |
 | `codewalk_pull_index`, `codewalk_connect_repo`, `codewalk_index_status` | Cloud config | Replace `.codewalk/` on download |
@@ -679,7 +678,11 @@ Add to `.vscode/mcp.json` in your desired project:
 
 > **Docs & guidelines:**
 > - `docs_path` indexes `.md`, `.pdf`, `.txt`, and `.rst` files for semantic search via `/docs/search` or `codewalk_search_docs`.
-> - `code_guidelines` is an optional explicit path to the review-guidelines file. If unset, Codewalk looks for `code_guidelines.md` (or `.txt`/`.rst`) inside `docs_path` and uses it automatically in `codewalk_run_review` / `POST /review`.
+> - `code_guidelines` is an optional explicit path to the review-guidelines file. Codewalk loads guidelines in this priority order:
+>   1. **Explicit file** — if `code_guidelines: path/to/file.md` is set in `codewalk.yaml`, read that file directly.
+>   2. **ChromaDB doc collection** — search the indexed docs for a `code_guidelines` document (skipped in MCP review path to avoid cold-start latency).
+>   3. **Disk scan** — scan `docs_path` for any file named `code_guidelines.md` / `.txt` / `.rst`.
+>   4. **None** — no guidelines found; review proceeds without them.
 > - For language/framework-specific review rubrics, place `.md` files in `.codewalk/rubrics/` (e.g. `.codewalk/rubrics/python.md`, `.codewalk/rubrics/python_fastapi.md`, `.codewalk/rubrics/core.md`). These override built-in rubrics.
 
 > **Customizing file filters:** Codewalk uses a deterministic core safety net ([`src/codewalk/ingestion/file_filter.py`](src/codewalk/ingestion/file_filter.py)) — no LLM involved. It always skips universally bad content (`.git`, `node_modules`, dependency/build/cache dirs, binaries, media, secrets, lock files, generated suffixes). Repo- or framework-specific exclusions (e.g., `tools/`, `scripts/`, `cdk/`, `migrations/`, story files) belong in `codewalk.yaml` (often generated by `generate-config`). If a folder or file is **not being indexed** that you need, you have three options:
@@ -831,11 +834,9 @@ You just tell the AI to analyze — **the AI handles the rest automatically**.
 │  codewalk_get_stack_info        → deterministic stack signals       │
 │  codewalk_get_review_details    → retrieve a persisted review       │
 │  codewalk_load_guidelines       → load team coding standards        │
-│  codewalk_finding_verdict       → accept/reject a finding           │
-│  codewalk_apply_accepted        → apply all accepted fixes          │
+│  codewalk_apply_and_verify_fix  → apply + static analysis + tests   │
 │  codewalk_approve_action(text)  → HITL gate (returns approval_token)│
 │  codewalk_apply_fix(..., token) → apply one fix after approval      │
-│  codewalk_verify_fix            → static analysis + tests           │
 └─────────────────────────────────────────────────────────────────────┘
 
 ┌─────────────────────────────────────────────────────────────────────┐
@@ -1283,8 +1284,8 @@ or
 | Search team docs | `@codewalk search docs for deployment` or `@codewalk_search_docs deployment` |
 | Ask docs a question | `@codewalk how do we deploy?` or `@codewalk_ask_docs how do we deploy` |
 | Deep research | `@codewalk research how error handling works across the codebase` |
-| Accept/reject findings | `@codewalk accept finding 3` → `@codewalk_finding_verdict` |
-| Apply accepted fixes | `@codewalk apply accepted fixes` or `@codewalk_apply_accepted` |
+| Accept/reject findings | User edits `llm_findings.json` → set `user_verdict` |
+| Apply accepted fixes | `@codewalk apply and verify fixes` or `codewalk_apply_and_verify_fix` |
 | Approve then apply one fix | `@codewalk approve apply fix to auth.py` → `@codewalk_approve_action` → `@codewalk_apply_fix` |
 | Ask by speaking (hands-free) | `@codewalk_voice_ask` → Copilot calls tool → `@codewalk_speak` |
 
@@ -1438,8 +1439,7 @@ All query endpoints call `state.require_index()` — auto-loads `.codewalk/` fro
 | `POST /review/cancel` | Yes | — | Cancel a running review |
 | `POST /review/file` | Yes | `codewalk_review_file` | |
 | `POST /review/guidelines` | No | `codewalk_load_guidelines` | Guidelines Chroma only |
-| `POST /review/verdict` | Yes | `codewalk_finding_verdict` | Accept/reject a finding |
-| `POST /review/apply-accepted` | Yes | `codewalk_apply_accepted` | Apply all accepted fixes |
+| `POST /review/apply-accepted` | Yes | `codewalk_apply_and_verify_fix` | Apply accepted fixes + verify |
 | `POST /review/apply` | No (repo path only) | `codewalk_apply_fix` | Caller approves in UI; no token gate |
 | `POST /docs/index`, `/docs/search`, `/docs/ask` | Doc index only | `codewalk_index_docs` etc. | |
 | `POST /chat/approve` | Yes | — | Resume/reject interrupted agent |
@@ -1956,7 +1956,6 @@ Push to `master` → build image → GHCR → deploy to Hetzner (`deploy-server.
 │   │ explain_function    get_reading_order        │       │
 │   │ get_execution_flow  get_architecture_health  │       │
 │   │ load_guidelines     apply_fix                │       │
-│   │ verify_fix                                   │       │
 │   └──────────────────────────────────────────────┘       │
 ├──────────────────────────────────────────────────────────┤
 │                   INGESTION LAYER                         │

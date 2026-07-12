@@ -1,7 +1,7 @@
 "use client";
 
 import { useState } from "react";
-import { api, ReviewIssue, FixItem } from "@/lib/api";
+import { api, ReviewIssue, FixItem, ApplyAndVerifyResponse } from "@/lib/api";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
@@ -9,7 +9,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Separator } from "@/components/ui/separator";
-import { Loader2, ShieldCheck, FileSearch, BookOpen, AlertCircle, Wrench, Plus, Trash2 } from "lucide-react";
+import { Loader2, ShieldCheck, FileSearch, BookOpen, AlertCircle, Wrench, Plus, Trash2, Check, X } from "lucide-react";
 import ReactMarkdown from "react-markdown";
 
 const SEVERITY_STYLES: Record<string, string> = {
@@ -44,6 +44,10 @@ export default function ReviewPage() {
     const [stats, setStats] = useState({ files: 0, added: 0, removed: 0 });
     const [diffLoading, setDiffLoading] = useState(false);
     const [diffError, setDiffError] = useState("");
+    const [verdicts, setVerdicts] = useState<Record<number, string>>({});
+    const [verifyLoading, setVerifyLoading] = useState(false);
+    const [verifyResult, setVerifyResult] = useState<ApplyAndVerifyResponse | null>(null);
+    const [verifyError, setVerifyError] = useState("");
 
     // File review state
     const [filePath, setFilePath] = useState("");
@@ -69,6 +73,9 @@ export default function ReviewPage() {
         setDiffError("");
         setIssues([]);
         setSummary("");
+        setVerdicts({});
+        setVerifyResult(null);
+        setVerifyError("");
         try {
             const res = await api.reviewDiff(staged, targetBranch || undefined);
             setIssues(res.issues);
@@ -85,6 +92,38 @@ export default function ReviewPage() {
         }
     }
 
+    function toggleVerdict(idx: number, verdict: string) {
+        setVerdicts((prev) => {
+            if (prev[idx] === verdict) {
+                const next = { ...prev };
+                delete next[idx];
+                return next;
+            }
+            return { ...prev, [idx]: verdict };
+        });
+    }
+
+    async function handleApplyAndVerify() {
+        const accepted = Object.entries(verdicts).filter(([, v]) => v === "accepted");
+        if (accepted.length === 0) return;
+
+        setVerifyLoading(true);
+        setVerifyError("");
+        setVerifyResult(null);
+        try {
+            const verdictPayload: Record<string, string> = {};
+            for (const [idx, v] of Object.entries(verdicts)) {
+                verdictPayload[idx] = v;
+            }
+            const res = await api.applyAndVerify("", verdictPayload);
+            setVerifyResult(res);
+        } catch (err) {
+            setVerifyError(err instanceof Error ? err.message : "Apply & verify failed");
+        } finally {
+            setVerifyLoading(false);
+        }
+    }
+
     async function handleReviewFile() {
         if (!filePath.trim()) return;
         setFileLoading(true);
@@ -94,11 +133,11 @@ export default function ReviewPage() {
             const res = await api.reviewFile(filePath.trim());
             const issueLines = res.issues.length
                 ? res.issues
-                      .map(
-                          (issue) =>
-                              `- **[${issue.severity}]** ${issue.file_path}${issue.line_number !== null ? `:${issue.line_number}` : ""} — ${issue.title}\n  ${issue.explanation}`
-                      )
-                      .join("\n")
+                    .map(
+                        (issue) =>
+                            `- **[${issue.severity}]** ${issue.file_path}${issue.line_number !== null ? `:${issue.line_number}` : ""} — ${issue.title}\n  ${issue.explanation}`
+                    )
+                    .join("\n")
                 : "✅ No issues found";
             const md = [
                 `## File Review: ${res.file_path}`,
@@ -290,7 +329,7 @@ export default function ReviewPage() {
                                                         (order[b.severity as keyof typeof order] ?? 3);
                                                 })
                                                 .map((issue, idx) => (
-                                                    <Card key={idx} className="p-3 border-kinetic-border bg-kinetic-surface-container">
+                                                    <Card key={idx} className={`p-3 border-kinetic-border bg-kinetic-surface-container ${verdicts[idx] === "accepted" ? "ring-1 ring-green-500/50" : verdicts[idx] === "rejected" ? "ring-1 ring-red-500/50 opacity-60" : ""}`}>
                                                         <div className="flex items-start gap-2">
                                                             <span className="text-lg">{SEVERITY_ICONS[issue.severity] || "⚪"}</span>
                                                             <div className="flex-1 space-y-1">
@@ -316,6 +355,24 @@ export default function ReviewPage() {
                                                                         {issue.code_snippet}
                                                                     </pre>
                                                                 )}
+                                                                <div className="flex gap-2 mt-2">
+                                                                    <Button
+                                                                        size="sm"
+                                                                        variant={verdicts[idx] === "accepted" ? "default" : "outline"}
+                                                                        className={verdicts[idx] === "accepted" ? "bg-green-600 text-white hover:bg-green-700 h-7 text-xs" : "border-green-600 text-green-600 hover:bg-green-600/10 h-7 text-xs"}
+                                                                        onClick={() => toggleVerdict(idx, "accepted")}
+                                                                    >
+                                                                        <Check className="h-3 w-3 mr-1" /> Accept
+                                                                    </Button>
+                                                                    <Button
+                                                                        size="sm"
+                                                                        variant={verdicts[idx] === "rejected" ? "default" : "outline"}
+                                                                        className={verdicts[idx] === "rejected" ? "bg-red-600 text-white hover:bg-red-700 h-7 text-xs" : "border-red-600 text-red-600 hover:bg-red-600/10 h-7 text-xs"}
+                                                                        onClick={() => toggleVerdict(idx, "rejected")}
+                                                                    >
+                                                                        <X className="h-3 w-3 mr-1" /> Reject
+                                                                    </Button>
+                                                                </div>
                                                             </div>
                                                         </div>
                                                     </Card>
@@ -331,6 +388,62 @@ export default function ReviewPage() {
                                             <span className="font-medium">Summary: </span>
                                             {summary}
                                         </div>
+                                    </>
+                                )}
+
+                                {issues.length > 0 && (
+                                    <>
+                                        <Separator className="bg-kinetic-border" />
+                                        <div className="flex items-center gap-4">
+                                            <Button
+                                                onClick={handleApplyAndVerify}
+                                                disabled={verifyLoading || Object.values(verdicts).filter(v => v === "accepted").length === 0}
+                                                className="bg-kinetic-primary text-kinetic-on-primary hover:bg-kinetic-primary/90"
+                                            >
+                                                {verifyLoading ? (
+                                                    <>
+                                                        <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                                                        Applying & Verifying...
+                                                    </>
+                                                ) : (
+                                                    `Apply & Verify (${Object.values(verdicts).filter(v => v === "accepted").length} accepted)`
+                                                )}
+                                            </Button>
+                                            <span className="text-xs text-kinetic-on-surface-variant">
+                                                {Object.values(verdicts).filter(v => v === "rejected").length} rejected,{" "}
+                                                {issues.length - Object.keys(verdicts).length} skipped
+                                            </span>
+                                        </div>
+
+                                        {verifyError && (
+                                            <div className="p-3 bg-kinetic-error/10 text-kinetic-error rounded-md text-sm flex items-center gap-2 border border-kinetic-error/20">
+                                                <AlertCircle className="h-4 w-4" />
+                                                {verifyError}
+                                            </div>
+                                        )}
+
+                                        {verifyResult && (
+                                            <Card className="p-4 border-kinetic-border bg-kinetic-surface-container">
+                                                <div className="space-y-2 text-sm">
+                                                    <div className="font-medium text-kinetic-on-surface">
+                                                        {verifyResult.verification_passed ? "✅ Verification Passed" : "⚠️ Verification Issues"}
+                                                    </div>
+                                                    <div className="text-kinetic-on-surface-variant">
+                                                        Applied: {verifyResult.applied.length} | Failed: {verifyResult.failed.length} | SA issues: {verifyResult.static_analysis_issues} | Tests: {verifyResult.tests_passed ? "✅" : "❌"}
+                                                    </div>
+                                                    {verifyResult.applied.length > 0 && (
+                                                        <ul className="list-disc pl-4 text-kinetic-node-config">
+                                                            {verifyResult.applied.map((a, i) => <li key={i}>{a}</li>)}
+                                                        </ul>
+                                                    )}
+                                                    {verifyResult.failed.length > 0 && (
+                                                        <ul className="list-disc pl-4 text-kinetic-error">
+                                                            {verifyResult.failed.map((f, i) => <li key={i}>{f}</li>)}
+                                                        </ul>
+                                                    )}
+                                                </div>
+                                            </Card>
+                                        )}
                                     </>
                                 )}
                             </div>

@@ -22,6 +22,7 @@ if write tool → interrupt + propose action
 POST /chat/approve or MCP codewalk_approve_action resumes/rejects
     ↓
 apply_fix tool writes file
+(MCP review path: codewalk_apply_and_verify_fix bypasses HITL tokens)
 ```
 
 ## Connections
