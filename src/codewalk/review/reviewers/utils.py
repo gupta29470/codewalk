@@ -110,7 +110,7 @@ def _build_file_prompt(
     parts.append(f"## File under review: {diff_file.file_path}")
     content = _read_file_content(repo_path, diff_file.file_path)
     if content:
-        truncated = smart_truncate_file_content(content, diff_file.hunks, max_tokens=8000)
+        truncated = smart_truncate_file_content(content, diff_file.hunks, max_tokens=10000)
         parts.append("```")
         parts.append(truncated)
         parts.append("```")
@@ -190,7 +190,7 @@ def _build_batch_prompt(
         parts.append(f"## File under review: {diff_file.file_path}")
         content = _read_file_content(repo_path, diff_file.file_path)
         if content:
-            truncated = smart_truncate_file_content(content, diff_file.hunks, max_tokens=4000)
+            truncated = smart_truncate_file_content(content, diff_file.hunks, max_tokens=10000)
             parts.append("```")
             parts.append(truncated)
             parts.append("```")

@@ -391,7 +391,7 @@ def render_review_context(package: ReviewContextPackage) -> str:
             lines.append(f"### {df.file_path}")
             content = _read_changed_file_content(package.repo_path, df.file_path)
             if content:
-                truncated = smart_truncate_file_content(content, df.hunks, max_tokens=8000)
+                truncated = smart_truncate_file_content(content, df.hunks, max_tokens=10000)
             else:
                 truncated = "(file not found or deleted)"
             lines.append("```")

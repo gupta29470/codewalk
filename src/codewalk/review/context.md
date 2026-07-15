@@ -11,7 +11,7 @@ This package performs LLM-based code review on diffs and single files, optionall
 | `finding_store.py` | Persistent finding store: `build_finding_store`, `save_finding_store`, `load_finding_store`, `diff_findings`, `find_last_review`. |
 | `session.py` | `ReviewSession` dataclass and `SessionStatus` enum. |
 | `session_store.py` | Save/load review sessions and findings to `.codewalk/review_session/<folder_name>/`. Includes `find_last_session()` for re-review lookup. |
-| `diff_parser.py` | `get_diff()` and `get_parsed_diff()` — git diff generation (staged + unstaged + untracked by default, two-dot branch diff) and `unidiff` parsing into `DiffFile`/`DiffHunk`/`ChangedLine`. Includes `_synthetic_untracked_diff()` for new files not yet staged. |
+| `diff_parser.py` | `get_diff()` and `get_parsed_diff()` — git diff generation (staged + unstaged + untracked by default, three-dot branch diff for target_branch) and `unidiff` parsing into `DiffFile`/`DiffHunk`/`ChangedLine`. Includes `_synthetic_untracked_diff()` for new files not yet staged. |
 | `fix_applier.py` | `apply_fix_to_file()` / `apply_fixes_batch()` — exact-replacement atomic writes with path-traversal guards, context-line disambiguation, and optional post-apply AST validation. |
 | `neighborhood.py` | `expand_neighborhood()` — blast-radius and import-neighbor context expansion around changed files. |
 | `static_analysis.py` | Deterministic static analysis (`run_static_analysis`) — graph-based risk scoring, PageRank, fan-in, cycle detection, bottleneck identification. |

@@ -7,8 +7,8 @@ from pathlib import Path
 from src.codewalk.ingestion.scanner import detect_language
 
 # Untracked file limits
-_MAX_UNTRACKED_FILE_SIZE = 512 * 1024  # 512KB
-_BINARY_CHECK_BYTES = 8192             # first 8KB
+_MAX_UNTRACKED_FILE_SIZE = 1024 * 1024  # 1MB
+_BINARY_CHECK_BYTES = 8192              # first 8KB
 
 
 @dataclass
@@ -148,8 +148,10 @@ def get_diff(
 
     Args:
         staged: If True, diff only staged changes (--staged). No untracked files.
-        target_branch: Diff working tree against this branch (two-dot).
-            Shows committed + staged + unstaged + untracked changes.
+        target_branch: Diff current branch against this branch using three-dot
+            (``target_branch...HEAD``). Shows only changes introduced by the
+            current branch since it diverged — matches GitHub's PR "Files changed"
+            view. No untracked files.
         commit: Show diff for a specific commit (SHA or ref). No untracked files.
         since_commit: Diff from ``since_commit`` to working tree + untracked.
         repo_path: Working directory for git command.
@@ -180,8 +182,11 @@ def get_diff(
         append_untracked = False
         cmd.append("--staged")
     elif target_branch:
-        # Two-dot: committed + staged + unstaged vs branch tip.
-        cmd.append(target_branch)
+        # Three-dot: only changes introduced by the current branch since it
+        # diverged from target_branch. This matches GitHub's "Files changed"
+        # view for a PR. No untracked files — they aren't part of the PR.
+        append_untracked = False
+        cmd.extend([f"{target_branch}...HEAD"])
     else:
         # Default: all local changes (staged + unstaged) vs last commit.
         if _has_head(repo_path):

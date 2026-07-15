@@ -74,7 +74,7 @@ def _extract_import_block(lines: list[str]) -> list[str]:
 def smart_truncate_file_content(
     content: str,
     hunks: list[Any],
-    max_tokens: int = 8000,
+    max_tokens: int = 10000,
     context_lines: int = 50,
 ) -> str:
     """Truncate file content intelligently around diff hunks.

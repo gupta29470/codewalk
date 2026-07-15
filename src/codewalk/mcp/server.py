@@ -32,7 +32,9 @@ Review architecture (batched, no external LLM calls):
 
   Diff coverage: by default, get_diff() returns ALL changes (staged + unstaged
   + untracked files). The only narrow mode is staged=True. target_branch uses
-  two-dot diff (committed + staged + unstaged + untracked vs branch tip).
+  three-dot diff (target_branch...HEAD) — only changes introduced by the current
+  branch since it diverged, matching GitHub's PR "Files changed" view. No
+  untracked files are included when target_branch is set.
 
   Graph-on-the-fly: if no .codewalk/graph.duckdb exists when a review starts,
   _load_graph_runtime() automatically builds the dependency graph (~3-7s) and
@@ -3638,27 +3640,25 @@ def codewalk_show_knowledge_graph(repo_path: str = "", port: int = 3000) -> str:
     # 5. Kill any existing frontend on this port.
     _kill_process_on_port(port)
 
-    # 6. Ensure a production build exists. Auto-build if the bundle is missing
-    # so the tool works even when .next was cleared by a dev restart.
-    next_dir = frontend_dir / ".next"
-    if not next_dir.exists():
-        try:
-            build_result = subprocess.run(
-                ["npm", "run", "build"],
-                cwd=str(frontend_dir),
-                capture_output=True,
-                text=True,
-                check=False,
-            )
-        except Exception as exc:
-            return f"❌ Failed to build Codewalk frontend: {exc}\nRun manually: cd {frontend_dir} && npm run build && npm start"
-        if build_result.returncode != 0:
-            return (
-                f"❌ Codewalk frontend build failed.\n"
-                f"stdout:\n{build_result.stdout}\n"
-                f"stderr:\n{build_result.stderr}\n"
-                f"Fix the build errors, then try again."
-            )
+    # 6. Always run a fresh production build so the bundle is never stale or
+    # incomplete (e.g. .next/ exists but BUILD_ID is missing after a partial build).
+    try:
+        build_result = subprocess.run(
+            ["npm", "run", "build"],
+            cwd=str(frontend_dir),
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except Exception as exc:
+        return f"❌ Failed to build Codewalk frontend: {exc}\nRun manually: cd {frontend_dir} && npm run build && npm start"
+    if build_result.returncode != 0:
+        return (
+            f"❌ Codewalk frontend build failed.\n"
+            f"stdout:\n{build_result.stdout}\n"
+            f"stderr:\n{build_result.stderr}\n"
+            f"Fix the build errors, then try again."
+        )
 
     # 7. Start the production server in the background.
     # npm start serves the pre-built .next bundle, so it boots in seconds

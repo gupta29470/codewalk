@@ -632,7 +632,7 @@ def _finding_from_dict(item: dict[str, Any]) -> Finding:
 
 
 # Per-file token cap used by _build_batch_prompt's smart_truncate_file_content.
-_FILE_TOKEN_CAP = 4000
+_FILE_TOKEN_CAP = 10000
 
 
 def _estimate_file_tokens(df: DiffFile) -> int:
