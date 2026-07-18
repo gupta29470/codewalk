@@ -61,7 +61,7 @@ Three ways to use it locally, plus optional cloud indexing:
 | **LLM token costs are high** | Without RAG, the LLM needs your entire codebase in context — slow and expensive. Codewalk embeds code into a vector DB and retrieves only the relevant chunks per query. Faster answers, fraction of the tokens. |
 | **Senior dev switches modules** | You know the auth module but now need to work on payments. Get module info, blast radius, and execution flow without bugging the payments team. |
 | **Before a refactor** | Check blast radius before touching shared code. "If I change `base_model.py`, what breaks?" — get the answer before you break prod. |
-| **PR reviews** | Run `codewalk_run_review` (MCP) or `POST /review` (API) — automated multi-stage review with OWASP security checks, blast radius warnings, and team guidelines matching. MCP mode returns enriched context so the calling model (Claude/GPT) performs the review directly — no separate LLM needed. |
+| **PR reviews** | Run `codewalk_run_review` (MCP) or `POST /review` (API) — automated review with OWASP security checks, blast radius warnings, and team guidelines matching. MCP mode returns enriched context so the calling model (Claude/GPT) performs the review directly — no separate LLM needed. |
 | **Documentation is outdated** | Codewalk analyzes the *actual code*, not stale wiki pages. Always up to date. |
 
 ---
@@ -77,7 +77,7 @@ git diff → Static Analysis (graph risk, PageRank, cycles, blast radius)
          → Batch files (3-5 per batch, grouped by feature)
          → Host LLM reviews each batch with full context
          → Submit findings to disk per batch (JSON + Markdown, context stays clean)
-         → Final summary: all findings + verdict
+         → Final summary: raw findings grouped by severity
 ```
 
 ### What makes it different
@@ -119,8 +119,8 @@ Review runs on **any git repo** — no `codewalk_analyze_codebase` needed. The d
 2. Host reviews batch → `codewalk_submit_batch_findings(session_id, [...])` → saved to disk as JSON; a hard-wrapped Markdown companion is also written for easy reading
 3. `codewalk_review_next_batch(session_id)` → next batch (context window is clean)
 4. Repeat until all batches done
-5. `codewalk_get_review_summary(session_id)` → structured summary for final verdict
-6. User edits `llm_findings.json` → sets `user_verdict` to `accepted`/`rejected` → `codewalk_apply_and_verify_fix` (apply + test in one step)
+5. `codewalk_get_review_summary(session_id)` → structured summary of raw findings
+6. User edits `llm_findings.json` → sets `user_verdict` to `accepted`/`rejected` → `codewalk_accept_and_verify_fix` returns the accepted findings → the host applies them and verifies with `codewalk_run_static_analysis` + `codewalk_run_tests`
 7. (Optional) `codewalk_re_review()` → fresh review that hides rejected findings
 
 ### API review flow
@@ -131,7 +131,14 @@ curl -X POST http://localhost:8000/review \
   -d '{}'
 ```
 
-Runs: static analysis → batch review (parallel LLM) → dedup → verify → cluster → rank → verdict.
+Runs: static analysis → batch review (parallel LLM) → raw findings JSON (`issues` + `static_issues` + `session_id`).
+
+Fix flow (Copilot-style diff review):
+
+1. Accept/reject findings in the UI
+2. `POST /review/preview-edits` — generates the proposed diff per accepted finding (dry run, no writes)
+3. Review the diffs, approve selected edits
+4. `POST /review/apply-edits` — writes approved diffs, verifies with static analysis + tests, rolls back failures (a write is refused if the file changed since the preview)
 
 ---
 
@@ -146,7 +153,7 @@ Runs: static analysis → batch review (parallel LLM) → dedup → verify → c
 | 🔄 **Execution Flow** | Entry points, module/file dependency chains, D3/ELK diagrams |
 | 🤖 **AI Chat** | LangGraph agent with 7 tools, multi-turn conversation with memory |
 | 🔎 **Semantic Search** | ChromaDB vector search on embedded code chunks (RAG) |
-| 🔬 **Code Review** | Multi-stage review pipeline: test coverage, blast radius, guidelines RAG, context-enriched deep analysis |
+| 🔬 **Code Review** | Context-enriched review pipeline: test coverage, blast radius, guidelines RAG, deep analysis |
 | 🔄 **Incremental Reindex** | Content hash comparison — only re-embeds changed files, skips unchanged |
 | 🧩 **MCP Server** | 43 MCP tools for VS Code Copilot / Claude Code / Cursor / Codex |
 | 🎙️ **Voice Interface** | Talk to your codebase — mic recording, local STT (faster-whisper), agent-driven routing (MCP + API), TTS response |
@@ -210,21 +217,69 @@ If you need deep cross-file reasoning, blast-radius analysis, or AI review insid
 
 ## 🎬 Demo
 
-### Web UI
+### Knowledge Graph UI
 
-https://github.com/user-attachments/assets/1bc99516-b3f6-4059-b463-de3c72bc850e
+https://github.com/user-attachments/assets/48d30d70-2f4b-46e9-b4ca-0feb1341e503
 
-### MCP with VS Code Copilot
+### Run Frontend from Any Repo
 
-https://github.com/user-attachments/assets/a1dfd347-1135-47d2-b01d-3d995d86208e
+https://github.com/user-attachments/assets/ab140781-0e2f-432e-bc14-939eb82112d3
 
-### REST API
+### MCP — Analyze Codebase
 
-> 🎥 **[Video coming soon]**
+https://github.com/user-attachments/assets/a85ec23b-eba6-4ff2-9c49-553fda4ab8bc
 
-### Voice Interface
+### MCP — Overview
 
-https://github.com/user-attachments/assets/51d41d48-970f-437e-8c50-e6a104d71e0e
+https://github.com/user-attachments/assets/d65d23c6-38bc-4610-b5d0-62669d85e5fd
+
+### MCP — Search Codebase
+
+https://github.com/user-attachments/assets/23244594-42b5-4a39-9f30-d2e2ff10454f
+
+### MCP — Explain Function
+
+https://github.com/user-attachments/assets/252a4738-3a22-4759-94f3-0ac41f7f0c09
+
+### MCP — Blast Radius
+
+https://github.com/user-attachments/assets/052fa64b-e421-48ed-b65c-29609e0caf32
+
+### MCP — Run Review
+
+https://github.com/user-attachments/assets/de36cdff-610b-4f4b-a422-7cff737fef2f
+
+### MCP — Ask Docs
+
+https://github.com/user-attachments/assets/2b143e1c-f485-43b0-a750-aec0da627ea1
+
+### API — Overview
+
+https://github.com/user-attachments/assets/f3ecaf4f-b0f0-4840-922e-806e840e3daf
+
+### API — Modules & Module Details
+
+https://github.com/user-attachments/assets/b145f967-137b-43fc-873a-565c600dbb6b
+
+### API — Reading Order
+
+https://github.com/user-attachments/assets/31f36fe9-67ea-46bc-a2b8-e64b982145d5
+
+### API — Code Review
+
+https://github.com/user-attachments/assets/321870f0-2a12-4b48-8ed2-f5956ee3ad2e
+
+### API — Architecture
+
+https://github.com/user-attachments/assets/1246efec-c52c-4b7d-bb63-c5eb72607fd2
+
+### API — Blast Radius
+
+https://github.com/user-attachments/assets/e7aba067-e497-4a00-83a1-6d53f473d555
+
+### API — Team Docs Ask
+
+https://github.com/user-attachments/assets/1b2c88cb-5eab-4b7c-8487-42ae737ad90e
 
 ---
 
@@ -584,7 +639,7 @@ You talk to your **IDE agent**; the agent calls **Codewalk MCP tools**. Codewalk
 
 1. Agent runs `codewalk_run_review` (returns enriched context for the host LLM to review) or `codewalk_review_file` (runs the full pipeline on one file)
 2. User edits `llm_findings.json`: set `user_verdict` to `accepted` or `rejected` for each finding
-3. Apply + verify accepted fixes: `codewalk_apply_and_verify_fix` applies every accepted finding and runs static analysis + tests in one call; or `codewalk_approve_action` → `codewalk_apply_fix(..., approval_token=<token>)` for a single manual fix
+3. Apply + verify accepted fixes: `codewalk_accept_and_verify_fix(session_id)` returns every accepted finding with instructions — the host LLM applies them with its own editing tools, then verifies with `codewalk_run_static_analysis` + `codewalk_run_tests`. Codewalk never edits files over MCP.
 4. After edits: `codewalk_incremental_reindex`
 
 Full agent rules: `src/codewalk/mcp/server.py` FastMCP `instructions` (sent on MCP connect).
@@ -605,8 +660,7 @@ Full agent rules: `src/codewalk/mcp/server.py` FastMCP `instructions` (sent on M
 | `codewalk_incremental_reindex`, `codewalk_refresh_analysis` | Yes | |
 | `codewalk_run_review`, `codewalk_review_file`, `codewalk_get_stack_info` | Soft / Yes | Better with index; `run_review` returns context for the host LLM |
 | `codewalk_get_review_details` | Yes | Reads persisted session |
-| `codewalk_approve_action` / `codewalk_apply_fix` | No / edits files | Token required for `apply_fix` |
-| `codewalk_apply_and_verify_fix` | Yes | Applies accepted fixes + runs static analysis + tests in one step |
+| `codewalk_accept_and_verify_fix` | Yes | Returns accepted findings; host applies them itself, then verifies with run_static_analysis/run_tests |
 | `codewalk_run_static_analysis` | No | ruff/mypy/eslint/etc. |
 | `codewalk_run_tests` | No | pytest/npm test/etc. |
 | `codewalk_pull_index`, `codewalk_connect_repo`, `codewalk_index_status` | Cloud config | Replace `.codewalk/` on download |
@@ -834,9 +888,7 @@ You just tell the AI to analyze — **the AI handles the rest automatically**.
 │  codewalk_get_stack_info        → deterministic stack signals       │
 │  codewalk_get_review_details    → retrieve a persisted review       │
 │  codewalk_load_guidelines       → load team coding standards        │
-│  codewalk_apply_and_verify_fix  → apply + static analysis + tests   │
-│  codewalk_approve_action(text)  → HITL gate (returns approval_token)│
-│  codewalk_apply_fix(..., token) → apply one fix after approval      │
+│  codewalk_accept_and_verify_fix → return accepted fixes to apply    │
 └─────────────────────────────────────────────────────────────────────┘
 
 ┌─────────────────────────────────────────────────────────────────────┐
@@ -1285,8 +1337,7 @@ or
 | Ask docs a question | `@codewalk how do we deploy?` or `@codewalk_ask_docs how do we deploy` |
 | Deep research | `@codewalk research how error handling works across the codebase` |
 | Accept/reject findings | User edits `llm_findings.json` → set `user_verdict` |
-| Apply accepted fixes | `@codewalk apply and verify fixes` or `codewalk_apply_and_verify_fix` |
-| Approve then apply one fix | `@codewalk approve apply fix to auth.py` → `@codewalk_approve_action` → `@codewalk_apply_fix` |
+| Apply accepted fixes | `@codewalk apply and verify fixes` → `codewalk_accept_and_verify_fix` → host applies + verifies |
 | Ask by speaking (hands-free) | `@codewalk_voice_ask` → Copilot calls tool → `@codewalk_speak` |
 
 ---
@@ -1439,8 +1490,7 @@ All query endpoints call `state.require_index()` — auto-loads `.codewalk/` fro
 | `POST /review/cancel` | Yes | — | Cancel a running review |
 | `POST /review/file` | Yes | `codewalk_review_file` | |
 | `POST /review/guidelines` | No | `codewalk_load_guidelines` | Guidelines Chroma only |
-| `POST /review/apply-accepted` | Yes | `codewalk_apply_and_verify_fix` | Apply accepted fixes + verify |
-| `POST /review/apply` | No (repo path only) | `codewalk_apply_fix` | Caller approves in UI; no token gate |
+| `POST /review/preview-edits` + `POST /review/apply-edits` | Yes | `codewalk_accept_and_verify_fix` | API: preview diffs → user approves → write + verify. MCP: returns accepted findings for the host to apply |
 | `POST /docs/index`, `/docs/search`, `/docs/ask` | Doc index only | `codewalk_index_docs` etc. | |
 | `POST /chat/approve` | Yes | — | Resume/reject interrupted agent |
 | `POST /voice/ask` | Yes | `codewalk_voice_ask` | |
@@ -1677,8 +1727,7 @@ curl -X POST http://localhost:8000/review \
 **Response:**
 ```json
 {
-  "verdict": "request_changes",
-  "verdict_reason": "Critical security issue found that must be fixed before merge.",
+  "schema_version": "2.0",
   "issues": [
     {
       "severity": "blocker",
@@ -1693,26 +1742,19 @@ curl -X POST http://localhost:8000/review \
       "confidence": "high"
     }
   ],
-  "summary": "Found 1 critical issue in 3 files (+45 / -12 lines)",
-  "narrative_summary": "",
+  "static_issues": [],
   "files_reviewed": 3,
   "lines_added": 45,
   "lines_removed": 12,
-  "session_id": "25-June-2026-143052-feature-x-to-main",
-  "architecture_flags": {},
-  "schema_version": "2.0",
-  "merge_blockers": ["JWT secret hardcoded"],
-  "clusters": [],
-  "fixed_count": 0,
-  "new_count": 1,
-  "still_present_count": 0
+  "session_id": "sess-abc123",
+  "folder_name": "25-June-2026-143052-feature-x-to-main",
+  "architecture_flags": {}
 }
 ```
 
 - `staged`: If `true`, review ONLY staged changes (narrow mode). Default: `false` (reviews staged + unstaged + untracked).
 - `target_branch`: Diff working tree against a branch (e.g. `"master"`). Shows committed + staged + unstaged + untracked. Default: `null` (local changes since last commit).
 - `incremental`: Carry forward previous findings when `true`. Default: `false`.
-- `narrative_summary`: Set `true` for an LLM-written narrative summary (slower). Default: `false`.
 
 #### `POST /review/file` — Review a single file
 
@@ -1725,8 +1767,7 @@ curl -X POST http://localhost:8000/review/file \
 **Response:**
 ```json
 {
-  "verdict": "approve_with_nits",
-  "verdict_reason": "Non-critical issues found. Fix recommended but not blocking.",
+  "schema_version": "2.0",
   "issues": [
     {
       "severity": "suggestion",
@@ -1739,8 +1780,13 @@ curl -X POST http://localhost:8000/review/file \
       "code_snippet": "for chunk in chunks:"
     }
   ],
-  "summary": "Clean change with one minor style suggestion.",
-  "file_path": "src/codewalk/pipeline.py"
+  "static_issues": [],
+  "files_reviewed": 1,
+  "lines_added": 2,
+  "lines_removed": 0,
+  "session_id": "sess-file-123",
+  "folder_name": "25-June-2026-143052-feature-x-to-main",
+  "architecture_flags": {}
 }
 ```
 
@@ -1988,12 +2034,12 @@ Push to `master` → build image → GHCR → deploy to Hetzner (`deploy-server.
 ├──────────────────────────────────────────────────────────┤
 │                    REVIEW LAYER                          │
 │                                                          │
-│   diff_parser.py → reviewers/ → pipeline/ → engine.py    │
-│   (git diff         (pluggable         (cluster/rank/    │
-│    parsing)          reviewers)         verify/summary)   │
+│   diff_parser.py → reviewers/ → engine.py                │
+│   (git diff         (unified          (orchestration +   │
+│    parsing)          structured review) persistence)      │
 │                                                          │
-│   report.py ────────► fix_applier.py                     │
-│   (Finding dataclasses)  (approved fix application)       │
+│   report.py ────────► editor.py                          │
+│   (Finding dataclasses)  (unified fix application)        │
 ├──────────────────────────────────────────────────────────┤
 │                   EMBEDDING LAYER                        │
 │                                                          │
@@ -2078,12 +2124,10 @@ codewalk/
 │   │   ├── engine.py              #   Main review orchestrator (run_review)
 │   │   ├── report.py              #   Finding, ReviewReport, Severity, Category
 │   │   ├── diff_parser.py         #   git diff → parsed DiffFile objects
-│   │   ├── fix_applier.py         #   Apply approved fixes safely
-│   │   ├── finding_store.py       #   Persist review findings
-│   │   ├── session_store.py       #   Persist review sessions
-│   │   ├── reviewers/             #   Pluggable reviewers (generic, security, …)
-│   │   ├── pipeline/              #   Post-processing (cluster/rank/verify/summary)
-│   │   └── renderers/             #   Output formatters (markdown/cli/api)
+│   │   ├── editor.py              #   Unified fix application (exact + LLM-as-editor)
+│   │   ├── session_store.py       #   Persist review sessions and findings
+│   │   ├── reviewers/             #   Unified structured review runner
+│   │   └── renderers/             #   Output formatters (markdown/api)
 │   ├── api/                       # FastAPI REST
 │   │   ├── main.py                #   35+ endpoints
 │   │   ├── models.py              #   Pydantic schemas

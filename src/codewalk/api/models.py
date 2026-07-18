@@ -71,9 +71,17 @@ class ReviewRequest(BaseModel):
     staged: bool = False
     target_branch: str | None = None
     commit: str | None = None
-    incremental: bool = False
-    force_full_review: bool = False
-    narrative_summary: bool = False
+    repo_path: str | None = None
+
+
+class ReReviewRequest(BaseModel):
+    """POST /review/re-review — re-run a review using a previous session's findings as context."""
+    session_id: str
+    repo_path: str | None = None
+    staged: bool = False
+    target_branch: str | None = None
+    commit: str | None = None
+
 
 class CancelReviewRequest(BaseModel):
     """POST /review/cancel — request body."""
@@ -84,6 +92,23 @@ class CancelReviewResponse(BaseModel):
     cancelled: bool
     message: str
 
+class ReviewFileRequest(BaseModel):
+    """POST /review/file — request body."""
+    file_path: str
+    repo_path: str | None = None
+
+
+class ReviewFileResponse(BaseModel):
+    """POST /review/file — response body."""
+    file_path: str
+    issues: list[dict]
+    static_issues: list[dict] = []
+    files_reviewed: int
+    lines_added: int
+    lines_removed: int
+    session_id: str | None = None
+
+
 class ReviewStreamRequest(BaseModel):
     """POST /review/stream — request body.
 
@@ -93,51 +118,59 @@ class ReviewStreamRequest(BaseModel):
     staged: bool = False
     target_branch: str | None = None
     commit: str | None = None
-    incremental: bool = False
-    force_full_review: bool = False
-    narrative_summary: bool = False
+    repo_path: str | None = None
 
 class ReviewResponse(BaseModel):
     """POST /review — response body."""
-    verdict: str
-    verdict_reason: str
     issues: list[dict]
-    summary: str
-    narrative_summary: str = ""
+    static_issues: list[dict] = []
     files_reviewed: int
     lines_added: int
     lines_removed: int
     session_id: str | None = None
     architecture_flags: dict[str, Any] | None = None
     schema_version: str = "2.0"
-    merge_blockers: list[str] = []
-    clusters: list[dict] = []
-    fixed_count: int = 0
-    new_count: int = 0
-    still_present_count: int = 0
 
-class ReviewVerdictRequest(BaseModel):
-    """POST /review/verdict — record user verdict on a finding."""
-    session_id: str
-    finding_index: int
-    verdict: str  # "accepted" | "rejected"
-    reason: str = ""
-
-class ReviewVerdictResponse(BaseModel):
-    """POST /review/verdict — response."""
-    success: bool
-    message: str
-
-class ApplyAndVerifyRequest(BaseModel):
-    """POST /review/apply-and-verify — batch verdicts + apply + verify in one call."""
-    session_id: str = ""  # empty = use latest session on branch
+class PreviewEditsRequest(BaseModel):
+    """POST /review/preview-edits — batch verdicts + generate edit previews without writing."""
+    session_id: str  # required: session to load findings from
     verdicts: dict[str, str] = {}  # {finding_index: "accepted"|"rejected"}, unset = null
 
-class ApplyAndVerifyResponse(BaseModel):
-    """POST /review/apply-and-verify — response."""
+
+class EditPreview(BaseModel):
+    """One previewed edit (no writes performed)."""
+    finding_index: int
+    file_path: str
+    original_content: str | None = None
+    modified_content: str | None = None
+    error: str | None = None
+
+
+class PreviewEditsResponse(BaseModel):
+    """POST /review/preview-edits — response."""
+    previews: list[EditPreview]
+    total_accepted: int
+
+
+class ApprovedEdit(BaseModel):
+    """One user-approved edit to write to disk."""
+    finding_index: int
+    file_path: str
+    modified_content: str
+    original_content: str | None = None  # preview snapshot; write refused if file changed since
+
+
+class ApplyEditsRequest(BaseModel):
+    """POST /review/apply-edits — write user-approved edits + verify."""
+    session_id: str
+    edits: list[ApprovedEdit]
+
+
+class ApplyEditsResponse(BaseModel):
+    """POST /review/apply-edits — response."""
     applied: list[str]
     failed: list[str]
-    total_accepted: int
+    total: int
     static_analysis_issues: int = 0
     tests_passed: bool | None = None
     verification_passed: bool | None = None
@@ -230,34 +263,6 @@ class ResearchResponse(BaseModel):
     report: str
     sources: list[str]
     diagram: ResearchDiagram | None = None
-
-class FixItem(BaseModel):
-    """A single code fix to apply."""
-    file_path: str
-    old_code: str
-    new_code: str
-class ApplyFixesRequest(BaseModel):
-    """POST /review/apply — request body."""
-    fixes: list[FixItem]
-    continue_on_error: bool = False
-    validate_only: bool = False
-    run_formatter: bool = True
-
-
-class AppliedFix(BaseModel):
-    """One successfully applied fix."""
-    file_path: str
-    old_code: str
-    new_code: str
-    message: str
-
-
-class ApplyFixesResponse(BaseModel):
-    """POST /review/apply — response body."""
-    applied: list[AppliedFix]
-    failed: list[dict] | None = None
-    total: int
-
 
 class StaticAnalysisIssue(BaseModel):
     """One normalized static-analysis finding."""

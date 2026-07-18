@@ -3,9 +3,9 @@
 Provides two main entry points:
   - `run_review_context()` builds the review context package and returns it to the
     caller without running a review LLM. Used by the MCP `codewalk_run_review` tool.
-  - `run_review()` runs the full multi-stage review pipeline (static analysis,
-    neighborhood expansion, reviewer batches, post-processing, verdict). Used by
-    the API `POST /review` endpoint and by `codewalk_review_file`.
+  - `run_review()` runs the review pipeline (static analysis, neighborhood expansion,
+    reviewer batches) and returns raw findings. Used by the API `POST /review`
+    endpoint and by `codewalk_review_file`.
 """
 from __future__ import annotations
 
@@ -33,30 +33,16 @@ from src.codewalk.review.cancellation import (
 from src.codewalk.review.diff_parser import DiffFile
 from src.codewalk.review.static_analysis import StaticAnalysisResult, run_static_analysis
 from src.codewalk.config import get_llm as create_review_llm
-from src.codewalk.review.finding_store import (
-    build_finding_store,
-    diff_findings,
-    find_last_review,
-    load_finding_store,
-    save_finding_store,
-)
-from src.codewalk.review.metrics import compute_metrics
 from src.codewalk.review.neighborhood import (
     NeighborhoodResult,
     expand_neighborhood,
 )
-from src.codewalk.review.pipeline import (
-    cluster,
-    compute_verdict,
-    deduplicate,
-    rank,
-    verify,
-    write_narrative_summary,
-    write_summary,
+from src.codewalk.review.context_builder import (
+    _UNIFIED_REVIEW_SYSTEM_PROMPT,
+    build_unified_batch_context,
 )
-import dataclasses
-
-from src.codewalk.review.reviewers import GenericReviewer, ReviewContext, ReviewerRegistry
+from src.codewalk.review.reviewers import ReviewContext
+from src.codewalk.review.reviewers.utils import run_structured_review
 from src.codewalk.review.report import (
     ArchitectureFlags,
     Category,
@@ -66,17 +52,14 @@ from src.codewalk.review.report import (
     ReviewReport,
     Severity,
     Source,
-    Verdict,
 )
 from src.codewalk.review.rubric_loader import Rubrics, build_rubrics
-from src.codewalk.review.renderers.markdown import render_findings_markdown
 from src.codewalk.review.session import ReviewSession, SessionStatus
 from src.codewalk.review.session_store import (
-    append_findings,
     load_findings,
-    save_checkpoint,
     save_findings,
     save_session,
+    save_static_findings,
 )
 from src.codewalk.review.utils import (
     build_session_folder_name,
@@ -230,39 +213,6 @@ class _NullAnnotation:
     risk_score: float = 0.0
 
 
-def _file_content_hash(repo_path: Path, file_path: str) -> str:
-    """Return SHA256 hex digest of a file's current content, or '' if missing."""
-    import hashlib
-
-    full = repo_path / file_path
-    try:
-        return hashlib.sha256(full.read_bytes()).hexdigest()
-    except Exception:
-        return ""
-
-
-def _compute_changed_files(
-    repo_path: Path,
-    diff_files: list[DiffFile],
-    previous_hashes: dict[str, str],
-) -> set[str]:
-    """Determine which diff files have actually changed since the last review.
-
-    A file is considered changed if it is new (not in previous_hashes) or its
-    current content hash differs from the stored hash.
-    """
-    changed: set[str] = set()
-    for df in diff_files:
-        previous = previous_hashes.get(df.file_path)
-        if previous is None:
-            changed.add(df.file_path)
-            continue
-        current = _file_content_hash(repo_path, df.file_path)
-        if current != previous:
-            changed.add(df.file_path)
-    return changed
-
-
 def _prepare_review_inputs(
     repo_path: Path,
     target_branch: str | None,
@@ -270,7 +220,6 @@ def _prepare_review_inputs(
     staged: bool,
     codewalk_yaml: Any,
     session: ReviewSession,
-    since_commit: str | None = None,
     use_cache: bool = True,
     *,
     prebuilt_context: tuple[
@@ -292,7 +241,6 @@ def _prepare_review_inputs(
             commit,
             staged,
             codewalk_yaml,
-            since_commit=since_commit,
             use_cache=use_cache,
         )
 
@@ -507,6 +455,11 @@ def _build_graph_only(repo_path: Path) -> None:
     logger.info(f"[review] Graph ready at {db_path}")
 
 
+# Public alias so API/MCP can build just the dependency graph + knowledge graph
+# without requiring a full ChromaDB embedding index.
+build_graph_only = _build_graph_only
+
+
 def _load_graph_runtime(repo_path: Path) -> tuple[Any | None, bool]:
     """Return a GraphRuntime for the repo and whether we own its store.
 
@@ -553,7 +506,6 @@ def _build_common_context(
     commit: str | None,
     staged: bool,
     codewalk_yaml: Any | None,
-    since_commit: str | None = None,
     use_cache: bool = True,
 ) -> tuple[StaticAnalysisResult, list[DiffFile], NeighborhoodResult, list[Finding], ArchitectureFlags, list[str]]:
     """Shared deterministic work used by both MCP and API paths.
@@ -569,7 +521,6 @@ def _build_common_context(
             commit=commit,
             staged=staged,
             graph_runtime=graph_runtime,
-            since_commit=since_commit,
             use_cache=use_cache,
         )
 
@@ -619,7 +570,6 @@ def _finding_from_dict(item: dict[str, Any]) -> Finding:
         source=Source(item.get("source", "llm")),
         subcategory=item.get("subcategory"),
         evidence=item.get("evidence", []),
-        cluster_id=item.get("cluster_id"),
         verifier_notes=item.get("verifier_notes"),
         status=item.get("status", "new"),
         user_verdict=item.get("user_verdict"),
@@ -631,14 +581,14 @@ def _finding_from_dict(item: dict[str, Any]) -> Finding:
     return finding
 
 
-# Per-file token cap used by _build_batch_prompt's smart_truncate_file_content.
+# Per-file token cap used by build_unified_batch_context's smart_truncate_file_content.
 _FILE_TOKEN_CAP = 10000
 
 
 def _estimate_file_tokens(df: DiffFile) -> int:
     """Estimate tokens for a single file in the batch prompt.
 
-    Accounts for the truncation cap applied by _build_batch_prompt and caches
+    Accounts for the truncation cap applied by build_unified_batch_context and caches
     the result on the DiffFile object for O(1) repeated access.
     """
     cached = getattr(df, "_cached_prompt_tokens", None)
@@ -665,8 +615,8 @@ def _estimate_batch_prompt_tokens(
 ) -> int:
     """Estimate total tokens for a batch prompt.
 
-    Uses cached per-file estimates and accounts for the 4000-token truncation
-    cap that _build_batch_prompt applies. No disk I/O.
+    Uses cached per-file estimates and accounts for the 10000-token truncation
+    cap that build_unified_batch_context applies. No disk I/O.
     """
     from src.codewalk.review.utils import count_tokens
 
@@ -729,12 +679,13 @@ def _run_review_in_batches(
     cancel_event: threading.Event | None = None,
     max_parallel_batches: int = 4,
     max_tokens_per_batch: int = 200_000,
+    previous_findings: list[Finding] | None = None,
 ) -> ReviewReport:
-    """Run reviewers on all diff files using batched, parallel LLM calls.
+    """Run the review LLM on all diff files using batched, parallel calls.
 
-    Files are grouped into token-budgeted batches. Each batch is reviewed by the
-    generic and security reviewers in a single LLM call. Batches run in parallel
-    up to ``max_parallel_batches``.
+    Files are grouped into token-budgeted batches. Each batch is reviewed once
+    using the unified rubric-based context. Batches run in parallel up to
+    ``max_parallel_batches``.
     """
     import os
     from concurrent.futures import ThreadPoolExecutor
@@ -767,27 +718,11 @@ def _run_review_in_batches(
         stack = detect_stack(repo_path, file_tree, changed_file_paths, llm=None)
         stack_header = format_stack_context_header(stack)
 
-    context = ReviewContext(
-        repo_path=repo_path,
-        file_tree=file_tree,
-        guidelines=code_guidelines_text,
-        user_prompt=user_prompt,
-        prompt_text="",
-        rubrics=rubrics,
-        neighborhood=neighborhood,
-        cancel_event=cancel_event,
-        extra={
-            "risk_annotations": static_result.risk_annotations,
-            "stack_header": stack_header,
-        },
-    )
-
     # Auto findings (deterministic) tied to current diff files.
-    all_findings: list[Finding] = []
-    all_findings.extend([
+    deterministic_findings = [
         f for f in static_findings
         if f.file_path in relevant_files
-    ])
+    ]
 
     # Sort files by risk so the most impactful files are reviewed first.
     def _risk_score(df: DiffFile) -> float:
@@ -798,10 +733,24 @@ def _run_review_in_batches(
 
     sorted_files = sorted(diff_files, key=_risk_score, reverse=True)
 
-    # Use a sample prompt for batch sizing. The generic prompt is typically the
-    # largest because it includes all rubrics.
-    sample_reviewer = GenericReviewer()
-    reviewer_prompt = sample_reviewer.build_prompt(context)
+    # Use the unified system prompt for batch sizing.
+    reviewer_prompt = _UNIFIED_REVIEW_SYSTEM_PROMPT
+
+    context = ReviewContext(
+        repo_path=repo_path,
+        file_tree=file_tree,
+        guidelines=code_guidelines_text,
+        user_prompt=user_prompt,
+        prompt_text="",
+        rubrics=rubrics,
+        neighborhood=neighborhood,
+        previous_findings=previous_findings or [],
+        cancel_event=cancel_event,
+        extra={
+            "risk_annotations": static_result.risk_annotations,
+            "stack_header": stack_header,
+        },
+    )
 
     batches = _make_batches(
         repo_path, sorted_files, context, reviewer_prompt, max_tokens_per_batch
@@ -813,15 +762,33 @@ def _run_review_in_batches(
     def _review_batch(batch: list[DiffFile]) -> tuple[list[Finding], int]:
         if cancel_event is not None and cancel_event.is_set():
             raise ReviewCancelledError(getattr(cancel_event, "_review_id", "unknown"))
-        # Thread safety: each batch gets its own context copy with independent extra dict
-        batch_context = dataclasses.replace(context, extra=dict(context.extra))
-        registry = ReviewerRegistry()
-        return registry.review_batch(batch, batch_context, llm)
+        batch_context = build_unified_batch_context(
+            repo_path=repo_path,
+            batch=batch,
+            static_result=static_result,
+            stack_header=stack_header,
+            rubrics=rubrics,
+            guidelines=code_guidelines_text,
+            user_prompt=user_prompt,
+            previous_findings=previous_findings or [],
+            cancel_event=cancel_event,
+        )
+        try:
+            return run_structured_review(
+                llm,
+                batch_context,
+                cancel_event=cancel_event,
+                system_prompt=_UNIFIED_REVIEW_SYSTEM_PROMPT,
+            )
+        except Exception as e:
+            logger.warning(f"[review] batch failed, continuing with zero findings: {e}")
+            return [], 0
 
+    llm_findings: list[Finding] = []
     if len(batches) == 1 or max_parallel <= 1:
         for batch in batches:
             batch_findings, batch_tokens = _review_batch(batch)
-            all_findings.extend(batch_findings)
+            llm_findings.extend(batch_findings)
             total_token_usage += batch_tokens
     else:
         with ThreadPoolExecutor(max_workers=max_parallel) as executor:
@@ -829,7 +796,7 @@ def _run_review_in_batches(
             for future in futures:
                 try:
                     batch_findings, batch_tokens = future.result()
-                    all_findings.extend(batch_findings)
+                    llm_findings.extend(batch_findings)
                     total_token_usage += batch_tokens
                 except ReviewCancelledError:
                     raise
@@ -844,10 +811,8 @@ def _run_review_in_batches(
     total_removed = sum(df.removed_lines for df in diff_files)
 
     return ReviewReport(
-        verdict=Verdict.APPROVE,
-        verdict_reason="batch review complete",
-        executive_summary="",
-        findings=all_findings,
+        findings=llm_findings,
+        deterministic_findings=deterministic_findings,
         architecture_flags=architecture_flags,
         files_reviewed=len(diff_files),
         lines_added=total_added,
@@ -991,30 +956,30 @@ def run_review(
     commit: str | None = None,
     staged: bool = False,
     llm: BaseChatModel | None = None,
-    incremental: bool = False,
-    force_full_review: bool = False,
     review_id: str | None = None,
     progress_reporter: "ReviewProgressReporter | None" = None,
-    narrative_summary: bool = False,
     file_filter: list[str] | None = None,
+    previous_findings: list[Finding] | None = None,
+    incremental: bool = False,
+    force_full_review: bool = False,
 ) -> ReviewReport:
-    """Run the full one-stop review pipeline and return a ReviewReport (API path).
+    """Run the review LLM on the current diff and return raw findings (API path).
 
     Args:
-        incremental: If True, load the last persisted review on this branch and
-            review only files changed since that review, merging new findings
-            with the persisted history.
-        force_full_review: If True, ignore cache and previous review state and
-            run a fresh full review.
         review_id: Optional identifier for this review run. If provided, the
             review can be cancelled via the cancellation API and the engine will
             check for cancellation between phases.
         progress_reporter: Optional reporter used to stream phase progress.
-        narrative_summary: If True, generate an optional LLM-written narrative
-            summary after the deterministic verdict is computed.
         file_filter: Optional list of file paths to review. When provided, only
             these files are reviewed (others are excluded from the diff). Used
             by codewalk_review_file for single-file deep review.
+        previous_findings: Optional findings from an earlier review. When
+            provided, the LLM is asked to classify each finding as fixed, new,
+            or still present relative to these previous findings.
+        incremental: If True, load findings from the most recent session on the
+            current branch and pass them as previous_findings.
+        force_full_review: If True, ignore incremental/previous findings and run
+            a full review.
     """
     from src.codewalk.review.progress import ReviewProgressReporter
 
@@ -1030,18 +995,23 @@ def run_review(
         cancel_event._review_id = review_id  # type: ignore[attr-defined]
     final_report: ReviewReport | None = None
     codewalk_yaml = load_codewalk_yaml(str(repo_path))
-    current_branch = get_current_branch(repo_path)
-
-    previous_store = None
-    since_commit: str | None = None
-    previous_unchanged_findings: list[Finding] = []
-
-    if incremental and not force_full_review:
-        previous_store = find_last_review(repo_path, current_branch)
-        if previous_store and previous_store.commit_sha:
-            since_commit = previous_store.commit_sha
 
     _report("started", "Review started", {"review_id": review_id})
+
+    # Load previous findings for incremental reviews unless caller already supplied them.
+    if incremental and not force_full_review and previous_findings is None:
+        try:
+            from src.codewalk.review.session_store import find_last_session, load_findings
+
+            current_branch = get_current_branch(repo_path)
+            last_session = find_last_session(repo_path, current_branch)
+            if last_session:
+                folder = last_session.folder_name or last_session.session_id
+                previous_findings = [
+                    _finding_from_dict(f) for f in load_findings(repo_path, folder)
+                ]
+        except Exception:
+            previous_findings = None
 
     check_cancelled(review_id)
     static_result, diff_files, neighborhood, static_findings, architecture_flags, file_tree = _build_common_context(
@@ -1050,8 +1020,7 @@ def run_review(
         commit,
         staged,
         codewalk_yaml,
-        since_commit=since_commit,
-        use_cache=not force_full_review,
+        use_cache=True,
     )
     _report(
         "static_analysis_complete",
@@ -1065,58 +1034,28 @@ def run_review(
         diff_files = [df for df in diff_files if df.file_path in filter_set]
         static_findings = [f for f in static_findings if f.file_path in filter_set]
 
-    # In incremental mode, narrow the diff to files whose content has actually
-    # changed since the last review.  Files with the same hash are carried
-    # forward as still_present and removed from the LLM batch.
-    previous_unchanged_findings: list[Finding] = []
-    if incremental and previous_store:
-        changed_files = _compute_changed_files(repo_path, diff_files, previous_store.file_hashes)
-        diff_files = [df for df in diff_files if df.file_path in changed_files]
-        static_findings = [f for f in static_findings if f.file_path in changed_files]
-        architecture_flags = _build_architecture_flags(static_result, changed_files)
-        previous_unchanged_findings = [
-            f for f in previous_store.findings
-            if f.file_path not in changed_files
-        ]
-        for f in previous_unchanged_findings:
-            f.status = "still_present"
-
-    if not diff_files and not previous_unchanged_findings:
+    if not diff_files:
         _report("complete", "No diff found to review")
         if review_id:
             end_review(review_id)
         return ReviewReport(
-            verdict=Verdict.APPROVE,
-            verdict_reason="no changes detected",
-            executive_summary="No diff found to review.",
+            findings=[],
+            deterministic_findings=[],
             files_reviewed=0,
             lines_added=0,
             lines_removed=0,
-        )
-
-    if not diff_files:
-        # Only unchanged findings from a previous review.
-        _report("complete", "No new changes; carrying forward previous findings")
-        if review_id:
-            end_review(review_id)
-        return ReviewReport(
-            verdict=Verdict.APPROVE,
-            verdict_reason="no new changes detected",
-            executive_summary="No new changes since the last review.",
-            findings=previous_unchanged_findings,
-            clusters=previous_store.clusters if previous_store else [],
-            architecture_flags=architecture_flags,
-            files_reviewed=0,
-            lines_added=0,
-            lines_removed=0,
-            fixed_count=0,
-            new_count=0,
-            still_present_count=len(previous_unchanged_findings),
         )
 
     llm_instance = llm or create_review_llm(temperature=0)
 
     session = _create_review_session(repo_path, target_branch, commit, staged)
+
+    # Persist deterministic findings FIRST (same flow as MCP), then run the LLM.
+    save_static_findings(
+        repo_path,
+        session.folder_name,
+        [_finding_to_dict(f) for f in static_findings],
+    )
 
     try:
         check_cancelled(review_id)
@@ -1127,12 +1066,12 @@ def run_review(
             staged,
             codewalk_yaml,
             session,
-            since_commit=since_commit,
-            use_cache=not force_full_review,
+            use_cache=True,
             prebuilt_context=(static_result, diff_files, neighborhood, static_findings, architecture_flags, file_tree),
         )
 
         check_cancelled(review_id)
+        previous_findings_for_llm = previous_findings or []
         batch_report = _run_review_in_batches(
             repo_path=repo_path,
             diff_files=inputs.diff_files,
@@ -1145,9 +1084,10 @@ def run_review(
             user_prompt=inputs.user_prompt,
             rubrics=inputs.rubrics,
             cancel_event=cancel_event,
+            previous_findings=previous_findings_for_llm,
         )
 
-        all_findings = list(batch_report.findings)
+        llm_findings = list(batch_report.findings)
         total_token_usage = batch_report.token_usage
         total_time = batch_report.time_seconds
         total_added = batch_report.lines_added
@@ -1155,119 +1095,20 @@ def run_review(
         files_reviewed = batch_report.files_reviewed
         _report(
             "batched",
-            f"Batch review complete: {len(all_findings)} raw finding(s) across {files_reviewed} file(s)",
-            {"raw_findings": len(all_findings), "files_reviewed": files_reviewed},
+            f"Batch review complete: {len(llm_findings)} raw finding(s) across {files_reviewed} file(s)",
+            {"raw_findings": len(llm_findings), "files_reviewed": files_reviewed},
         )
 
-        # Persist raw findings for resumability / MCP apply-fix.
-        append_findings(
+        # Persist LLM findings separately from deterministic findings.
+        save_findings(
             repo_path,
             session.folder_name,
-            [_finding_to_dict(f) for f in all_findings],
+            [_finding_to_dict(f) for f in llm_findings],
         )
-
-        # Persist static findings and their Markdown companion.
-        # LLM findings are already persisted by append_findings above and will be
-        # overwritten with the final combined list by save_findings at the end.
-        from src.codewalk.review.session_store import _session_dir as _sd
-        _api_session_dir = _sd(repo_path, session.folder_name)
-        _api_session_dir.mkdir(parents=True, exist_ok=True)
-        static_findings_data = [_finding_to_dict(f) for f in static_findings]
-        (_api_session_dir / "static_findings.json").write_text(
-            json.dumps(static_findings_data, indent=2),
-            encoding="utf-8",
-        )
-        (_api_session_dir / "static_findings.md").write_text(
-            render_findings_markdown(
-                static_findings_data,
-                title="Static Findings",
-                source_label="deterministic static analysis",
-            ),
-            encoding="utf-8",
-        )
-        save_checkpoint(
-            repo_path,
-            session.folder_name,
-            "batched",
-            [_finding_to_dict(f) for f in all_findings],
-        )
-
-        # Finalize across all files using the finding-centric pipeline.
-        check_cancelled(review_id)
-        deduped_findings = deduplicate(all_findings)
-        _report("deduplicated", f"Deduplication complete: {len(deduped_findings)} unique finding(s)")
-        save_checkpoint(
-            repo_path,
-            session.folder_name,
-            "deduped",
-            [_finding_to_dict(f) for f in deduped_findings],
-        )
-        check_cancelled(review_id)
-        verified_findings = verify(deduped_findings, llm_instance, cancel_event=cancel_event)
-        _report("verified", f"Adversarial verification complete: {len(verified_findings)} finding(s)")
-        save_checkpoint(
-            repo_path,
-            session.folder_name,
-            "verified",
-            [_finding_to_dict(f) for f in verified_findings],
-        )
-
-        # Carry forward findings for files that did not change since last review.
-        combined_findings = list(verified_findings)
-        combined_findings.extend(previous_unchanged_findings)
-        _report("combined", f"Combined with previous findings: {len(combined_findings)} total")
-        save_checkpoint(
-            repo_path,
-            session.folder_name,
-            "combined",
-            [_finding_to_dict(f) for f in combined_findings],
-        )
-
-        check_cancelled(review_id)
-        clusters = cluster(combined_findings)
-        ranked_clusters = rank(clusters)
-        _report("ranked", f"Ranking complete: {len(ranked_clusters)} cluster(s)")
-        save_checkpoint(
-            repo_path,
-            session.folder_name,
-            "ranked",
-            [_finding_to_dict(f) for f in combined_findings],
-        )
-        verdict, verdict_reason, merge_blockers = compute_verdict(ranked_clusters)
-        executive_summary = write_summary(ranked_clusters, verdict, files_reviewed=files_reviewed)
-
-        # Compare against previous review on the same branch for fixed/new/still_present.
-        previous_findings = previous_store.findings if previous_store else []
-        fixed, still_present, new = diff_findings(combined_findings, previous_findings)
-
-        narrative_text = ""
-        if narrative_summary:
-            _report("narrative", "Generating narrative summary")
-            narrative_text = write_narrative_summary(
-                ReviewReport(
-                    verdict=verdict,
-                    verdict_reason=verdict_reason,
-                    executive_summary=executive_summary,
-                    merge_blockers=merge_blockers,
-                    findings=combined_findings,
-                    clusters=ranked_clusters,
-                    architecture_flags=architecture_flags,
-                    files_reviewed=files_reviewed,
-                    lines_added=total_added,
-                    lines_removed=total_removed,
-                ),
-                llm_instance,
-                cancel_event=cancel_event,
-            )
 
         final_report = ReviewReport(
-            verdict=verdict,
-            verdict_reason=verdict_reason,
-            executive_summary=executive_summary,
-            narrative_summary=narrative_text,
-            merge_blockers=merge_blockers,
-            findings=combined_findings,
-            clusters=ranked_clusters,
+            findings=llm_findings,
+            deterministic_findings=static_findings,
             architecture_flags=architecture_flags,
             files_reviewed=files_reviewed,
             lines_added=total_added,
@@ -1276,41 +1117,17 @@ def run_review(
             time_seconds=total_time,
             session_id=session.session_id,
             folder_name=session.folder_name,
-            fixed_count=len(fixed),
-            new_count=len(new),
-            still_present_count=len(still_present),
-        )
-
-        # Persist this review for history.
-        parent_id = previous_store.review_id if previous_store else None
-        reviewed_paths = [df.file_path for df in inputs.diff_files]
-        store = build_finding_store(
-            final_report, repo_path,
-            parent_review_id=parent_id,
-            branch=current_branch,
-            reviewed_file_paths=reviewed_paths,
-        )
-        save_finding_store(repo_path, store)
-
-        # Persist the full combined finding list (new + carried-forward) so MCP
-        # apply-fix can index into the same list the report was built from.
-        save_findings(
-            repo_path,
-            session.folder_name,
-            [_finding_to_dict(f) for f in combined_findings],
         )
 
         session.status = SessionStatus.COMPLETED
         session.report = final_report
 
-        metrics = compute_metrics(final_report)
-        logger.info(f"[review] {metrics.to_dict()}")
         _report(
             "complete",
-            f"Review complete: {final_report.verdict.value}",
+            "Review complete",
             {
-                "verdict": final_report.verdict.value,
-                "findings": len(final_report.findings),
+                "llm_findings": len(final_report.findings),
+                "static_findings": len(final_report.deterministic_findings),
                 "files_reviewed": final_report.files_reviewed,
             },
         )
@@ -1318,9 +1135,8 @@ def run_review(
         session.status = SessionStatus.ERROR
         session.error = str(e)
         final_report = ReviewReport(
-            verdict=Verdict.APPROVE,
-            verdict_reason="review cancelled — no verdict produced",
-            executive_summary=f"Review cancelled: {e}",
+            findings=[],
+            deterministic_findings=static_findings,
             architecture_flags=architecture_flags,
             session_id=session.session_id,
             folder_name=session.folder_name,
@@ -1331,9 +1147,8 @@ def run_review(
         session.status = SessionStatus.ERROR
         session.error = str(e)
         final_report = ReviewReport(
-            verdict=Verdict.REQUEST_CHANGES,
-            verdict_reason="review failed",
-            executive_summary=f"Review failed: {e}",
+            findings=[],
+            deterministic_findings=static_findings,
             architecture_flags=architecture_flags,
             session_id=session.session_id,
             folder_name=session.folder_name,

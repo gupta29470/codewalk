@@ -10,6 +10,20 @@ import duckdb
 
 logger = logging.getLogger("codewalk")
 
+
+class DuckDBLockError(RuntimeError):
+    """Raised when DuckDB cannot be opened because another process holds the lock.
+
+    Carries the conflicting PID (when detectable) and the database path so
+    callers can present an actionable message to the user.
+    """
+
+    def __init__(self, message: str, db_path: str, pid: int | None = None):
+        super().__init__(message)
+        self.db_path = db_path
+        self.pid = pid
+
+
 def _stable_id(*parts: str) -> str:
     """Deterministic hash ID from input parts. No DB lookup needed."""
     return hashlib.sha256("|".join(parts).encode()).hexdigest()
@@ -96,7 +110,7 @@ class GraphStore:
                                 f"\n  2. Or delete the lock: rm -f '{self.db_path}.wal' '{self.db_path}.tmp'"
                                 f"\n  3. Then retry your command"
                             )
-                        raise duckdb.IOException(fix_msg) from last_error
+                        raise DuckDBLockError(fix_msg, db_path=self.db_path, pid=pid) from last_error
                 else:
                     raise  # Non-lock error, don't retry
 

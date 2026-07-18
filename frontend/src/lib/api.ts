@@ -129,25 +129,6 @@ export interface ArchitectureResponse {
     cycles: CycleGroup;
 }
 
-export interface FixItem {
-    file_path: string;
-    old_code: string;
-    new_code: string;
-}
-
-export interface AppliedFix {
-    file_path: string;
-    old_code: string;
-    new_code: string;
-    message: string;
-}
-
-export interface ApplyFixesResponse {
-    applied: AppliedFix[];
-    failed: { index: number; error: string }[] | null;
-    total: number;
-}
-
 export interface DocsIndexResponse {
     status: string;
     files_indexed: number;
@@ -217,26 +198,48 @@ export interface ReviewIssue {
 
 export interface ReviewResponse {
     issues: ReviewIssue[];
-    summary: string;
+    static_issues: ReviewIssue[];
     files_reviewed: number;
     lines_added: number;
     lines_removed: number;
-    verdict: string;
-    verdict_reason: string;
+    session_id: string | null;
+    architecture_flags: Record<string, unknown> | null;
 }
 
 export interface ReviewFileResponse {
-    verdict: string;
-    verdict_reason: string;
-    issues: ReviewIssue[];
-    summary: string;
     file_path: string;
+    issues: ReviewIssue[];
+    static_issues: ReviewIssue[];
+    files_reviewed: number;
+    lines_added: number;
+    lines_removed: number;
+    session_id: string | null;
 }
 
-export interface ApplyAndVerifyResponse {
+export interface EditPreview {
+    finding_index: number;
+    file_path: string;
+    original_content: string | null;
+    modified_content: string | null;
+    error: string | null;
+}
+
+export interface PreviewEditsResponse {
+    previews: EditPreview[];
+    total_accepted: number;
+}
+
+export interface ApprovedEdit {
+    finding_index: number;
+    file_path: string;
+    modified_content: string;
+    original_content?: string | null;
+}
+
+export interface ApplyEditsResponse {
     applied: string[];
     failed: string[];
-    total_accepted: number;
+    total: number;
     static_analysis_issues: number;
     tests_passed: boolean | null;
     verification_passed: boolean | null;
@@ -451,19 +454,34 @@ export const api = {
         }
     },
 
-    reviewDiff: (staged: boolean = false, targetBranch?: string) =>
+    reviewDiff: (staged: boolean = false, targetBranch?: string, repoPath?: string) =>
         apiFetch<ReviewResponse>("/review", {
             method: "POST",
             body: JSON.stringify({
                 staged,
                 target_branch: targetBranch || null,
+                repo_path: repoPath || null,
             }),
         }),
 
-    reviewFile: (filePath: string) =>
+    reviewFile: (filePath: string, repoPath?: string) =>
         apiFetch<ReviewFileResponse>("/review/file", {
             method: "POST",
-            body: JSON.stringify({ file_path: filePath }),
+            body: JSON.stringify({
+                file_path: filePath,
+                repo_path: repoPath || null,
+            }),
+        }),
+
+    reReview: (sessionId: string, repoPath?: string, staged: boolean = false, targetBranch?: string) =>
+        apiFetch<ReviewResponse>("/review/re-review", {
+            method: "POST",
+            body: JSON.stringify({
+                session_id: sessionId,
+                repo_path: repoPath || null,
+                staged,
+                target_branch: targetBranch || null,
+            }),
         }),
 
     loadGuidelines: (docsPath?: string) =>
@@ -484,16 +502,16 @@ export const api = {
             method: "POST",
         }),
 
-    applyFixes: (fixes: FixItem[]) =>
-        apiFetch<ApplyFixesResponse>("/review/apply", {
-            method: "POST",
-            body: JSON.stringify({ fixes }),
-        }),
-
-    applyAndVerify: (sessionId: string, verdicts: Record<string, string>) =>
-        apiFetch<ApplyAndVerifyResponse>("/review/apply-and-verify", {
+    previewEdits: (sessionId: string, verdicts: Record<string, string>) =>
+        apiFetch<PreviewEditsResponse>("/review/preview-edits", {
             method: "POST",
             body: JSON.stringify({ session_id: sessionId, verdicts }),
+        }),
+
+    applyEdits: (sessionId: string, edits: ApprovedEdit[]) =>
+        apiFetch<ApplyEditsResponse>("/review/apply-edits", {
+            method: "POST",
+            body: JSON.stringify({ session_id: sessionId, edits }),
         }),
 
     indexDocs: (docsPath: string) =>

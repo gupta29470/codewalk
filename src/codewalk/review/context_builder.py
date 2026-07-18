@@ -1,0 +1,209 @@
+"""Unified batch context builder shared by API and MCP review paths.
+
+Both paths now use the same context string. The API path feeds it to its own
+LLM and parses structured findings; the MCP path returns it to the host LLM.
+"""
+from __future__ import annotations
+
+import threading
+from pathlib import Path
+from typing import TYPE_CHECKING, Any
+
+from src.codewalk.review.diff_parser import DiffFile
+from src.codewalk.review.neighborhood import expand_neighborhood
+from src.codewalk.review.report import Finding
+from src.codewalk.review.rubric_loader import Rubrics
+from src.codewalk.review.reviewers.utils import _format_hunks, _read_file_content
+from src.codewalk.review.utils import smart_truncate_file_content
+
+if TYPE_CHECKING:
+    from src.codewalk.review.static_analysis import StaticAnalysisResult
+
+
+_UNIFIED_REVIEW_SYSTEM_PROMPT = """# Principal Software Engineer — Code Review
+
+You are a principal software engineer reviewing a pull request diff. Use the
+repository context, rubrics, and risk annotations provided below to find
+concrete, actionable issues introduced or worsened by the changes.
+
+Do not praise. Do not flag style nits unless they indicate a real bug.
+Only flag issues caused or worsened by the current diff.
+Provide a concrete fix for every issue.
+
+## Severity
+- **blocker**: security vulnerability, crash, data loss, race condition, breaking API change, PII exposure
+- **error**: logic error, missing edge case, unsafe pattern, type issue, untested new business logic
+- **suggestion**: readability, naming, minor consistency
+
+## Output
+Return a JSON object with an `issues` array. Each issue must include:
+- `severity`: "blocker" | "error" | "suggestion"
+- `category`: "bug" | "security" | "type_safety" | "architecture" | "error_handling" | "test" | "blast_radius" | "style" | "design" | "naming" | "complexity" | "logging" | "privacy" | "hygiene"
+- `file_path`, `line_number`, `title`, `explanation`
+- `current_code`: exact snippet from the diff
+- `recommended_code`: corrected snippet or null
+- `blocking`: true if must fix before merge
+- `confidence`: "high" | "medium" | "low"
+- `status`: "new" if introduced or worsened by the diff, or "still_present" if it matches a previous finding listed above and remains valid
+
+Return valid JSON only.
+"""
+
+
+def _format_previous_findings(
+    diff_files: list[DiffFile],
+    previous_findings: list[Finding],
+    neighborhood_snippets: list[Any] | None = None,
+    max_findings: int = 50,
+) -> str:
+    """Format previous findings relevant to the current batch."""
+    if not previous_findings:
+        return ""
+
+    relevant_files = {df.file_path for df in diff_files}
+    if neighborhood_snippets:
+        relevant_files.update(s.file_path for s in neighborhood_snippets)
+
+    matched = [
+        f for f in previous_findings
+        if getattr(f, "file_path", None) in relevant_files
+    ]
+    matched = matched[:max_findings]
+
+    if not matched:
+        return ""
+
+    lines = ["## Previous review findings (for context only)", ""]
+    for f in matched:
+        severity = getattr(f, "severity", "")
+        line = f"- [{severity}] {f.file_path}"
+        if getattr(f, "line_number", None):
+            line += f":{f.line_number}"
+        title = getattr(f, "title", "")
+        if title:
+            line += f" — {title}"
+        lines.append(line)
+
+    lines.append("")
+    lines.append(
+        "These issues were flagged in an earlier review of related files. "
+        "Do not blindly repeat them. Only report them again if they are still "
+        "valid and caused or worsened by the current diff. "
+        "For each new issue you report, set `status` to `new` unless it is the "
+        "same issue as one above, in which case set `status` to `still_present`."
+    )
+    return "\n".join(lines)
+
+
+def _format_rubrics(rubrics: Rubrics) -> str:
+    """Format rubrics for inclusion in the batch context."""
+    parts: list[str] = ["## Review Rubric"]
+    if rubrics.core:
+        parts.append(rubrics.core)
+    lang_parts = [r for _, r in sorted(rubrics.language.items())]
+    if lang_parts:
+        parts.append("\n".join(lang_parts))
+    if rubrics.framework:
+        parts.append(rubrics.framework)
+    if rubrics.fallback:
+        parts.append(rubrics.fallback)
+    return "\n\n".join(parts)
+
+
+def build_unified_batch_context(
+    repo_path: Path,
+    batch: list[DiffFile],
+    static_result: "StaticAnalysisResult",
+    stack_header: str,
+    rubrics: Rubrics,
+    guidelines: str = "",
+    user_prompt: str = "",
+    previous_findings: list[Finding] | None = None,
+    cancel_event: threading.Event | None = None,
+) -> str:
+    """Build a single review context string shared by API and MCP paths.
+
+    The returned markdown string contains stack context, rubrics, guidelines,
+    previous findings, per-file content + diffs + risk annotations, and
+    neighborhood context.
+    """
+    # Lazy import to avoid circular dependency with engine.py.
+    from src.codewalk.review.engine import _load_graph_runtime
+
+    parts: list[str] = []
+
+    if stack_header:
+        parts.append(stack_header)
+
+    if guidelines:
+        parts.append(
+            "These code guidelines define this repository's standards. "
+            "Enforce them fully, but do not limit the review to only these rules (underfitting) "
+            "and do not mechanically pattern-match them (overfitting). "
+            "Use your broader engineering judgment to flag any issue introduced or worsened by the diff."
+        )
+        parts.append(f"## Code guidelines\n\n{guidelines}")
+
+    parts.append(_format_rubrics(rubrics))
+
+    if user_prompt:
+        parts.append(f"## Team-specific instructions\n\n{user_prompt}")
+
+    # Neighborhood context.
+    graph_runtime, owns_runtime = _load_graph_runtime(repo_path)
+    graph_store = graph_runtime.store if graph_runtime and hasattr(graph_runtime, "store") else None
+    try:
+        neighborhood = expand_neighborhood(
+            repo_path,
+            batch,
+            graph_store=graph_store,
+            max_tokens=30_000,
+        )
+    finally:
+        if owns_runtime and graph_runtime is not None and hasattr(graph_runtime, "store"):
+            try:
+                graph_runtime.store.close()
+            except Exception:
+                pass
+
+    previous_findings_text = _format_previous_findings(
+        batch,
+        previous_findings or [],
+        neighborhood.snippets if neighborhood else None,
+    )
+    if previous_findings_text:
+        parts.append(previous_findings_text)
+
+    # Per-file context.
+    for df in batch:
+        ra = static_result.risk_annotations.get(df.file_path)
+        parts.append(f"### {df.file_path} (+{df.added_lines}/-{df.removed_lines})")
+        if ra and ra.to_prompt_text():
+            parts.append(f"> {ra.to_prompt_text()}")
+        parts.append("")
+
+        content = _read_file_content(repo_path, df.file_path)
+        if content:
+            truncated = smart_truncate_file_content(content, df.hunks, max_tokens=10_000)
+            parts.append("```")
+            parts.append(truncated)
+            parts.append("```")
+        else:
+            parts.append("*(file deleted or not found)*")
+
+        parts.append("\n**Diff:**")
+        parts.append("```diff")
+        parts.append(_format_hunks(df))
+        parts.append("```")
+        parts.append("")
+
+    if neighborhood and neighborhood.snippets:
+        parts.append("## Neighborhood Context (callers, tests)\n")
+        for snippet in neighborhood.snippets[:10]:
+            parts.append(f"**{snippet.source}:** `{snippet.file_path}`")
+            parts.append("```")
+            parts.append(snippet.content)
+            parts.append("```")
+            parts.append("")
+
+    return "\n".join(parts)

@@ -30,6 +30,7 @@ class ReviewContext:
     rubrics: Rubrics
     risk_annotation: RiskAnnotation | None = None
     neighborhood: NeighborhoodResult | None = None
+    previous_findings: list[Finding] = field(default_factory=list)
     extra: dict[str, Any] = field(default_factory=dict)
     cancel_event: "threading.Event | None" = None
 

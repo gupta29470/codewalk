@@ -11,7 +11,7 @@ from src.codewalk.ingestion.config_generator import generate_codewalk_yaml
 from src.codewalk.embeddings.vector_store import VectorStore
 from src.codewalk.repo_discovery import ensure_codewalk_yaml
 from src.codewalk.review.engine import run_review
-from src.codewalk.review.report import Verdict
+from src.codewalk.review.report import Severity
 
 app_cli = typer.Typer(help="Codewalk — AI codebase intelligence")
 
@@ -200,19 +200,31 @@ def review(
         force_full_review=force_full_review,
     )
 
+    all_findings = list(report.findings) + list(report.deterministic_findings)
+
     if json_output:
         import json
         typer.echo(json.dumps(report.to_dict(), indent=2))
     else:
-        from src.codewalk.review.renderers import render_cli
+        from src.codewalk.review.renderers.markdown import render_findings_markdown
 
-        typer.echo(render_cli(report))
+        typer.echo(
+            f"Reviewed {report.files_reviewed} file(s) "
+            f"(+{report.lines_added}/-{report.lines_removed}), "
+            f"{len(report.findings)} LLM finding(s), "
+            f"{len(report.deterministic_findings)} static finding(s)"
+        )
+        typer.echo(
+            render_findings_markdown(
+                [f.to_dict() for f in all_findings], title="Review Findings"
+            )
+        )
 
     if fail_on == "blocking":
-        if report.verdict == Verdict.REQUEST_CHANGES:
+        if any(f.severity == Severity.BLOCKER or f.blocking for f in all_findings):
             raise typer.Exit(1)
     elif fail_on == "warning":
-        if report.verdict in (Verdict.REQUEST_CHANGES, Verdict.APPROVE_WITH_NITS):
+        if any(f.severity in (Severity.BLOCKER, Severity.ERROR) for f in all_findings):
             raise typer.Exit(1)
 
 

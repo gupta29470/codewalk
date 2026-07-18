@@ -16,7 +16,7 @@ from src.codewalk.embeddings.chunker import read_file_content
 
 from pathlib import Path as _Path
 
-from src.codewalk.graph.graph_store import GraphStore
+from src.codewalk.graph.graph_store import GraphStore, DuckDBLockError
 from src.codewalk.graph.graph_runtime import GraphRuntime
 
 from src.codewalk.doc_knowledge.doc_store import DocStore
@@ -766,6 +766,9 @@ def ensure_initialized() -> bool:
         _log("[ensure_initialized] Loading index from disk...")
         try:
             load_scoped_analysis()
+        except DuckDBLockError:
+            # Lock conflicts are actionable and must reach the caller/frontend.
+            raise
         except Exception as e:
             _log(f"[ensure_initialized] Failed to load scoped analysis: {e}")
             return False

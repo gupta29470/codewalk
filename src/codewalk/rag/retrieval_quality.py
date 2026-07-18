@@ -61,7 +61,7 @@ def is_retreival_good(confidence: float, filtered_count: int) -> bool:
     """
     if filtered_count < MIN_GOOD_CHUNKS:
         return False
-    if confidence < 0.25:
+    if confidence < 0.35:
         return False
     
     return True

@@ -27,18 +27,18 @@ graph TD
         direction LR
         A1["Setup<br/>/analyze · /analyze/stream"]
         A2["Query<br/>/chat · /overview · /modules<br/>/blast-radius · /reading-order<br/>/execution-flow · /semantic-search"]
-        A3["Review<br/>/review · /review/file · /review/apply"]
+        A3["Review<br/>/review · /review/file<br/>/review/preview-edits · /review/apply-edits"]
         A4["RAG Utilities<br/>/rag/expand-query · /rag/rerank · /rag/symbol-lookup"]
         A5["Docs / Voice / Research<br/>/docs/* · /voice/ask · /research"]
         A6["Maintenance<br/>/refresh · /incremental-reindex<br/>/tools/*"]
     end
 
-    subgraph MCP["MCP Server · 43 tools"]
+    subgraph MCP["MCP Server · 39 tools"]
         direction LR
         M1["Setup<br/>analyze_codebase · generate_config"]
         M2["Query<br/>search · lookup_symbol · explain<br/>overview · blast-radius · reading-order<br/>execution-flow · module_info"]
         M3["Graph<br/>cycles · architecture_health<br/>call_chain · knowledge_graph"]
-        M4["Review + HITL<br/>run_review · re_review · review_file<br/>verdict · apply_accepted · approve_action"]
+        M4["Review<br/>run_review · re_review · review_file<br/>submit_batch_findings · get_review_summary<br/>accept_and_verify_fix"]
         M5["Docs / Maint / Cloud<br/>index_docs · reindex · refresh<br/>pull_index · connect_repo"]
     end
 
@@ -145,7 +145,7 @@ graph TD
     subgraph REVIEW["🔬 Code Review"]
         direction LR
         REV1["engine.py<br/>run_review"]
-        REV2["diff_parser.py<br/>staged+unstaged+untracked<br/>fix_applier.py"]
+        REV2["diff_parser.py<br/>staged+unstaged+untracked<br/>editor.py"]
         REV3["neighborhood.py · static_analysis.py"]
         REV4["reviewers/ · pipeline/ · renderers/"]
     end

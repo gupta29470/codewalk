@@ -132,7 +132,7 @@ def collect_retrieval_result(
                 metrics.l2b_expansion_used = True
                 metrics.l2b_chunks_added = len(expanded) - before_expansion
                 filtered = expanded
-                confidence = max(confidence, 0.3)
+                confidence = max(confidence, 0.35)
                 metrics.l2b_confidence_after = confidence 
 
         if not filtered:
@@ -227,7 +227,7 @@ def collect_full_result(
                     metrics.l2b_expansion_used = True
                     metrics.l2b_chunks_added = len(expanded) - before_expansion
                     filtered = expanded
-                    confidence = max(confidence, 0.3)
+                    confidence = max(confidence, 0.35)
                     metrics.l2b_confidence_after = confidence
 
             # Re-check after expansion
@@ -460,7 +460,7 @@ def format_report(merged: list[MergedResult]) -> str:
 
     # ── Internal layer stats ──
     avg_l1_conf = sum(merge.internal.l1_confidence for merge in merged) / length
-    low_conf_count = sum(1 for merge in merged if merge.internal.l1_confidence < 0.3)
+    low_conf_count = sum(1 for merge in merged if merge.internal.l1_confidence < 0.35)
     expansion_count = sum(1 for merge in merged if merge.internal.l2b_expansion_used)
 
     l3_survival_rates = []
@@ -509,7 +509,7 @@ def format_report(merged: list[MergedResult]) -> str:
         f"│ Answer Relevancy:   {avg_relevancy:.3f}",
         "├──────────────────────────────────────────────────────────┤",
         "│ INTERNAL LAYER STATS                                     │",
-        f"│ Avg L1 confidence:  {avg_l1_conf:.2f}   ({low_conf_count}/{length} had conf<0.3)",
+        f"│ Avg L1 confidence:  {avg_l1_conf:.2f}   ({low_conf_count}/{length} had conf<0.35)",
         f"│ Graph expansion:    triggered {expansion_count}/{length} ({expansion_count*100//length}%)",
         f"│ L3 chunk survival:  {avg_l3_survival:.0%} avg",
         f"│ L4 vs RAGAS agree:  {agreement_rate:.0%} ({agree}/{length})",

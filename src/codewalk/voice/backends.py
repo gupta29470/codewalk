@@ -25,7 +25,7 @@ _TOOL_TO_ROUTE = {
     "codewalk_get_execution_flow": ("GET", "/execution-flow"),
     "codewalk_incremental_reindex": ("POST", "/incremental-reindex"),
     "codewalk_refresh_analysis": ("POST", "/refresh"),
-    "codewalk_review_diff": ("POST", "/review"),
+    "codewalk_run_review": ("POST", "/review"),
     "codewalk_review_file": ("POST", "/review/file"),
     "codewalk_load_guidelines": ("POST", "/review/guidelines"),
     "codewalk_get_architecture_health": ("GET", "/architecture"),

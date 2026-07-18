@@ -84,7 +84,7 @@ def search(
         expanded = expand_via_graph(filtered, store, query, graph_store)
         if len(expanded) > len(filtered):
             filtered = expanded
-            confidence = max(confidence, 0.3)
+            confidence = max(confidence, 0.35)
             retrieval_good = is_retreival_good(confidence, len(filtered))
             _log(f"[search_service] graph expansion recovered {len(expanded)} chunks")
 

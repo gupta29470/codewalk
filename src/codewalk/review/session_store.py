@@ -56,40 +56,41 @@ def _report_from_dict(data: dict[str, Any] | None) -> ReviewReport | None:
         Finding,
         Severity,
         Source,
-        Verdict,
     )
 
-    findings = []
-    for item in data.get("issues", []):
-        try:
-            category = Category(item["category"])
-        except ValueError:
-            category = Category.BUG
-        findings.append(
-            Finding(
-                severity=Severity(item["severity"]),
-                category=category,
-                file_path=item["file_path"],
-                line_number=item.get("line_number"),
-                title=item["title"],
-                explanation=item["explanation"],
-                current_code=item.get("current_code"),
-                recommended_code=item.get("recommended_code"),
-                blocking=item.get("blocking", False),
-                confidence=Confidence(item.get("confidence", "high")),
-                source=Source(item.get("source", "llm")),
-                pillar=item.get("pillar"),
-                subcategory=item.get("subcategory"),
+    def _findings(items: list[dict[str, Any]], default_source: str = "llm") -> list[Finding]:
+        out: list[Finding] = []
+        for item in items:
+            try:
+                category = Category(item["category"])
+            except ValueError:
+                category = Category.BUG
+            out.append(
+                Finding(
+                    severity=Severity(item["severity"]),
+                    category=category,
+                    file_path=item["file_path"],
+                    line_number=item.get("line_number"),
+                    title=item["title"],
+                    explanation=item["explanation"],
+                    current_code=item.get("current_code"),
+                    recommended_code=item.get("recommended_code"),
+                    blocking=item.get("blocking", False),
+                    confidence=Confidence(item.get("confidence", "high")),
+                    source=Source(item.get("source", default_source)),
+                    pillar=item.get("pillar"),
+                    subcategory=item.get("subcategory"),
+                )
             )
-        )
+        return out
+
+    findings = _findings(data.get("issues", []), default_source="llm")
+    deterministic_findings = _findings(data.get("static_issues", []), default_source="deterministic")
 
     arch = data.get("architecture_flags", {})
     return ReviewReport(
-        verdict=Verdict(data["verdict"]),
-        verdict_reason=data.get("verdict_reason", ""),
-        executive_summary=data.get("executive_summary", ""),
-        merge_blockers=data.get("merge_blockers", []),
         findings=findings,
+        deterministic_findings=deterministic_findings,
         architecture_flags=ArchitectureFlags(
             bottlenecks_touched=arch.get("bottlenecks_touched", []),
             cycles_touched=arch.get("cycles_touched", []),
@@ -350,6 +351,46 @@ def save_findings(repo_path: Path, folder_name: str, findings: list[dict[str, An
 def load_findings(repo_path: Path, folder_name: str) -> list[dict[str, Any]]:
     """Load the LLM findings array for a session."""
     findings_path = _session_dir(repo_path, folder_name) / "llm_findings.json"
+    if not findings_path.exists():
+        return []
+    try:
+        return json.loads(findings_path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return []
+
+
+def save_static_findings(
+    repo_path: Path, folder_name: str, findings: list[dict[str, Any]]
+) -> None:
+    """Persist or overwrite the deterministic/static findings array for a session."""
+    session_dir = _session_dir(repo_path, folder_name)
+    session_dir.mkdir(parents=True, exist_ok=True)
+    findings_path = session_dir / "static_findings.json"
+    temp = tempfile.NamedTemporaryFile(
+        mode="w",
+        dir=session_dir,
+        delete=False,
+        suffix=".tmp",
+    )
+    json.dump(findings, temp, indent=2)
+    temp.close()
+    findings_path.write_text(Path(temp.name).read_text(), encoding="utf-8")
+    Path(temp.name).unlink()
+
+    md_path = session_dir / "static_findings.md"
+    md_path.write_text(
+        render_findings_markdown(
+            findings,
+            title="Static Findings",
+            source_label="static analysis",
+        ),
+        encoding="utf-8",
+    )
+
+
+def load_static_findings(repo_path: Path, folder_name: str) -> list[dict[str, Any]]:
+    """Load the deterministic/static findings array for a session."""
+    findings_path = _session_dir(repo_path, folder_name) / "static_findings.json"
     if not findings_path.exists():
         return []
     try:

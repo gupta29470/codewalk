@@ -6,7 +6,7 @@ This package exposes Codewalk as an MCP server that IDE agents (Cursor, Copilot,
 
 | File | Role |
 |------|------|
-| `server.py` | FastMCP server with 41 tools: setup, query, architecture, review (including batched review: run_review, re_review, review_next_batch, submit_batch_findings, get_review_summary, apply_and_verify_fix), docs, maintenance, voice, HITL, cloud index sync, config generation, version check, and knowledge-graph launch. |
+| `server.py` | FastMCP server with 39 tools: setup, query, architecture, review (including batched review: run_review, re_review, review_next_batch, submit_batch_findings, get_review_summary, accept_and_verify_fix), docs, maintenance, voice, cloud index sync, config generation, version check, and knowledge-graph launch. |
 
 ## Data flow
 
@@ -29,7 +29,7 @@ query/review/voice/docs/cloud tools read from state
 - Uses `api/state.py` as the single source of truth.
 - Imports from `embeddings/`, `rag/`, `query/`, `review/`, `agent/`, `doc_knowledge/`, `pipeline/`, `codewalk_config/`.
 - Cloud index tools (`codewalk_pull_index`, `codewalk_connect_repo`) talk to `CODEWALK_SERVER_URL`.
-- HITL flow: `codewalk_approve_action()` sets `_pending_approval_token`; `codewalk_apply_fix()` requires the token. For the review path, `codewalk_apply_and_verify_fix()` bypasses tokens — the verdict IS the approval. Verify manually with `codewalk_run_static_analysis` + `codewalk_run_tests`.
+- No file edits over MCP: `codewalk_accept_and_verify_fix()` returns user-accepted findings (read-only); the host applies them with its own editing tools, then verifies with `codewalk_run_static_analysis` + `codewalk_run_tests`. The legacy HITL tools (`codewalk_approve_action`, `codewalk_apply_fix`) were removed.
 
 ## Running the MCP server
 

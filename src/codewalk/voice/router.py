@@ -47,7 +47,7 @@ TOOL_REGISTRY = {
         "description": "Rebuild deps and modules without re-embedding.",
         "parameters": {},
     },
-    "codewalk_review_diff": {
+    "codewalk_run_review": {
         "description": "Review git diff for bugs, security, and style issues.",
         "parameters": {
             "staged": {"type": "boolean", "description": "Review ONLY staged changes (narrow mode). Default reviews everything.", "default": False},
@@ -87,8 +87,6 @@ TOOL_REGISTRY = {
     },
     # "codewalk_voice_ask" — not in routing map (voice_ask IS the router entry point)
     # "codewalk_speak" — not routable (TTS output, not a query)
-    # "codewalk_approve_action" — not routable via voice (requires explicit text)
-    # "codewalk_reflect_review" — not routable via voice (requires initial_review text)
 }
 
 
@@ -150,7 +148,7 @@ User: "show me the blast radius for the whole project"
 {{"tool": "codewalk_get_blast_radius_map", "arguments": {{}}}}
 
 User: "review my changes"
-{{"tool": "codewalk_review_diff", "arguments": {{}}}}
+{{"tool": "codewalk_run_review", "arguments": {{}}}}
 
 User: "review the pipeline file"
 {{"tool": "codewalk_review_file", "arguments": {{"file_path": "src/codewalk/pipeline.py"}}}}

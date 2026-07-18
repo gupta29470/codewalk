@@ -1,8 +1,10 @@
 # Plan: Unified `codewalk_apply_and_verify_fix` Tool
 
+> **Status**: Implemented. This doc is the original plan. The tool now requires `session_id`; the fallback that loaded the latest session on the current branch was removed when `finding_store.py` was deleted.
+
 ## Problem
 
-After a review, the user records verdicts via `finding_verdict`. Then the host must make **two separate calls** — `apply_accepted` then `verify_fix` — and there's no persistence of verification results back to the findings JSON. The HITL tools (`approve_action` / `apply_fix`) are irrelevant in the review flow since the verdict IS the approval.
+After a review, the user records verdicts by editing `llm_findings.json`. Then the host must make **two separate calls** — `apply_accepted` then `verify_fix` — and there's no persistence of verification results back to the findings JSON. The HITL tools (`approve_action` / `apply_fix`) are irrelevant in the review flow since the verdict IS the approval.
 
 ## Goal
 
@@ -24,7 +26,7 @@ No HITL token needed — the verdict is the approval.
 ### Flow
 
 ```
-1. Load session (by session_id or latest on current branch)
+1. Load session by session_id
 2. Load llm_findings.json
 3. Filter: user_verdict == "accepted" + has current_code + recommended_code + file_path
 4. For each accepted finding:
@@ -78,7 +80,7 @@ All 3 applied fixes passed verification.
 
 ```python
 @mcp.tool()
-def codewalk_apply_and_verify_fix(session_id: str = "") -> str:
+def codewalk_apply_and_verify_fix(session_id: str) -> str:
     """Apply all accepted fixes and verify with static analysis + tests.
 
     Combines apply_accepted + verify_fix into one step. Reads verdicts from
@@ -89,8 +91,7 @@ def codewalk_apply_and_verify_fix(session_id: str = "") -> str:
     No approval token needed — the verdict IS the approval.
 
     Args:
-        session_id: Optional session ID. If empty, uses the latest session
-                    on the current branch.
+        session_id: Required session ID returned by `codewalk_run_review` or `codewalk_review_file`.
 
     Returns:
         Combined markdown: applied/failed/skipped fixes + static analysis
@@ -100,9 +101,7 @@ def codewalk_apply_and_verify_fix(session_id: str = "") -> str:
 
 **Implementation steps inside the tool:**
 
-1. **Reuse session resolution logic** from `apply_accepted`:
-   - If session_id provided → `load_session(repo_path, session_id)`
-   - Else → `find_last_review(repo_path, branch)` → latest session
+1. **Load session** by `session_id` via `load_session(repo_path, session_id)`.
 
 2. **Reuse filtering logic** from `apply_accepted`:
    - Filter for `user_verdict == "accepted"` + `recommended_code` + `current_code` + `file_path`
@@ -256,7 +255,6 @@ These files use underlying functions (`apply_fix_to_file`, `run_static_analysis`
 | `src/codewalk/tools/static_analysis.py` | Already returns `list[StaticIssue]` — no changes |
 | `src/codewalk/tools/test_runner.py` | Already returns `ExecutionResult` — no changes |
 | `src/codewalk/review/session_store.py` | Already has `load_session`, `load_findings`, `_session_dir` — no changes |
-| `src/codewalk/review/finding_store.py` | Already has `find_last_review` — no changes |
 | `src/codewalk/review/renderers/markdown.py` | Already renders findings with `status`/`verifier_notes` — no changes |
 | `src/codewalk/agent/tools.py` | LangGraph agent tools unchanged (separate HITL path) |
 | `src/codewalk/agent/graph.py` | Agent graph unchanged (separate HITL path) |
@@ -265,9 +263,9 @@ These files use underlying functions (`apply_fix_to_file`, `run_static_analysis`
 | `src/codewalk/voice/router.py` | Voice routing unchanged |
 | `tests/test_chat_hitl_e2e.py` | Tests agent HITL path — unrelated to MCP review flow |
 | `tests/test_brutal_review_fixes.py` | Tests underlying fix_applier — no changes needed |
-| `tests/test_review_engine.py` | Tests verdict computation — unrelated |
-| `tests/test_review_checkpoint.py` | Tests checkpointing — unrelated |
-| `tests/test_review_adversarial.py` | Tests edge cases — unrelated |
+| `tests/test_review_engine.py` | Tests review orchestration — no changes needed |
+| `tests/test_review_engine_fixes.py` | Tests fix application flow — no changes needed |
+| `tests/test_fix_applier.py` | Tests underlying fix application — no changes needed |
 | `mcp.json.example` | No review flow references |
 | `mcp.json.local.example` | No review flow references |
 | `blogs/` | No review flow references |

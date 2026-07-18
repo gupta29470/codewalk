@@ -19,10 +19,10 @@ agent graph (tools + LLM)
     ↓
 if write tool → interrupt + propose action
     ↓
-POST /chat/approve or MCP codewalk_approve_action resumes/rejects
+POST /chat/approve resumes/rejects
     ↓
-apply_fix tool writes file
-(MCP review path: codewalk_apply_and_verify_fix bypasses HITL tokens)
+apply_fix tool writes file (editor.apply_edit)
+(MCP: no file edits — host LLM applies fixes itself)
 ```
 
 ## Connections

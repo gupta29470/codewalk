@@ -15,7 +15,7 @@ from src.codewalk.query import (
 from src.codewalk.rag.chain import ask_corrective
 from src.codewalk.rag.query_expander import expand_query
 from src.codewalk.config import settings, get_llm
-from src.codewalk.review.fix_applier import apply_fix_to_file
+from src.codewalk.review.editor import apply_edit
 from src.codewalk.tools.static_analysis import run_static_analysis
 from src.codewalk.tools.test_runner import run_tests
 
@@ -357,11 +357,14 @@ def create_tools(
         """
         if not repo_path:
             return "Error: No repo path available."
-        result = apply_fix_to_file(repo_path, file_path, old_code, new_code)
+        llm = get_llm(temperature=0, reasoning=False)
+        result = apply_edit(repo_path, file_path, old_code=old_code, new_code=new_code, llm=llm)
         if result["ok"]:
             notes = []
             if result.get("validation"):
                 notes.append(result["validation"]["message"])
+            if result.get("attempts") and result["attempts"] > 1:
+                notes.append(f"Applied after {result['attempts']} attempts")
             return f"{result['message']}" + ("\n" + "\n".join(notes) if notes else "")
         return f"Error: {result['error']}"
 

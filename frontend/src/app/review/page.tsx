@@ -1,15 +1,15 @@
 "use client";
 
 import { useState } from "react";
-import { api, ReviewIssue, FixItem, ApplyAndVerifyResponse } from "@/lib/api";
+import { api, ReviewIssue, EditPreview, ApplyEditsResponse } from "@/lib/api";
+import { useAnalyze } from "@/lib/analyze-context";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { Textarea } from "@/components/ui/textarea";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Separator } from "@/components/ui/separator";
-import { Loader2, ShieldCheck, FileSearch, BookOpen, AlertCircle, Wrench, Plus, Trash2, Check, X } from "lucide-react";
+import { Loader2, ShieldCheck, FileSearch, BookOpen, AlertCircle, Check, X, ChevronDown, ChevronUp } from "lucide-react";
 import ReactMarkdown from "react-markdown";
 
 const SEVERITY_STYLES: Record<string, string> = {
@@ -24,34 +24,208 @@ const SEVERITY_ICONS: Record<string, string> = {
     suggestion: "🟢",
 };
 
-type Tab = "diff" | "file" | "guidelines" | "apply";
+// ─── Line diff helpers (LCS-based, no dependencies) ──────────────────
 
-interface FixRow {
-    id: number;
-    file_path: string;
-    old_code: string;
-    new_code: string;
+type DiffLine = { type: "same" | "add" | "del"; text: string };
+
+function computeLineDiff(original: string, modified: string): DiffLine[] {
+    const a = original.split("\n");
+    const b = modified.split("\n");
+    const m = a.length, n = b.length;
+    const dp: number[][] = Array.from({ length: m + 1 }, () => new Array(n + 1).fill(0));
+    for (let i = m - 1; i >= 0; i--) {
+        for (let j = n - 1; j >= 0; j--) {
+            dp[i][j] = a[i] === b[j] ? dp[i + 1][j + 1] + 1 : Math.max(dp[i + 1][j], dp[i][j + 1]);
+        }
+    }
+    const out: DiffLine[] = [];
+    let i = 0, j = 0;
+    while (i < m && j < n) {
+        if (a[i] === b[j]) { out.push({ type: "same", text: a[i] }); i++; j++; }
+        else if (dp[i + 1][j] >= dp[i][j + 1]) { out.push({ type: "del", text: a[i] }); i++; }
+        else { out.push({ type: "add", text: b[j] }); j++; }
+    }
+    while (i < m) { out.push({ type: "del", text: a[i] }); i++; }
+    while (j < n) { out.push({ type: "add", text: b[j] }); j++; }
+    return out;
 }
 
+const MAX_DIFF_LINES = 2000; // LCS is O(m×n) — beyond this, skip diffing
+
+function DiffView({ original, modified }: { original: string; modified: string }) {
+    const origLines = original.split("\n").length;
+    const modLines = modified.split("\n").length;
+
+    if (origLines > MAX_DIFF_LINES || modLines > MAX_DIFF_LINES) {
+        return (
+            <div className="rounded-md border border-kinetic-border bg-kinetic-surface-container-low font-mono text-xs">
+                <div className="px-3 py-1 text-kinetic-on-surface-variant italic border-b border-kinetic-border/50">
+                    File too large to diff ({origLines} → {modLines} lines) — showing modified content
+                </div>
+                <ScrollArea className="max-h-[40vh]">
+                    <div className="px-3 py-1 whitespace-pre-wrap text-kinetic-on-surface">{modified}</div>
+                </ScrollArea>
+            </div>
+        );
+    }
+
+    const lines = computeLineDiff(original, modified);
+    // Collapse runs of >6 unchanged lines into a fold marker.
+    const rendered: (DiffLine | { type: "fold"; count: number })[] = [];
+    let runStart = -1, runLen = 0;
+    const flush = () => {
+        if (runLen > 6) {
+            rendered.push(lines[runStart], lines[runStart + 1], lines[runStart + 2]);
+            rendered.push({ type: "fold", count: runLen - 4 });
+            rendered.push(lines[runStart + runLen - 1]);
+        } else {
+            for (let k = 0; k < runLen; k++) rendered.push(lines[runStart + k]);
+        }
+        runLen = 0;
+    };
+    lines.forEach((line, idx) => {
+        if (line.type === "same") {
+            if (runLen === 0) runStart = idx;
+            runLen++;
+        } else {
+            if (runLen > 0) flush();
+            rendered.push(line);
+        }
+    });
+    if (runLen > 0) flush();
+
+    return (
+        <div className="rounded-md border border-kinetic-border bg-kinetic-surface-container-low font-mono text-xs overflow-x-auto">
+            {rendered.map((line, idx) => {
+                if (line.type === "fold") {
+                    return (
+                        <div key={idx} className="px-3 py-1 text-kinetic-on-surface-variant italic border-y border-kinetic-border/50">
+                            ⋯ {line.count} unchanged lines ⋯
+                        </div>
+                    );
+                }
+                const cls =
+                    line.type === "add"
+                        ? "bg-green-500/15 text-green-400"
+                        : line.type === "del"
+                          ? "bg-red-500/15 text-red-400 line-through"
+                          : "text-kinetic-on-surface-variant";
+                const prefix = line.type === "add" ? "+ " : line.type === "del" ? "- " : "  ";
+                return (
+                    <div key={idx} className={`px-3 py-0.5 whitespace-pre-wrap ${cls}`}>
+                        {prefix}{line.text}
+                    </div>
+                );
+            })}
+        </div>
+    );
+}
+
+function StaticIssuesCard({ issues }: { issues: ReviewIssue[] }) {
+    const [expanded, setExpanded] = useState(false);
+    if (issues.length === 0) return null;
+
+    const sorted = [...issues].sort((a, b) => {
+        const order = { critical: 0, warning: 1, suggestion: 2 };
+        return (order[a.severity as keyof typeof order] ?? 3) -
+            (order[b.severity as keyof typeof order] ?? 3);
+    });
+
+    return (
+        <Card className="border-kinetic-border bg-kinetic-surface-container">
+            <button
+                onClick={() => setExpanded((v) => !v)}
+                className="w-full flex items-center justify-between p-4 text-left"
+            >
+                <div className="flex items-center gap-2">
+                    <span className="text-lg">📊</span>
+                    <span className="font-medium text-kinetic-on-surface">
+                        Static findings
+                    </span>
+                    <Badge variant="outline" className="border-kinetic-border text-kinetic-on-surface-variant">
+                        {issues.length}
+                    </Badge>
+                </div>
+                {expanded ? (
+                    <ChevronUp className="h-4 w-4 text-kinetic-on-surface-variant" />
+                ) : (
+                    <ChevronDown className="h-4 w-4 text-kinetic-on-surface-variant" />
+                )}
+            </button>
+            {expanded && (
+                <CardContent className="pt-0">
+                    <ScrollArea className="max-h-[40vh]">
+                        <div className="space-y-3">
+                            {sorted.map((issue, idx) => (
+                                <div
+                                    key={idx}
+                                    className="p-3 rounded-md border border-kinetic-border bg-kinetic-surface-container-low"
+                                >
+                                    <div className="flex items-start gap-2">
+                                        <span className="text-lg">{SEVERITY_ICONS[issue.severity] || "⚪"}</span>
+                                        <div className="flex-1 space-y-1">
+                                            <div className="flex items-center gap-2 flex-wrap">
+                                                <span className="font-medium text-sm text-kinetic-on-surface">{issue.title}</span>
+                                                <Badge className={SEVERITY_STYLES[issue.severity] || ""} variant="secondary">
+                                                    {issue.severity}
+                                                </Badge>
+                                                <Badge variant="outline" className="border-kinetic-border text-kinetic-on-surface-variant">{issue.category}</Badge>
+                                            </div>
+                                            <p className="text-xs text-kinetic-on-surface-variant">
+                                                {issue.file_path}
+                                                {issue.line_number ? `:${issue.line_number}` : ""}
+                                            </p>
+                                            <p className="text-sm text-kinetic-on-surface">{issue.explanation}</p>
+                                            {issue.suggestion && (
+                                                <p className="text-sm text-kinetic-primary">
+                                                    💡 {issue.suggestion}
+                                                </p>
+                                            )}
+                                            {issue.code_snippet && (
+                                                <pre className="text-xs p-2 rounded mt-1 overflow-x-auto bg-kinetic-surface-container-high text-kinetic-on-surface border border-kinetic-border">
+                                                    {issue.code_snippet}
+                                                </pre>
+                                            )}
+                                        </div>
+                                    </div>
+                                </div>
+                            ))}
+                        </div>
+                    </ScrollArea>
+                </CardContent>
+            )}
+        </Card>
+    );
+}
+
+type Tab = "diff" | "file" | "guidelines";
+
 export default function ReviewPage() {
+    const { result } = useAnalyze();
     const [tab, setTab] = useState<Tab>("diff");
 
     // Diff review state
     const [staged, setStaged] = useState(false);
     const [targetBranch, setTargetBranch] = useState("");
     const [issues, setIssues] = useState<ReviewIssue[]>([]);
-    const [summary, setSummary] = useState("");
+    const [staticIssues, setStaticIssues] = useState<ReviewIssue[]>([]);
+    const [sessionId, setSessionId] = useState<string | null>(null);
     const [stats, setStats] = useState({ files: 0, added: 0, removed: 0 });
     const [diffLoading, setDiffLoading] = useState(false);
     const [diffError, setDiffError] = useState("");
     const [verdicts, setVerdicts] = useState<Record<number, string>>({});
-    const [verifyLoading, setVerifyLoading] = useState(false);
-    const [verifyResult, setVerifyResult] = useState<ApplyAndVerifyResponse | null>(null);
-    const [verifyError, setVerifyError] = useState("");
+    const [previews, setPreviews] = useState<EditPreview[] | null>(null);
+    const [previewsLoading, setPreviewsLoading] = useState(false);
+    const [previewsError, setPreviewsError] = useState("");
+    const [approved, setApproved] = useState<Record<number, boolean>>({});
+    const [applyLoading, setApplyLoading] = useState(false);
+    const [applyResult, setApplyResult] = useState<ApplyEditsResponse | null>(null);
+    const [applyError, setApplyError] = useState("");
 
     // File review state
     const [filePath, setFilePath] = useState("");
     const [fileReview, setFileReview] = useState("");
+    const [fileStaticIssues, setFileStaticIssues] = useState<ReviewIssue[]>([]);
     const [fileLoading, setFileLoading] = useState(false);
     const [fileError, setFileError] = useState("");
 
@@ -61,25 +235,23 @@ export default function ReviewPage() {
     const [guidelinesLoading, setGuidelinesLoading] = useState(false);
     const [guidelinesError, setGuidelinesError] = useState("");
 
-    // Apply fixes state
-    const [fixes, setFixes] = useState<FixRow[]>([]);
-    const [fixNextId, setFixNextId] = useState(1);
-    const [applyLoading, setApplyLoading] = useState(false);
-    const [applyResult, setApplyResult] = useState("");
-    const [applyError, setApplyError] = useState("");
-
     async function handleReviewDiff() {
         setDiffLoading(true);
         setDiffError("");
         setIssues([]);
-        setSummary("");
+        setStaticIssues([]);
+        setSessionId(null);
         setVerdicts({});
-        setVerifyResult(null);
-        setVerifyError("");
+        setPreviews(null);
+        setPreviewsError("");
+        setApproved({});
+        setApplyResult(null);
+        setApplyError("");
         try {
-            const res = await api.reviewDiff(staged, targetBranch || undefined);
+            const res = await api.reviewDiff(staged, targetBranch || undefined, result?.repo_path);
             setIssues(res.issues);
-            setSummary(res.summary);
+            setStaticIssues(res.static_issues ?? []);
+            setSessionId(res.session_id);
             setStats({
                 files: res.files_reviewed,
                 added: res.lines_added,
@@ -103,24 +275,58 @@ export default function ReviewPage() {
         });
     }
 
-    async function handleApplyAndVerify() {
+    async function handlePreviewEdits() {
         const accepted = Object.entries(verdicts).filter(([, v]) => v === "accepted");
-        if (accepted.length === 0) return;
+        if (accepted.length === 0 || !sessionId) return;
 
-        setVerifyLoading(true);
-        setVerifyError("");
-        setVerifyResult(null);
+        setPreviewsLoading(true);
+        setPreviewsError("");
+        setPreviews(null);
+        setApplyResult(null);
+        setApplyError("");
         try {
             const verdictPayload: Record<string, string> = {};
             for (const [idx, v] of Object.entries(verdicts)) {
                 verdictPayload[idx] = v;
             }
-            const res = await api.applyAndVerify("", verdictPayload);
-            setVerifyResult(res);
+            const res = await api.previewEdits(sessionId, verdictPayload);
+            setPreviews(res.previews);
+            const initial: Record<number, boolean> = {};
+            for (const p of res.previews) {
+                if (!p.error && p.modified_content !== null) {
+                    initial[p.finding_index] = true;
+                }
+            }
+            setApproved(initial);
         } catch (err) {
-            setVerifyError(err instanceof Error ? err.message : "Apply & verify failed");
+            setPreviewsError(err instanceof Error ? err.message : "Preview failed");
         } finally {
-            setVerifyLoading(false);
+            setPreviewsLoading(false);
+        }
+    }
+
+    async function handleApplyEdits() {
+        if (!sessionId || !previews) return;
+        const edits = previews
+            .filter((p) => approved[p.finding_index] && p.modified_content !== null)
+            .map((p) => ({
+                finding_index: p.finding_index,
+                file_path: p.file_path,
+                modified_content: p.modified_content as string,
+                original_content: p.original_content,
+            }));
+        if (edits.length === 0) return;
+
+        setApplyLoading(true);
+        setApplyError("");
+        setApplyResult(null);
+        try {
+            const res = await api.applyEdits(sessionId, edits);
+            setApplyResult(res);
+        } catch (err) {
+            setApplyError(err instanceof Error ? err.message : "Apply failed");
+        } finally {
+            setApplyLoading(false);
         }
     }
 
@@ -129,8 +335,10 @@ export default function ReviewPage() {
         setFileLoading(true);
         setFileError("");
         setFileReview("");
+        setFileStaticIssues([]);
         try {
-            const res = await api.reviewFile(filePath.trim());
+            const res = await api.reviewFile(filePath.trim(), result?.repo_path);
+            setFileStaticIssues(res.static_issues ?? []);
             const issueLines = res.issues.length
                 ? res.issues
                     .map(
@@ -141,12 +349,7 @@ export default function ReviewPage() {
                 : "✅ No issues found";
             const md = [
                 `## File Review: ${res.file_path}`,
-                `**Verdict:** ${res.verdict}`,
-                "",
-                res.verdict_reason,
-                "",
-                "### Summary",
-                res.summary,
+                `**Files reviewed:** ${res.files_reviewed} | **Added:** +${res.lines_added} | **Removed:** -${res.lines_removed}`,
                 "",
                 "### Issues",
                 issueLines,
@@ -173,54 +376,6 @@ export default function ReviewPage() {
         }
     }
 
-    function addFix() {
-        setFixes((prev) => [...prev, { id: fixNextId, file_path: "", old_code: "", new_code: "" }]);
-        setFixNextId((id) => id + 1);
-    }
-
-    function removeFix(id: number) {
-        setFixes((prev) => prev.filter((f) => f.id !== id));
-    }
-
-    function updateFix(id: number, field: keyof FixRow, value: string) {
-        setFixes((prev) => prev.map((f) => (f.id === id ? { ...f, [field]: value } : f)));
-    }
-
-    async function handleApplyFixes() {
-        const validFixes = fixes.filter((f) => f.file_path.trim() && f.old_code.trim());
-        if (validFixes.length === 0) return;
-
-        setApplyLoading(true);
-        setApplyError("");
-        setApplyResult("");
-
-        const payload: FixItem[] = validFixes.map((f) => ({
-            file_path: f.file_path.trim(),
-            old_code: f.old_code,
-            new_code: f.new_code,
-        }));
-
-        try {
-            const res = await api.applyFixes(payload);
-            if (res.failed && res.failed.length > 0) {
-                const first = res.failed[0];
-                setApplyError(
-                    `Fix ${first.index + 1} failed: ${first.error}` +
-                    (res.failed.length > 1 ? ` (${res.failed.length} total failures)` : "")
-                );
-            } else {
-                setApplyResult(`Applied ${res.applied.length}/${res.total} fixes successfully.`);
-                if (res.applied.length === res.total) {
-                    setFixes([]);
-                }
-            }
-        } catch (err) {
-            setApplyError(err instanceof Error ? err.message : "Apply fixes failed");
-        } finally {
-            setApplyLoading(false);
-        }
-    }
-
     const tabButtonClass = (active: boolean) =>
         active
             ? "bg-kinetic-primary text-kinetic-on-primary hover:bg-kinetic-primary/90"
@@ -238,7 +393,6 @@ export default function ReviewPage() {
                     { id: "diff" as Tab, label: "Review Diff", icon: ShieldCheck },
                     { id: "file" as Tab, label: "Review File", icon: FileSearch },
                     { id: "guidelines" as Tab, label: "Guidelines", icon: BookOpen },
-                    { id: "apply" as Tab, label: "Apply Fixes", icon: Wrench },
                 ].map((t) => (
                     <Button
                         key={t.id}
@@ -299,13 +453,13 @@ export default function ReviewPage() {
                         </div>
 
                         {diffError && (
-                            <div className="p-3 bg-kinetic-error/10 text-kinetic-error rounded-md text-sm flex items-center gap-2 border border-kinetic-error/20">
-                                <AlertCircle className="h-4 w-4" />
-                                {diffError}
+                            <div className="p-3 bg-kinetic-error/10 text-kinetic-error rounded-md text-sm flex items-start gap-2 border border-kinetic-error/20">
+                                <AlertCircle className="h-4 w-4 mt-0.5 shrink-0" />
+                                <span className="whitespace-pre-wrap">{diffError}</span>
                             </div>
                         )}
 
-                        {(issues.length > 0 || summary) && (
+                        {(issues.length > 0 || staticIssues.length > 0 || stats.files > 0) && (
                             <div className="space-y-4">
                                 <div className="flex gap-4 text-sm text-kinetic-on-surface-variant">
                                     <span>{stats.files} files reviewed</span>
@@ -315,9 +469,11 @@ export default function ReviewPage() {
 
                                 <Separator className="bg-kinetic-border" />
 
+                                <StaticIssuesCard issues={staticIssues} />
+
                                 {issues.length === 0 ? (
                                     <div className="p-4 rounded-md text-sm border border-kinetic-node-config/30 bg-kinetic-node-config/10 text-kinetic-node-config">
-                                        ✅ No issues found
+                                        ✅ No LLM findings
                                     </div>
                                 ) : (
                                     <ScrollArea className="max-h-[60vh]">
@@ -381,32 +537,22 @@ export default function ReviewPage() {
                                     </ScrollArea>
                                 )}
 
-                                {summary && (
-                                    <>
-                                        <Separator className="bg-kinetic-border" />
-                                        <div className="text-sm text-kinetic-on-surface">
-                                            <span className="font-medium">Summary: </span>
-                                            {summary}
-                                        </div>
-                                    </>
-                                )}
-
                                 {issues.length > 0 && (
                                     <>
                                         <Separator className="bg-kinetic-border" />
                                         <div className="flex items-center gap-4">
                                             <Button
-                                                onClick={handleApplyAndVerify}
-                                                disabled={verifyLoading || Object.values(verdicts).filter(v => v === "accepted").length === 0}
+                                                onClick={handlePreviewEdits}
+                                                disabled={previewsLoading || Object.values(verdicts).filter(v => v === "accepted").length === 0}
                                                 className="bg-kinetic-primary text-kinetic-on-primary hover:bg-kinetic-primary/90"
                                             >
-                                                {verifyLoading ? (
+                                                {previewsLoading ? (
                                                     <>
                                                         <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-                                                        Applying & Verifying...
+                                                        Generating previews...
                                                     </>
                                                 ) : (
-                                                    `Apply & Verify (${Object.values(verdicts).filter(v => v === "accepted").length} accepted)`
+                                                    `Preview Changes (${Object.values(verdicts).filter(v => v === "accepted").length} accepted)`
                                                 )}
                                             </Button>
                                             <span className="text-xs text-kinetic-on-surface-variant">
@@ -415,30 +561,92 @@ export default function ReviewPage() {
                                             </span>
                                         </div>
 
-                                        {verifyError && (
-                                            <div className="p-3 bg-kinetic-error/10 text-kinetic-error rounded-md text-sm flex items-center gap-2 border border-kinetic-error/20">
-                                                <AlertCircle className="h-4 w-4" />
-                                                {verifyError}
+                                        {previewsError && (
+                                            <div className="p-3 bg-kinetic-error/10 text-kinetic-error rounded-md text-sm flex items-start gap-2 border border-kinetic-error/20">
+                                                <AlertCircle className="h-4 w-4 mt-0.5 shrink-0" />
+                                                <span className="whitespace-pre-wrap">{previewsError}</span>
                                             </div>
                                         )}
 
-                                        {verifyResult && (
+                                        {previews && previews.length > 0 && (
+                                            <div className="space-y-3">
+                                                <div className="text-sm font-medium text-kinetic-on-surface">
+                                                    Review the proposed changes before applying:
+                                                </div>
+                                                {previews.map((p) => (
+                                                    <Card key={p.finding_index} className="border-kinetic-border bg-kinetic-surface-container">
+                                                        <div className="p-3 flex items-start gap-3">
+                                                            {p.error ? (
+                                                                <>
+                                                                    <X className="h-4 w-4 text-kinetic-error mt-0.5 shrink-0" />
+                                                                    <div className="flex-1 text-sm">
+                                                                        <span className="font-medium text-kinetic-on-surface">#{p.finding_index} {issues[p.finding_index]?.title ?? p.file_path}</span>
+                                                                        <span className="text-kinetic-on-surface-variant"> — could not generate edit: {p.error}</span>
+                                                                    </div>
+                                                                </>
+                                                            ) : (
+                                                                <>
+                                                                    <input
+                                                                        type="checkbox"
+                                                                        checked={!!approved[p.finding_index]}
+                                                                        onChange={() => setApproved((prev) => ({ ...prev, [p.finding_index]: !prev[p.finding_index] }))}
+                                                                        className="mt-1 h-4 w-4 accent-kinetic-primary shrink-0"
+                                                                    />
+                                                                    <div className="flex-1 space-y-2">
+                                                                        <div className="text-sm font-medium text-kinetic-on-surface">
+                                                                            #{p.finding_index} {issues[p.finding_index]?.title ?? ""} <span className="text-kinetic-on-surface-variant font-normal">({p.file_path})</span>
+                                                                        </div>
+                                                                        <DiffView original={p.original_content ?? ""} modified={p.modified_content ?? ""} />
+                                                                    </div>
+                                                                </>
+                                                            )}
+                                                        </div>
+                                                    </Card>
+                                                ))}
+
+                                                <div className="flex items-center gap-4">
+                                                    <Button
+                                                        onClick={handleApplyEdits}
+                                                        disabled={applyLoading || Object.values(approved).filter(Boolean).length === 0}
+                                                        className="bg-green-600 text-white hover:bg-green-700"
+                                                    >
+                                                        {applyLoading ? (
+                                                            <>
+                                                                <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                                                                Applying...
+                                                            </>
+                                                        ) : (
+                                                            `Apply Selected (${Object.values(approved).filter(Boolean).length})`
+                                                        )}
+                                                    </Button>
+                                                </div>
+                                            </div>
+                                        )}
+
+                                        {applyError && (
+                                            <div className="p-3 bg-kinetic-error/10 text-kinetic-error rounded-md text-sm flex items-start gap-2 border border-kinetic-error/20">
+                                                <AlertCircle className="h-4 w-4 mt-0.5 shrink-0" />
+                                                <span className="whitespace-pre-wrap">{applyError}</span>
+                                            </div>
+                                        )}
+
+                                        {applyResult && (
                                             <Card className="p-4 border-kinetic-border bg-kinetic-surface-container">
                                                 <div className="space-y-2 text-sm">
                                                     <div className="font-medium text-kinetic-on-surface">
-                                                        {verifyResult.verification_passed ? "✅ Verification Passed" : "⚠️ Verification Issues"}
+                                                        {applyResult.verification_passed ? "✅ Verification Passed" : "⚠️ Verification Issues"}
                                                     </div>
                                                     <div className="text-kinetic-on-surface-variant">
-                                                        Applied: {verifyResult.applied.length} | Failed: {verifyResult.failed.length} | SA issues: {verifyResult.static_analysis_issues} | Tests: {verifyResult.tests_passed ? "✅" : "❌"}
+                                                        Applied: {applyResult.applied.length} | Failed: {applyResult.failed.length} | SA issues: {applyResult.static_analysis_issues} | Tests: {applyResult.tests_passed ? "✅" : "❌"}
                                                     </div>
-                                                    {verifyResult.applied.length > 0 && (
+                                                    {applyResult.applied.length > 0 && (
                                                         <ul className="list-disc pl-4 text-kinetic-node-config">
-                                                            {verifyResult.applied.map((a, i) => <li key={i}>{a}</li>)}
+                                                            {applyResult.applied.map((a, i) => <li key={i}>{a}</li>)}
                                                         </ul>
                                                     )}
-                                                    {verifyResult.failed.length > 0 && (
+                                                    {applyResult.failed.length > 0 && (
                                                         <ul className="list-disc pl-4 text-kinetic-error">
-                                                            {verifyResult.failed.map((f, i) => <li key={i}>{f}</li>)}
+                                                            {applyResult.failed.map((f, i) => <li key={i}>{f}</li>)}
                                                         </ul>
                                                     )}
                                                 </div>
@@ -464,7 +672,7 @@ export default function ReviewPage() {
                     <CardContent className="space-y-4">
                         <p className="text-sm text-kinetic-on-surface-variant">
                             Review a file against codebase conventions and patterns.
-                            Requires the codebase to be indexed first.
+                            Works without a full index — the dependency graph is built on-the-fly if needed.
                         </p>
                         <div className="flex gap-2">
                             <Input
@@ -489,7 +697,7 @@ export default function ReviewPage() {
 
                         {fileError && (
                             <div className="p-3 bg-kinetic-error/10 text-kinetic-error rounded-md text-sm border border-kinetic-error/20">
-                                {fileError}
+                                <span className="whitespace-pre-wrap">{fileError}</span>
                             </div>
                         )}
 
@@ -500,6 +708,8 @@ export default function ReviewPage() {
                                 </div>
                             </Card>
                         )}
+
+                        <StaticIssuesCard issues={fileStaticIssues} />
                     </CardContent>
                 </Card>
             )}
@@ -540,7 +750,7 @@ export default function ReviewPage() {
 
                         {guidelinesError && (
                             <div className="p-3 bg-kinetic-error/10 text-kinetic-error rounded-md text-sm border border-kinetic-error/20">
-                                {guidelinesError}
+                                <span className="whitespace-pre-wrap">{guidelinesError}</span>
                             </div>
                         )}
 
@@ -553,99 +763,6 @@ export default function ReviewPage() {
                 </Card>
             )}
 
-            {/* ── Apply Fixes Tab ── */}
-            {tab === "apply" && (
-                <Card className="border-kinetic-border bg-kinetic-surface-container-low">
-                    <CardHeader>
-                        <CardTitle className="flex items-center gap-2 text-kinetic-on-surface">
-                            <Wrench className="h-5 w-5 text-kinetic-primary" />
-                            Apply Code Fixes
-                        </CardTitle>
-                    </CardHeader>
-                    <CardContent className="space-y-4">
-                        <p className="text-sm text-kinetic-on-surface-variant">
-                            Manually specify exact text replacements. Each fix searches for
-                            <code className="bg-kinetic-surface-container px-1 rounded text-xs text-kinetic-on-surface mx-1 border border-kinetic-border">old_code</code>
-                            exactly once in the file and replaces it with
-                            <code className="bg-kinetic-surface-container px-1 rounded text-xs text-kinetic-on-surface mx-1 border border-kinetic-border">new_code</code>.
-                            Include surrounding context (2–3 lines) in old_code to avoid ambiguous matches.
-                        </p>
-
-                        <div className="space-y-3">
-                            {fixes.map((fix) => (
-                                <Card key={fix.id} className="p-3 space-y-2 border-kinetic-border bg-kinetic-surface-container">
-                                    <div className="flex items-center gap-2">
-                                        <Input
-                                            placeholder="File path (e.g. src/main.py)"
-                                            value={fix.file_path}
-                                            onChange={(e) => updateFix(fix.id, "file_path", e.target.value)}
-                                            className={`${inputClass} flex-1`}
-                                        />
-                                        <Button
-                                            variant="ghost"
-                                            size="sm"
-                                            onClick={() => removeFix(fix.id)}
-                                            className="text-kinetic-error hover:bg-kinetic-error/10 hover:text-kinetic-error"
-                                        >
-                                            <Trash2 className="h-4 w-4" />
-                                        </Button>
-                                    </div>
-                                    <Textarea
-                                        placeholder="Old code (exact text to find — include surrounding lines for uniqueness)"
-                                        value={fix.old_code}
-                                        onChange={(e) => updateFix(fix.id, "old_code", e.target.value)}
-                                        rows={3}
-                                        className="font-mono text-xs border-kinetic-border bg-kinetic-surface-container text-kinetic-on-surface placeholder:text-kinetic-on-surface-variant focus-visible:ring-kinetic-primary"
-                                    />
-                                    <Textarea
-                                        placeholder="New code (replacement text)"
-                                        value={fix.new_code}
-                                        onChange={(e) => updateFix(fix.id, "new_code", e.target.value)}
-                                        rows={3}
-                                        className="font-mono text-xs border-kinetic-border bg-kinetic-surface-container text-kinetic-on-surface placeholder:text-kinetic-on-surface-variant focus-visible:ring-kinetic-primary"
-                                    />
-                                </Card>
-                            ))}
-                        </div>
-
-                        <div className="flex gap-2">
-                            <Button
-                                variant="outline"
-                                size="sm"
-                                onClick={addFix}
-                                className="border-kinetic-border bg-kinetic-surface-container text-kinetic-on-surface hover:bg-kinetic-surface-container-high hover:text-kinetic-on-surface"
-                            >
-                                <Plus className="h-4 w-4 mr-1" />
-                                Add Fix
-                            </Button>
-                            <Button
-                                onClick={handleApplyFixes}
-                                disabled={applyLoading || fixes.filter((f) => f.file_path.trim() && f.old_code.trim()).length === 0}
-                                className="bg-kinetic-primary text-kinetic-on-primary hover:bg-kinetic-primary/90"
-                            >
-                                {applyLoading ? (
-                                    <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-                                ) : (
-                                    "Apply Fixes"
-                                )}
-                            </Button>
-                        </div>
-
-                        {applyError && (
-                            <div className="p-3 bg-kinetic-error/10 text-kinetic-error rounded-md text-sm flex items-center gap-2 border border-kinetic-error/20">
-                                <AlertCircle className="h-4 w-4" />
-                                {applyError}
-                            </div>
-                        )}
-
-                        {applyResult && (
-                            <div className="p-3 rounded-md text-sm border border-kinetic-node-config/30 bg-kinetic-node-config/10 text-kinetic-node-config">
-                                ✅ {applyResult}
-                            </div>
-                        )}
-                    </CardContent>
-                </Card>
-            )}
         </div>
     );
 }

@@ -488,14 +488,14 @@
                 label: 'API · 35+ endpoints', group: 'api', color: '#3fb950', tier: 2, x: 60, y: -160,
                 files: ['main.py — 35+ REST endpoints', 'models.py — Pydantic request/response schemas', 'state.py — shared in-memory state', 'cloud.py — GitHub webhooks + cloud admin'],
                 desc: 'FastAPI HTTP layer. SSE streaming for /analyze/stream. Rate limiting, CORS, cloud-mode detection. Endpoints cover analyze, chat, query, review, docs, voice, research, maintenance.',
-                functions: ['/analyze · /analyze/stream (SSE)', '/chat · /chat/stream · /chat/approve', '/overview · /modules/{name} · /blast-radius · /reading-order · /execution-flow', '/semantic-search · /rag/expand-query · /rag/rerank · /rag/symbol-lookup', '/review · /review/file · /review/guidelines · /review/apply', '/docs/index · /docs/search · /docs/ask', '/voice/ask', '/research', '/refresh · /incremental-reindex', '/admin/* (cloud)']
+                functions: ['/analyze · /analyze/stream (SSE)', '/chat · /chat/stream · /chat/approve', '/overview · /modules/{name} · /blast-radius · /reading-order · /execution-flow', '/semantic-search · /rag/expand-query · /rag/rerank · /rag/symbol-lookup', '/review · /review/file · /review/guidelines · /review/preview-edits · /review/apply-edits', '/docs/index · /docs/search · /docs/ask', '/voice/ask', '/research', '/refresh · /incremental-reindex', '/admin/* (cloud)']
             },
 
             mcp: {
                 label: 'MCP · 43 tools', group: 'mcp', color: '#bc8cff', tier: 2, x: -160, y: -160,
                 files: ['server.py — FastMCP server, 42 @mcp.tool() functions, system prompt'],
                 desc: 'Model Context Protocol server. Auto-init with codewalk_analyze_codebase. Workspace-change guards. Tool categories: setup, query, graph, review, docs, maintenance, voice, cloud, HITL.',
-                functions: ['SETUP: analyze_codebase, generate_config', 'QUERY: search_codebase, lookup_symbol, explain_function, explain_class, get_module_info, get_overview, get_blast_radius_map, get_reading_order, get_execution_flow', 'GRAPH: find_circular_dependencies, get_architecture_health, call_chain, show_knowledge_graph', 'REVIEW: run_review, review_file, get_review_details, finding_verdict, apply_accepted, approve_action, apply_fix, verify_fix, get_stack_info, load_guidelines', 'DOCS: index_docs, search_docs, ask_docs', 'MAINT: incremental_reindex, refresh_analysis, run_static_analysis, run_tests', 'VOICE: voice_ask, speak', 'CLOUD: pull_index, connect_repo, index_status, check_version']
+                functions: ['SETUP: analyze_codebase, generate_config', 'QUERY: search_codebase, lookup_symbol, explain_function, explain_class, get_module_info, get_overview, get_blast_radius_map, get_reading_order, get_execution_flow', 'GRAPH: find_circular_dependencies, get_architecture_health, call_chain, show_knowledge_graph', 'REVIEW: run_review, re_review, review_file, review_next_batch, submit_batch_findings, get_review_summary, accept_and_verify_fix, get_stack_info, load_guidelines', 'DOCS: index_docs, search_docs, ask_docs', 'MAINT: incremental_reindex, refresh_analysis, run_static_analysis, run_tests', 'VOICE: voice_ask, speak', 'CLOUD: pull_index, connect_repo, index_status, check_version']
             },
 
             state: {
@@ -558,14 +558,14 @@
                 label: '🤖 LangGraph Agent', group: 'agent', color: '#bc8cff', tier: 5, x: -200, y: 270,
                 files: ['graph.py — compiled StateGraph + HITL', 'tools.py — 11 agent tools', 'prompts.py — system prompt'],
                 desc: 'Conversational agent with tool calling and memory. Human-in-the-loop gate before any file modification via LangGraph interrupt.',
-                functions: ['create_agent()', '11 tools: search, explain, modules, overview, blast radius, reading order, execution flow, architecture health, review diff/file, apply fix, verify fix, load guidelines']
+                functions: ['create_agent()', '11 tools: search, explain, modules, overview, blast radius, reading order, execution flow, architecture health, apply fix, verify fix, load guidelines']
             },
 
             review: {
                 label: '🔬 Code Review', group: 'review', color: '#f85149', tier: 5, x: -40, y: 270,
-                files: ['engine.py — run_review / run_review_context', 'report.py — Finding / ReviewReport models', 'finding_store.py · session_store.py', 'diff_parser.py · fix_applier.py', 'neighborhood.py · static_analysis.py · stack_detect.py', 'reviewers/ · pipeline/ · renderers/'],
+                files: ['engine.py — run_review / run_review_context', 'report.py — Finding / ReviewReport models', 'finding_store.py · session_store.py', 'diff_parser.py · editor.py', 'neighborhood.py · static_analysis.py · stack_detect.py', 'reviewers/ · pipeline/ · renderers/'],
                 desc: 'Multi-stage AI review with architecture context. Parses diff, expands neighborhood, runs static analysis, batched LLM review, clustering, dedup, ranking, adversarial verification, fix application.',
-                functions: ['run_review() — diff review', 'run_review_file() — single-file review', 'apply_fix_to_file()', 'submit_batch_findings()', 'get_review_summary()']
+                functions: ['run_review() — diff review', 'run_review_file() — single-file review', 'apply_edit()', 'submit_batch_findings()', 'get_review_summary()']
             },
 
             voice: {

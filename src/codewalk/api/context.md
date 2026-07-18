@@ -6,7 +6,7 @@ This package exposes Codewalk as an HTTP API and manages shared in-memory state 
 
 | File | Role |
 |------|------|
-| `main.py` | FastAPI app, middleware (rate limit, cloud-mode block, staleness), and all REST endpoints: `/analyze`, `/analyze/stream`, `/chat`, `/chat/stream`, `/chat/approve`, `/research`, `/overview`, `/modules`, `/blast-radius`, `/reading-order`, `/execution-flow`, `/refresh`, `/incremental-reindex`, `/review`, `/review/file`, `/review/guidelines`, `/review/apply`, `/tools/static-analysis`, `/tools/run-tests`, `/semantic-search`, `/rag/expand-query`, `/rag/rerank`, `/rag/symbol-lookup`, `/docs/index`, `/docs/search`, `/docs/ask`, `/cycles`, `/architecture`, `/version`, `/staleness`, `/index-status`, `/health`. The agent's `search_codebase` tool expands each query into 1–3 parallel search angles. |
+| `main.py` | FastAPI app, middleware (rate limit, cloud-mode block, staleness), and all REST endpoints: `/analyze`, `/analyze/stream`, `/chat`, `/chat/stream`, `/chat/approve`, `/research`, `/overview`, `/modules`, `/blast-radius`, `/reading-order`, `/execution-flow`, `/refresh`, `/incremental-reindex`, `/review`, `/review/stream`, `/review/file`, `/review/re-review`, `/review/preview-edits`, `/review/apply-edits`, `/review/guidelines`, `/knowledge-graph`, `/tools/static-analysis`, `/tools/run-tests`, `/semantic-search`, `/rag/expand-query`, `/rag/rerank`, `/rag/symbol-lookup`, `/docs/index`, `/docs/search`, `/docs/ask`, `/cycles`, `/architecture`, `/version`, `/staleness`, `/index-status`, `/health`. `/review`, `/review/stream`, `/review/file`, `/review/re-review`, and `/knowledge-graph` work without a prior ChromaDB index by building the dependency graph on-the-fly. |
 | `state.py` | Module-level shared state: `VectorStore`, `GraphStore`, `GraphRuntime`, agent, modules, files, Postgres helper (`_PgHelper`). |
 | `cloud.py` | GitHub webhook receiver, catch-up/index worker, atomic index publishing, cloud admin routes. |
 | `models.py` | Pydantic request/response models. |
@@ -33,15 +33,20 @@ query/review/chat endpoints read from state
 - `cloud.py` imports `api/state`, `pipeline`, `worker/github_app`, and uses Postgres via `state.get_db()`.
 - Newer RAG endpoints (`/rag/expand-query`, `/rag/rerank`, `/rag/symbol-lookup`) and tool endpoints (`/tools/static-analysis`, `/tools/run-tests`) use request/response models in `models.py`, including `ExpandQueryRequest/Response`, `RerankRequest/Response`, `SymbolLookupRequest/Response`, `StaticAnalysisRequest/Response`, and `TestRunRequest/Response`.
 
-## Recent fixes
+## Recent changes
 
-- Global exception handler now passes through `HTTPException` / `RequestValidationError`; every endpoint also re-raises `HTTPException` before falling back to generic 500 handling.
+- **API review simplification (v2.0)**:
+  - Removed `/review/verdict` and `/review/apply` endpoints.
+  - `POST /review/apply-and-verify` was replaced by `POST /review/preview-edits` (generate diffs, no writes) + `POST /review/apply-edits` (write user-approved diffs + verify/rollback). Both require `session_id`.
+  - `POST /review` and `/review/stream` return raw findings (`issues`) without server-side post-processing.
+  - `ReviewResponse` no longer includes `verdict`, `verdict_reason`, `summary`, `narrative_summary`, `merge_blockers`, or `clusters`.
+  - `ReviewFileResponse` no longer includes `verdict`, `verdict_reason`, or `summary`.
+- Global exception handler now passes through `HTTPException` / `RequestValidationError` and maps `DuckDBLockError` to HTTP 409 with the conflicting PID and `kill` command; every endpoint also re-raises `DuckDBLockError` and `HTTPException` before falling back to generic 500 handling.
 - In-memory rate limiter is now protected by `asyncio.Lock()` so concurrent async requests cannot race on the per-IP window.
 - Cloud DB connections are thread-local; webhook indexing threads get their own `psycopg2` connection.
 - `state.load_scoped_analysis()` repopulates the DuckDB `files` table when it is empty (e.g., after a schema migration) so chunk backfill from ChromaDB does not violate foreign-key constraints.
 - `/admin/index` now offloads git clone/pull and incremental indexing to `asyncio.to_thread()` so the event loop is not blocked.
 - Cloud `_clone_or_pull_repo()` now checks git return codes and surfaces clone/pull failures instead of silently continuing.
-- `/review/apply` now returns the declared `ApplyFixesResponse` model with a `failed` array, so partial failures are visible to the frontend.
 - `/docs/index` maps the internal store result keys to the frontend API contract (`files_indexed`, `chunks_created`).
 - Requests that resolve to a repo different from the currently loaded index are rejected instead of silently using a stale store.
 - Docs endpoints accept `repo_path`; `/review/guidelines` indexes docs from the requested `docs_path`.
@@ -58,3 +63,4 @@ query/review/chat endpoints read from state
 - `POST /analyze` with `index_mode="auto"` no longer silently resumes partial indexes; it returns `status="behind"` and a message telling the caller to use `POST /incremental-reindex` or `POST /analyze` with `index_mode="reindex"`.
 - Agent chat (`/chat`, `/chat/stream`) routes use `agent/tools.py`, where `search_codebase` internally expands the user query into 1–3 complementary retrieval angles and synthesizes the results.
 - `POST /docs/ask` expands the question into 1–3 complementary retrieval angles via `expand_query()`, merges deduplicated doc chunks via `DocStore.multi_search()`, and synthesizes the answer.
+- The frontend review page shows raw findings, lets users accept/reject each issue, previews the proposed diffs via `/review/preview-edits`, and writes the user-approved diffs via `/review/apply-edits` using the `session_id` from the review response.

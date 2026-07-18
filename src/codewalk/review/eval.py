@@ -49,11 +49,13 @@ def evaluate_report(
     expected: list[ExpectedFinding],
 ) -> EvalResult:
     """Evaluate a ReviewReport against a gold set of expected findings."""
+    all_findings = list(report.findings) + list(report.deterministic_findings)
+
     found_expected: set[int] = set()
     used_findings: set[int] = set()
 
     for exp_idx, exp in enumerate(expected):
-        for find_idx, finding in enumerate(report.findings):
+        for find_idx, finding in enumerate(all_findings):
             if find_idx in used_findings:
                 continue
             if _finding_matches(exp, finding):
@@ -62,14 +64,14 @@ def evaluate_report(
                 break
 
     missed = [expected[i] for i in range(len(expected)) if i not in found_expected]
-    false_positives = [report.findings[i] for i in range(len(report.findings)) if i not in used_findings]
+    false_positives = [all_findings[i] for i in range(len(all_findings)) if i not in used_findings]
 
     expected_blockers = [e for e in expected if e.blocking]
-    found_blockers = [e for e in expected if e.blocking and any(_finding_matches(e, f) for f in report.findings)]
+    found_blockers = [e for e in expected if e.blocking and any(_finding_matches(e, f) for f in all_findings)]
 
     blocker_recall = len(found_blockers) / len(expected_blockers) if expected_blockers else 1.0
 
-    reported_blockers = [f for f in report.findings if f.blocking]
+    reported_blockers = [f for f in all_findings if f.blocking]
     true_blockers = [f for f in reported_blockers if any(_finding_matches(e, f) for e in expected)]
     blocker_precision = len(true_blockers) / len(reported_blockers) if reported_blockers else 1.0
 

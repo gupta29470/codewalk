@@ -9,7 +9,6 @@ from src.codewalk.review.report import (
     ArchitectureFlags,
     Finding,
     ReviewContextPackage,
-    ReviewReport,
 )
 
 
@@ -209,40 +208,6 @@ def _read_changed_file_content(repo_path: Path, file_path: str, max_chars: int =
         return text
     except Exception:
         return "(could not read file)"
-
-
-def render_review_report(report: ReviewReport) -> str:
-    """Render a ReviewReport as markdown."""
-    lines: list[str] = [
-        f"## Verdict: {report.verdict.value}",
-        "",
-        f"**Reason:** {report.verdict_reason}",
-        "",
-        f"**Summary:** {report.executive_summary}",
-        "",
-    ]
-
-    if report.merge_blockers:
-        lines.extend(["### Merge blockers", ""])
-        for blocker in report.merge_blockers:
-            lines.append(f"- {blocker}")
-        lines.append("")
-
-    if report.findings:
-        lines.extend(["### Findings", ""])
-        for finding in report.findings:
-            lines.append(
-                f"**{finding.file_path}:{finding.line_number or '-'}** "
-                f"[{finding.severity.value}] {finding.title}"
-            )
-            lines.append(f"{finding.explanation}")
-            if finding.current_code:
-                lines.extend(["Current:", "```", finding.current_code, "```"])
-            if finding.recommended_code:
-                lines.extend(["Recommended:", "```", finding.recommended_code, "```"])
-            lines.append("")
-
-    return "\n".join(lines)
 
 
 def render_review_context(package: ReviewContextPackage) -> str:

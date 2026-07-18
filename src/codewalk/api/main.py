@@ -22,16 +22,18 @@ from fastapi.responses import JSONResponse
 
 from src.codewalk.api.models import (
     AnalyzeRequest, AnalyzeResponse,
-    ApplyAndVerifyRequest, ApplyAndVerifyResponse,
+    PreviewEditsRequest, PreviewEditsResponse, EditPreview,
+    ApplyEditsRequest, ApplyEditsResponse,
     CancelReviewRequest, CancelReviewResponse,
     ChatRequest, ChatResponse,
     ModuleResponse, OverviewResponse,
     BlastRadiusResponse,
     ReviewRequest, ReviewResponse, ReviewStreamRequest,
-    ReviewVerdictRequest, ReviewVerdictResponse,
+    ReReviewRequest,
+    ReviewFileRequest, ReviewFileResponse,
     GuidelinesRequest,
     DocsIndexRequest, DocsAskRequest, DocsSearchRequest, ApproveRequest,
-    ResearchRequest, ResearchResponse, ApplyFixesRequest, ApplyFixesResponse, AppliedFix,
+    ResearchRequest, ResearchResponse,
     SemanticSearchRequest, SemanticSearchResponse, SemanticSearchResult,
     StaticAnalysisRequest, StaticAnalysisResponse, StaticAnalysisIssue,
     TestRunRequest, TestRunResponse,
@@ -55,6 +57,7 @@ from src.codewalk.query import (
 )
 from src.codewalk.log import log as _log
 from src.codewalk.errors import classify_error
+from src.codewalk.graph.graph_store import DuckDBLockError
 
 
 logger = logging.getLogger("codewalk")
@@ -131,6 +134,23 @@ def _resolve_extras_paths(repo_path: str, codewalk_config) -> str:
     return docs_path
 
 
+def _ensure_knowledge_graph(repo_path: str) -> str:
+    """Return the path to .codewalk/knowledge-graph.json, building it if needed.
+
+    This lets the Knowledge Graph UI work without a full ChromaDB index. The
+    on-the-fly build only creates graph.duckdb + knowledge-graph.json; it does
+    NOT embed chunks.
+    """
+    kg_path = Path(repo_path) / ".codewalk" / "knowledge-graph.json"
+    if kg_path.exists():
+        return str(kg_path)
+
+    from src.codewalk.review.engine import build_graph_only
+
+    build_graph_only(Path(repo_path))
+    return str(kg_path)
+
+
 # ─── Lifespan handler (replaces deprecated @app.on_event) ─────────────
 
 @asynccontextmanager
@@ -164,6 +184,19 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.exception_handler(DuckDBLockError)
+async def duckdb_lock_exception_handler(request, exc: DuckDBLockError):
+    """Return a clear 409 Conflict when DuckDB is locked by another process.
+
+    The message already includes the conflicting PID and the kill command.
+    """
+    return JSONResponse(
+        status_code=409,
+        content={"detail": str(exc)},
+    )
+
 
 # ─── Simple in-memory rate limiting ──────────────────────────────────
 import time
@@ -318,6 +351,8 @@ def analyze(request: AnalyzeRequest):
         )
     except HTTPException:
         raise
+    except DuckDBLockError:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -448,6 +483,8 @@ def chat(request: ChatRequest):
 
         answer = result["messages"][-1].content
         return ChatResponse(answer=answer, thread_id=request.thread_id)
+    except DuckDBLockError:
+        raise
     except RuntimeError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except HTTPException:
@@ -530,6 +567,8 @@ def overview():
             riskiest_files=top_risky,
         )
     
+    except DuckDBLockError:
+        raise
     except RuntimeError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except HTTPException:
@@ -581,6 +620,8 @@ def get_module(module_name: str):
     
     except HTTPException:
         raise
+    except DuckDBLockError:
+        raise
     except RuntimeError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except HTTPException:
@@ -626,6 +667,8 @@ def get_blast_radius_for_module(module_name: str = ""):
 
     except HTTPException:
         raise
+    except DuckDBLockError:
+        raise
     except RuntimeError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except HTTPException:
@@ -644,6 +687,8 @@ def list_modules():
             "modules": list(modules_result["modules"].keys()),
             "total": modules_result["stats"]["total_modules"],
         }
+    except DuckDBLockError:
+        raise
     except RuntimeError as e:
         raise HTTPException(status_code=400, detail=str(e))
     
@@ -671,6 +716,8 @@ def get_reading_order():
            item["reason"] = item.get("why", "")
            
        return order
+    except DuckDBLockError:
+        raise
     except RuntimeError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except HTTPException:
@@ -692,6 +739,8 @@ def get_execution_flow():
         order = generate_reading_order(files, deps, graph_runtime=runtime)
         flow = generate_execution_flow(order, deps)
         return flow
+    except DuckDBLockError:
+        raise
     except RuntimeError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except HTTPException:
@@ -716,6 +765,8 @@ def refresh_analysis():
             "files": len(state._files),
             "modules": list(state._modules_result["modules"].keys()),
         }
+    except DuckDBLockError:
+        raise
     except RuntimeError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except HTTPException:
@@ -746,6 +797,8 @@ def incremental_reindex_endpoint():
         )
 
         return result
+    except DuckDBLockError:
+        raise
     except RuntimeError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except HTTPException:
@@ -765,8 +818,7 @@ async def review_endpoint(request: ReviewRequest):
         from src.codewalk.review.engine import run_review
         from src.codewalk.config import get_llm
 
-        state.ensure_initialized()
-        repo_path = state.get_repo_path()
+        repo_path = _resolve_repo_path(request.repo_path)
         if not repo_path:
             raise HTTPException(status_code=400, detail="Repository path not available")
 
@@ -779,10 +831,7 @@ async def review_endpoint(request: ReviewRequest):
             commit=request.commit,
             staged=request.staged,
             llm=llm,
-            incremental=request.incremental,
-            force_full_review=request.force_full_review,
             review_id=review_id,
-            narrative_summary=request.narrative_summary,
         )
 
         from src.codewalk.review.renderers import render_api_response
@@ -790,22 +839,133 @@ async def review_endpoint(request: ReviewRequest):
         response_data = render_api_response(report)
 
         return ReviewResponse(
-            verdict=response_data["verdict"],
-            verdict_reason=response_data["verdict_reason"],
             issues=response_data["issues"],
-            summary=response_data["summary"],
+            static_issues=response_data.get("static_issues", []),
             files_reviewed=response_data["files_reviewed"],
             lines_added=response_data["lines_added"],
             lines_removed=response_data["lines_removed"],
             session_id=response_data["session_id"],
             architecture_flags=response_data["architecture_flags"],
         )
+    except DuckDBLockError:
+        raise
     except RuntimeError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except HTTPException:
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+# ─── POST /review/file ───────────────────────────────────────────────
+@app.post("/review/file", response_model=ReviewFileResponse)
+async def review_file_endpoint(request: ReviewFileRequest):
+    """Review a single file from the current git diff.
+
+    Works without a full ChromaDB index: the dependency graph is built on-the-fly
+    if needed.
+    """
+    try:
+        from src.codewalk.review.engine import run_review
+        from src.codewalk.review.renderers import render_api_response
+        from src.codewalk.config import get_llm
+
+        repo_path = _resolve_repo_path(request.repo_path)
+        if not repo_path:
+            raise HTTPException(status_code=400, detail="Repository path not available")
+
+        llm = get_llm(temperature=0)
+        report = await asyncio.to_thread(
+            run_review,
+            repo_path=Path(repo_path),
+            target_branch=None,
+            commit=None,
+            staged=False,
+            llm=llm,
+            file_filter=[request.file_path],
+        )
+        response_data = render_api_response(report)
+
+        return ReviewFileResponse(
+            file_path=request.file_path,
+            issues=response_data["issues"],
+            static_issues=response_data.get("static_issues", []),
+            files_reviewed=response_data["files_reviewed"],
+            lines_added=response_data["lines_added"],
+            lines_removed=response_data["lines_removed"],
+            session_id=response_data["session_id"],
+        )
+    except DuckDBLockError:
+        raise
+    except RuntimeError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ─── POST /review/re-review ──────────────────────────────────────────
+@app.post("/review/re-review", response_model=ReviewResponse)
+async def re_review_endpoint(request: ReReviewRequest):
+    """Re-run a review for the current diff using a previous session's findings.
+
+    Loads the previous session's persisted findings and passes them to the
+    review engine as `previous_findings`. The LLM decides whether each issue
+    is fixed, new, or still present relative to the current diff.
+    """
+    try:
+        import secrets
+
+        from src.codewalk.review.engine import run_review, _finding_from_dict
+        from src.codewalk.review.session_store import load_session, load_findings
+        from src.codewalk.config import get_llm
+
+        repo_path = _resolve_repo_path(request.repo_path)
+        if not repo_path:
+            raise HTTPException(status_code=400, detail="Repository path not available")
+
+        session = load_session(Path(repo_path), request.session_id)
+        if session is None:
+            raise HTTPException(status_code=404, detail=f"Session {request.session_id} not found")
+
+        folder = session.folder_name or session.session_id
+        raw_findings = load_findings(Path(repo_path), folder) or []
+        previous_findings = [_finding_from_dict(f) for f in raw_findings]
+
+        review_id = secrets.token_urlsafe(12)
+        llm = get_llm(temperature=0)
+        report = await asyncio.to_thread(
+            run_review,
+            repo_path=Path(repo_path),
+            target_branch=request.target_branch,
+            commit=request.commit,
+            staged=request.staged,
+            llm=llm,
+            review_id=review_id,
+            previous_findings=previous_findings,
+        )
+
+        from src.codewalk.review.renderers import render_api_response
+        response_data = render_api_response(report)
+
+        return ReviewResponse(
+            issues=response_data["issues"],
+            static_issues=response_data.get("static_issues", []),
+            files_reviewed=response_data["files_reviewed"],
+            lines_added=response_data["lines_added"],
+            lines_removed=response_data["lines_removed"],
+            session_id=response_data["session_id"],
+            architecture_flags=response_data["architecture_flags"],
+        )
+    except DuckDBLockError:
+        raise
+    except RuntimeError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
 
 # ─── POST /review/cancel ─────────────────────────────────────────────
 @app.post("/review/cancel", response_model=CancelReviewResponse)
@@ -842,8 +1002,7 @@ async def review_stream_endpoint(request: ReviewStreamRequest):
     from src.codewalk.review.progress import ReviewProgressReporter, review_progress_bus
     from src.codewalk.review.renderers import render_api_response
 
-    state.ensure_initialized()
-    repo_path = state.get_repo_path()
+    repo_path = _resolve_repo_path(request.repo_path)
     if not repo_path:
         raise HTTPException(status_code=400, detail="Repository path not available")
 
@@ -879,11 +1038,8 @@ async def review_stream_endpoint(request: ReviewStreamRequest):
                 commit=request.commit,
                 staged=request.staged,
                 llm=llm,
-                incremental=request.incremental,
-                force_full_review=request.force_full_review,
                 review_id=review_id,
                 progress_reporter=reporter,
-                narrative_summary=request.narrative_summary,
             )
             response_data = render_api_response(report)
             reporter.report(
@@ -909,79 +1065,33 @@ async def review_stream_endpoint(request: ReviewStreamRequest):
         },
     )
 
-# ─── POST /review/verdict ────────────────────────────────────────────
-@app.post("/review/verdict")
-def review_verdict_endpoint(request: ReviewVerdictRequest):
-    """Record a user verdict (accepted/rejected) on a review finding."""
-    from src.codewalk.review.session_store import load_findings, save_findings, load_session
-    from datetime import datetime, timezone
+# ─── POST /review/preview-edits ──────────────────────────────────────
+@app.post("/review/preview-edits", response_model=PreviewEditsResponse)
+def preview_edits_endpoint(request: PreviewEditsRequest):
+    """Batch-set verdicts and generate edit previews without writing anything.
 
-    if request.verdict not in ("accepted", "rejected"):
-        raise HTTPException(status_code=422, detail="verdict must be 'accepted' or 'rejected'")
-
-    repo_path = state.get_repo_path()
-    if not repo_path:
-        raise HTTPException(status_code=400, detail="Repository path not available")
-
-    session = load_session(Path(repo_path), request.session_id)
-    if session is None:
-        raise HTTPException(status_code=404, detail=f"Session {request.session_id} not found")
-
-    folder = session.folder_name or session.session_id
-    findings = load_findings(Path(repo_path), folder)
-    if not findings or request.finding_index < 0 or request.finding_index >= len(findings):
-        raise HTTPException(status_code=400, detail=f"Finding index {request.finding_index} out of range")
-
-    findings[request.finding_index]["user_verdict"] = request.verdict
-    findings[request.finding_index]["verdict_at"] = datetime.now(timezone.utc).isoformat()
-    if request.reason:
-        findings[request.finding_index]["verdict_reason"] = request.reason
-
-    save_findings(Path(repo_path), folder, findings)
-
-    title = findings[request.finding_index].get("title", "Untitled")
-    return {"success": True, "message": f"Finding #{request.finding_index} ({title}) marked as {request.verdict}"}
-
-
-# ─── POST /review/apply-and-verify ───────────────────────────────────
-@app.post("/review/apply-and-verify")
-def apply_and_verify_endpoint(request: ApplyAndVerifyRequest):
-    """Batch-set verdicts, apply accepted fixes, and run verification in one call.
-
-    Accepts a dict of {finding_index: verdict} to set verdicts, then applies
-    all accepted fixes, runs static analysis + tests, and persists verification
-    status back to the session JSON.
+    For each accepted finding, the editor produces the proposed new file content
+    (exact match first, LLM-as-editor fallback with retries) in dry-run mode.
+    The frontend shows the diffs; the user approves; /review/apply-edits writes.
     """
-    import os
     import json as _json
     from datetime import datetime, timezone
-    from src.codewalk.review.fix_applier import apply_fix_to_file
+    from src.codewalk.config import get_llm
+    from src.codewalk.review.editor import apply_edit
     from src.codewalk.review.session_store import load_session, _session_dir
-    from src.codewalk.review.finding_store import find_last_review
-    from src.codewalk.review.utils import get_current_branch
-    from src.codewalk.tools.static_analysis import run_static_analysis
-    from src.codewalk.tools.test_runner import run_tests
     from src.codewalk.review.renderers.markdown import render_findings_markdown
 
     repo_path = state.get_repo_path()
     if not repo_path:
         raise HTTPException(status_code=400, detail="Repository path not available")
 
-    # Resolve session
-    if request.session_id:
-        session = load_session(Path(repo_path), request.session_id)
-        if session is None:
-            raise HTTPException(status_code=404, detail=f"Session {request.session_id} not found")
-        folder = session.folder_name or session.session_id
-    else:
-        branch = get_current_branch(Path(repo_path))
-        last_store = find_last_review(Path(repo_path), branch)
-        if not last_store:
-            raise HTTPException(status_code=404, detail="No previous review session found on this branch")
-        session = load_session(Path(repo_path), last_store.review_id)
-        if session is None:
-            raise HTTPException(status_code=404, detail="Could not load latest review session")
-        folder = session.folder_name or session.session_id
+    if not request.session_id:
+        raise HTTPException(status_code=400, detail="session_id is required")
+
+    session = load_session(Path(repo_path), request.session_id)
+    if session is None:
+        raise HTTPException(status_code=404, detail=f"Session {request.session_id} not found")
+    folder = session.folder_name or session.session_id
 
     session_dir = _session_dir(Path(repo_path), folder)
     llm_path = session_dir / "llm_findings.json"
@@ -992,7 +1102,7 @@ def apply_and_verify_endpoint(request: ApplyAndVerifyRequest):
     if not findings:
         raise HTTPException(status_code=400, detail="No findings in this session")
 
-    # Step 1: Write verdicts from the request
+    # Step 1: Persist verdicts from the request
     now = datetime.now(timezone.utc).isoformat()
     for idx_str, verdict in request.verdicts.items():
         try:
@@ -1003,83 +1113,146 @@ def apply_and_verify_endpoint(request: ApplyAndVerifyRequest):
             findings[idx]["user_verdict"] = verdict
             findings[idx]["verdict_at"] = now
 
-    # Step 2: Filter accepted findings with code
-    to_apply = [
-        (i, f) for i, f in enumerate(findings)
-        if f.get("user_verdict") == "accepted"
-        and f.get("recommended_code")
-        and f.get("current_code")
-        and f.get("file_path")
-    ]
-
-    if not to_apply:
-        # Still persist the verdicts even if nothing to apply
-        llm_path.write_text(_json.dumps(findings, indent=2), encoding="utf-8")
-        (session_dir / "llm_findings.md").write_text(
-            render_findings_markdown(findings, title="LLM Findings", source_label="review LLM"),
-            encoding="utf-8",
-        )
-        return ApplyAndVerifyResponse(applied=[], failed=[], total_accepted=0)
-
-    # Step 3: Apply each fix
-    applied_labels: list[str] = []
-    failed_labels: list[str] = []
-    applied_indices: list[int] = []
-    modified_files: list[str] = []
-
-    for idx, finding in to_apply:
-        file_path = finding["file_path"]
-        old_code = finding["current_code"]
-        new_code = finding["recommended_code"]
-
-        full_path = os.path.join(repo_path, file_path)
-        resolved_repo = os.path.realpath(repo_path)
-        resolved_target = os.path.realpath(full_path)
-        if not resolved_target.startswith(resolved_repo + os.sep) and resolved_target != resolved_repo:
-            failed_labels.append(f"#{idx} {file_path}: path traversal blocked")
-            continue
-
-        result = apply_fix_to_file(repo_path, file_path, old_code, new_code)
-        if result["ok"]:
-            applied_indices.append(idx)
-            applied_labels.append(f"#{idx} {file_path}: {finding.get('title', 'applied')}")
-            if file_path not in modified_files:
-                modified_files.append(file_path)
-        else:
-            failed_labels.append(f"#{idx} {file_path}: {result.get('error', 'unknown')}")
-
-    # Step 4: Run verification
-    sa_issues = []
-    test_result = None
-    if modified_files:
-        sa_issues = run_static_analysis(repo_path, modified_files)
-        test_result = run_tests(repo_path, modified_files)
-
-    has_sa_errors = any(
-        getattr(i, "severity", "").lower() in ("critical", "high", "warning")
-        for i in sa_issues
-    )
-    tests_passed = test_result is None or test_result.ok
-    verification_passed = not has_sa_errors and tests_passed
-
-    # Step 5: Persist status back to findings
-    sa_summary = f"{len(sa_issues)} issue(s)" if sa_issues else "clean"
-    test_summary = "pass" if tests_passed else "fail"
-
-    for idx in applied_indices:
-        findings[idx]["status"] = "fixed" if verification_passed else "still_present"
-        findings[idx]["verifier_notes"] = f"SA: {sa_summary}, Tests: {test_summary}"
-
     llm_path.write_text(_json.dumps(findings, indent=2), encoding="utf-8")
     (session_dir / "llm_findings.md").write_text(
         render_findings_markdown(findings, title="LLM Findings", source_label="review LLM"),
         encoding="utf-8",
     )
 
-    return ApplyAndVerifyResponse(
+    # Step 2: Generate previews for accepted findings (dry run — no writes)
+    accepted = [
+        (i, f) for i, f in enumerate(findings)
+        if f.get("user_verdict") == "accepted" and f.get("file_path")
+    ]
+
+    previews = []
+    if accepted:
+        from concurrent.futures import ThreadPoolExecutor
+
+        llm = get_llm(temperature=0)
+
+        def _preview_one(idx_finding):
+            idx, finding = idx_finding
+            result = apply_edit(
+                repo_path,
+                finding["file_path"],
+                old_code=finding.get("current_code"),
+                new_code=finding.get("recommended_code"),
+                finding=finding,
+                llm=llm,
+                max_attempts=3,
+                dry_run=True,
+            )
+            if result["ok"]:
+                return EditPreview(
+                    finding_index=idx,
+                    file_path=finding["file_path"],
+                    original_content=result["original_content"],
+                    modified_content=result["modified_content"],
+                )
+            return EditPreview(
+                finding_index=idx,
+                file_path=finding["file_path"],
+                error=result.get("error", "unknown error"),
+            )
+
+        # Parallel across findings; order preserved by input order.
+        with ThreadPoolExecutor(max_workers=4) as pool:
+            previews = list(pool.map(_preview_one, accepted))
+
+    return PreviewEditsResponse(previews=previews, total_accepted=len(accepted))
+
+
+# ─── POST /review/apply-edits ────────────────────────────────────────
+@app.post("/review/apply-edits", response_model=ApplyEditsResponse)
+def apply_edits_endpoint(request: ApplyEditsRequest):
+    """Write user-approved edits to disk, then verify with static analysis + tests.
+
+    The user reviewed the diffs from /review/preview-edits and approved these
+    exact contents, so no LLM is involved here. Files that fail verification
+    are rolled back to their original content — never re-edited, since the
+    user approved a specific diff.
+    """
+    import json as _json
+    from src.codewalk.review.editor import write_approved_edit, verify_and_rollback
+    from src.codewalk.review.session_store import load_session, _session_dir
+    from src.codewalk.review.renderers.markdown import render_findings_markdown
+
+    repo_path = state.get_repo_path()
+    if not repo_path:
+        raise HTTPException(status_code=400, detail="Repository path not available")
+
+    if not request.session_id:
+        raise HTTPException(status_code=400, detail="session_id is required")
+
+    session = load_session(Path(repo_path), request.session_id)
+    if session is None:
+        raise HTTPException(status_code=404, detail=f"Session {request.session_id} not found")
+    folder = session.folder_name or session.session_id
+
+    session_dir = _session_dir(Path(repo_path), folder)
+    llm_path = session_dir / "llm_findings.json"
+    if not llm_path.exists():
+        raise HTTPException(status_code=400, detail="No llm_findings.json found for this session")
+
+    findings = _json.loads(llm_path.read_text(encoding="utf-8"))
+
+    # Step 1: Write approved edits to disk
+    applied: list = []
+    failed: list[str] = []
+    originals: dict = {}
+    modified_files: list[str] = []
+
+    for edit in request.edits:
+        result = write_approved_edit(
+            repo_path, edit.file_path, edit.modified_content,
+            expected_original=edit.original_content,
+        )
+        if result["ok"]:
+            applied.append(edit)
+            originals[edit.file_path] = result["original_content"]
+            if edit.file_path not in modified_files:
+                modified_files.append(edit.file_path)
+        else:
+            failed.append(f"#{edit.finding_index} {edit.file_path}: {result['error']}")
+
+    # Step 2: Verify — roll back files that fail
+    outcome = verify_and_rollback(repo_path, modified_files, originals)
+    rolled_back = outcome["rolled_back_files"]
+
+    applied_labels: list[str] = []
+    for edit in applied:
+        if edit.file_path in rolled_back:
+            failed.append(f"#{edit.finding_index} {edit.file_path}: Rolled back: verification failed")
+        else:
+            applied_labels.append(f"#{edit.finding_index} {edit.file_path}")
+
+    sa_issues = outcome["sa_issues"]
+    test_result = outcome["test_result"]
+    tests_passed = test_result is None or test_result.ok
+    verification_passed = outcome["verification_passed"] and not failed
+
+    # Step 3: Persist status back to findings
+    sa_summary = f"{len(sa_issues)} issue(s)" if sa_issues else "clean"
+    test_summary = "pass" if tests_passed else "fail"
+
+    if findings:
+        for edit in applied:
+            if 0 <= edit.finding_index < len(findings):
+                findings[edit.finding_index]["verifier_notes"] = f"SA: {sa_summary}, Tests: {test_summary}"
+                if edit.file_path in rolled_back:
+                    findings[edit.finding_index]["status"] = "still_present"
+
+        llm_path.write_text(_json.dumps(findings, indent=2), encoding="utf-8")
+        (session_dir / "llm_findings.md").write_text(
+            render_findings_markdown(findings, title="LLM Findings", source_label="review LLM"),
+            encoding="utf-8",
+        )
+
+    return ApplyEditsResponse(
         applied=applied_labels,
-        failed=failed_labels,
-        total_accepted=len(to_apply),
+        failed=failed,
+        total=len(request.edits),
         static_analysis_issues=len(sa_issues),
         tests_passed=tests_passed,
         verification_passed=verification_passed,
@@ -1112,6 +1285,8 @@ def load_guidelines_endpoint(request: GuidelinesRequest):
         count = store.index_docs(path)
         return {"status": "loaded", "chunks": count, "path": path}
     except HTTPException:
+        raise
+    except DuckDBLockError:
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -1158,6 +1333,8 @@ async def voice_ask_endpoint(
     # 2. Auto-load index if server restarted
     try:
         state.require_index()
+    except DuckDBLockError:
+        raise
     except RuntimeError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
@@ -1208,6 +1385,36 @@ def get_architecture():
         "centrality": runtime.centrality(top_n=10),
         "cycles": runtime.detect_cycles(),
     }
+
+
+@app.get("/knowledge-graph")
+def get_knowledge_graph(repo_path: str | None = Query(None, description="Optional repo path. Discovered from cwd if omitted.")):
+    """Return the knowledge graph JSON, building it on-the-fly if missing.
+
+    Does NOT require a ChromaDB index; it builds graph.duckdb + knowledge-graph.json
+    from the repo's source files when the JSON is absent.
+    """
+    try:
+        resolved = _resolve_repo_path(repo_path)
+        kg_path = _ensure_knowledge_graph(resolved)
+        with open(kg_path, "r", encoding="utf-8") as f:
+            graph = json.load(f)
+        # Ensure the project block reflects the resolved repo.
+        project = graph.get("project", {}) or {}
+        project["name"] = Path(resolved).name
+        project["repoPath"] = resolved
+        graph["project"] = project
+        return graph
+    except HTTPException:
+        raise
+    except DuckDBLockError:
+        raise
+    except RuntimeError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        logger.exception("[knowledge-graph] failed to load/build graph")
+        raise HTTPException(status_code=500, detail=f"Failed to load knowledge graph: {e}")
+
 
 # ─── POST /docs/index ────────────────────────────────────────────────
 @app.post("/docs/index")
@@ -1372,6 +1579,8 @@ def chat_approve(request: ApproveRequest):
     
     except HTTPException:
         raise
+    except DuckDBLockError:
+        raise
     except RuntimeError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
@@ -1397,6 +1606,8 @@ async def research_endpoint(request: ResearchRequest):
             "report": report.markdown,
             "sources": report.sources,
         }
+    except DuckDBLockError:
+        raise
     except RuntimeError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except HTTPException:
@@ -1409,58 +1620,6 @@ async def research_endpoint(request: ResearchRequest):
 # ─── Cloud routes — noop if cloud env vars not set ───────────────────
 from src.codewalk.api.cloud import setup_cloud
 setup_cloud(app)
-
-# ─── POST /review/apply ──────────────────────────────────────────────
-@app.post("/review/apply", response_model=ApplyFixesResponse)
-def apply_fixes_endpoint(request: ApplyFixesRequest):
-    """Apply approved code fixes to files on disk.
-
-    Each fix is validated before application:
-      - File must exist inside the repo
-      - old_code must be found uniquely (exact, normalized, or context-line)
-      - Write is atomic (temp file + rename)
-      - Python files are syntax-checked after applying
-      - Optional formatter is run if configured
-
-    This endpoint REQUIRES the user to have already reviewed the fixes.
-    It does NOT ask for approval — the caller (frontend/CLI) is responsible
-    for showing fixes and getting user consent before calling this endpoint.
-
-    Returns 200 with all applied fixes and any failures. Partial failures are
-    reported in the ``failed`` array so the frontend can show per-fix errors.
-    """
-    try:
-        from src.codewalk.review.fix_applier import apply_fixes_batch
-
-        repo_path = state.get_repo_path()
-        fixes = [fix.model_dump() for fix in request.fixes]
-
-        result = apply_fixes_batch(
-            repo_path,
-            fixes,
-            continue_on_error=request.continue_on_error,
-            validate_only=request.validate_only,
-            run_formatter=request.run_formatter,
-        )
-
-        return ApplyFixesResponse(
-            applied=[
-                AppliedFix(
-                    file_path=a["file_path"],
-                    old_code=a["old_code"],
-                    new_code=a["new_code"],
-                    message=a["message"],
-                )
-                for a in result["applied"]
-            ],
-            failed=result["failed"],
-            total=result["total"],
-        )
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
 
 # ─── POST /tools/static-analysis ─────────────────────────────────────
 @app.post("/tools/static-analysis", response_model=StaticAnalysisResponse)
@@ -1579,6 +1738,8 @@ def semantic_search(request: SemanticSearchRequest):
         return SemanticSearchResponse(results=results)
     except HTTPException:
         raise
+    except DuckDBLockError:
+        raise
     except RuntimeError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
@@ -1672,6 +1833,8 @@ def symbol_lookup_endpoint(request: SymbolLookupRequest):
         ]
         return SymbolLookupResponse(results=results)
     except HTTPException:
+        raise
+    except DuckDBLockError:
         raise
     except RuntimeError as e:
         raise HTTPException(status_code=400, detail=str(e))

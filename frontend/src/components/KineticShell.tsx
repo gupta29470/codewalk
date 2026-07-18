@@ -44,7 +44,7 @@ const NAV_ITEMS: NavItem[] = [
   { href: "/research", label: "Research", icon: Search, requiresIndex: true },
   { href: "/chat", label: "Chat", icon: MessageCircle, requiresIndex: true },
   { href: "/voice", label: "Voice", icon: Mic, requiresIndex: true },
-  { href: "/review", label: "Code Review", icon: ShieldCheck, requiresIndex: true },
+  { href: "/review", label: "Code Review", icon: ShieldCheck, requiresIndex: false },
   { href: "/incremental-reindex", label: "Smart Reindex", icon: RefreshCw, requiresIndex: true },
   { href: "/admin", label: "Cloud Admin", icon: Cloud, requiresIndex: false },
 ];

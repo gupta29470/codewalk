@@ -6,38 +6,38 @@ from typing import Any
 from src.codewalk.review.report import ReviewReport
 
 
+def _issue_dict(finding) -> dict[str, Any]:
+    return {
+        "id": finding.id,
+        "severity": finding.severity.value,
+        "confidence": finding.confidence.value,
+        "category": finding.category.value,
+        "file_path": finding.file_path,
+        "line_number": finding.line_number,
+        "title": finding.title,
+        "explanation": finding.explanation,
+        "suggestion": finding.recommended_code,
+        "fix_description": finding.recommended_code,
+        "code_snippet": finding.current_code,
+        "blocking": finding.blocking,
+        "source": finding.source.value,
+        "status": finding.status,
+    }
+
+
 def render_api_response(report: ReviewReport) -> dict[str, Any]:
-    """Build the API response dict from a ReviewReport."""
-    issues = [
-        {
-            "id": finding.id,
-            "severity": finding.severity.value,
-            "confidence": finding.confidence.value,
-            "category": finding.category.value,
-            "file_path": finding.file_path,
-            "line_number": finding.line_number,
-            "title": finding.title,
-            "explanation": finding.explanation,
-            "suggestion": finding.recommended_code,
-            "fix_description": finding.recommended_code,
-            "code_snippet": finding.current_code,
-            "blocking": finding.blocking,
-            "source": finding.source.value,
-            "evidence": finding.evidence,
-            "cluster_id": finding.cluster_id,
-            "verifier_notes": finding.verifier_notes,
-            "status": finding.status,
-        }
-        for finding in report.findings
-    ]
+    """Build the API response dict from a ReviewReport.
+
+    Issues come from the LLM; static_issues come from deterministic/static analysis.
+    This mirrors the MCP split between ``findings`` and ``deterministic_findings``.
+    """
+    issues = [_issue_dict(f) for f in report.findings]
+    static_issues = [_issue_dict(f) for f in report.deterministic_findings]
 
     return {
         "schema_version": report.schema_version,
-        "verdict": report.verdict.value,
-        "verdict_reason": report.verdict_reason,
         "issues": issues,
-        "summary": report.executive_summary,
-        "narrative_summary": report.narrative_summary,
+        "static_issues": static_issues,
         "files_reviewed": report.files_reviewed,
         "lines_added": report.lines_added,
         "lines_removed": report.lines_removed,

@@ -322,7 +322,7 @@ Calls:
 
 **What happens**: Codewalk finds which symbols were changed, then queries DuckDB for their callers to warn about breaking changes.
 
-**Applying fixes (MCP):** Review is agent-driven — your IDE agent calls `codewalk_run_review` (or `codewalk_review_file`). After the agent presents findings, user edits `llm_findings.json` to set `user_verdict` to `accepted` or `rejected`, then calls `codewalk_apply_and_verify_fix` to apply all accepted fixes and run static analysis + tests in one call. Alternative per-fix HITL path: `codewalk_approve_action` → approve in host UI → `codewalk_apply_fix` with `approval_token`. See [README.md](../README.md) § "Review & approve fixes".
+**Applying fixes (MCP):** Review is agent-driven — your IDE agent calls `codewalk_run_review` (or `codewalk_review_file`). After the agent presents findings, user edits `llm_findings.json` to set `user_verdict` to `accepted` or `rejected`, Ensure the entire documentation section is updated to reflect the new tool names and workflow. Remove any references to removed tools.. See [README.md](../README.md) § "Review & approve fixes".
 
 ```python
 # review/engine.py — called by codewalk_run_review / codewalk_review_file

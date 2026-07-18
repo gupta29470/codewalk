@@ -1,9 +1,8 @@
-"""Review report data model for the one-stop review flow."""
+"""Review report data model for the simplified one-stop review flow."""
 from __future__ import annotations
 
 import hashlib
 import re
-import uuid
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
@@ -21,12 +20,11 @@ def _extract_function_or_class_anchor(snippet: str | None) -> str | None:
     if not snippet:
         return None
 
-    # Look for Python / Go / JavaScript / TypeScript / Java / etc. definitions.
     patterns = [
         r"^\s*(?:async\s+)?def\s+([a-zA-Z_][a-zA-Z0-9_]*)",
         r"^\s*class\s+([a-zA-Z_][a-zA-Z0-9_]*)",
         r"^\s*(?:public|private|protected|static|async)?\s*(?:function\s+)?([a-zA-Z_][a-zA-Z0-9_]*)\s*\(",
-        r"^\s*(?:void|int|String|bool|Future|Widget|[a-zA-Z_][a-zA-Z0-9_<>\[\]]*)\s+([a-zA-Z_][a-zA-Z0-9_]*)\s*\(",
+        r"^\s*(?:void|int|String|bool|Future|Widget|[a-zA-Z_][a-zA-Z0-9_<>,\[\]]*)\s+([a-zA-Z_][a-zA-Z0-9_]*)\s*\(",
     ]
     for line in snippet.splitlines():
         for pattern in patterns:
@@ -42,7 +40,6 @@ def _semantic_anchor(finding: Finding) -> str:
     Tries to identify the enclosing function/class or API call pattern so that
     the same bug survives renames and line-number shifts.
     """
-    # Try current_code first, then evidence snippets.
     snippets = [finding.current_code]
     for ev in finding.evidence or []:
         snippets.append(ev.get("snippet"))
@@ -52,9 +49,7 @@ def _semantic_anchor(finding: Finding) -> str:
         if anchor:
             return anchor.lower()
 
-    # Fallback to normalized title with line-number-independent parts.
     title = _normalize(finding.title)
-    # Strip variable names that commonly vary.
     title = re.sub(r"\b[a-z_][a-z0-9_]{0,2}\b", "", title)
     title = re.sub(r"\d+", "", title)
     return "|".join([_normalize(title), finding.file_path])
@@ -96,13 +91,6 @@ class Category(str, Enum):
     HYGIENE = "hygiene"
 
 
-class Verdict(str, Enum):
-    """Overall review outcome."""
-    APPROVE = "approve"
-    APPROVE_WITH_NITS = "approve_with_nits"
-    REQUEST_CHANGES = "request_changes"
-
-
 class Confidence(str, Enum):
     """How confident the reviewer is in a finding."""
     HIGH = "high"
@@ -128,7 +116,7 @@ class Pillar(str, Enum):
 
 @dataclass
 class Finding:
-    """A single issue produced by the one-stop review pipeline."""
+    """A single issue produced by the review pipeline."""
 
     severity: Severity
     category: Category
@@ -145,9 +133,8 @@ class Finding:
     subcategory: str | None = None
     id: str = field(default="")
     evidence: list[dict[str, Any]] = field(default_factory=list)
-    cluster_id: str | None = None
     verifier_notes: str | None = None
-    status: str = "new"  # new | fixed | still_present
+    status: str = "new"  # new | still_present
     user_verdict: str | None = None  # null | "accepted" | "rejected"
     verdict_at: str | None = None  # ISO timestamp of user verdict
 
@@ -172,7 +159,6 @@ class Finding:
             "confidence": self.confidence.value,
             "source": self.source.value,
             "evidence": self.evidence,
-            "cluster_id": self.cluster_id,
             "verifier_notes": self.verifier_notes,
             "status": self.status,
             "user_verdict": self.user_verdict,
@@ -194,49 +180,15 @@ class ArchitectureFlags:
 
 
 @dataclass
-class Cluster:
-    """A group of related findings surfaced as a single review item."""
-
-    id: str
-    title: str
-    representative_finding: Finding
-    findings: list[Finding] = field(default_factory=list)
-    severity: Severity = Severity.SUGGESTION
-    priority: str = "P3"
-    count: int = 0
-    verifier_notes: str | None = None
-
-    def __post_init__(self) -> None:
-        if not self.id:
-            self.id = hashlib.sha256(
-                f"{self.title}:{self.severity.value}".encode("utf-8")
-            ).hexdigest()[:16]
-        if self.count == 0 and self.findings:
-            self.count = len(self.findings)
-
-    def to_dict(self) -> dict[str, Any]:
-        return {
-            "id": self.id,
-            "title": self.title,
-            "severity": self.severity.value,
-            "priority": self.priority,
-            "count": self.count,
-            "verifier_notes": self.verifier_notes,
-            "representative_finding": self.representative_finding.to_dict(),
-            "findings": [f.to_dict() for f in self.findings],
-        }
-
-
-@dataclass
 class ReviewReport:
-    """Final output of codewalk_run_review."""
+    """Final output of run_review: raw findings + metadata.
 
-    verdict: Verdict
-    verdict_reason: str
-    executive_summary: str
-    narrative_summary: str = ""
-    merge_blockers: list[str] = field(default_factory=list)
+    Mirrors the MCP design: ``deterministic_findings`` are produced first by
+    static analysis / graph metrics, then ``findings`` are produced by the LLM.
+    """
+
     findings: list[Finding] = field(default_factory=list)
+    deterministic_findings: list[Finding] = field(default_factory=list)
     architecture_flags: ArchitectureFlags = field(default_factory=ArchitectureFlags)
     files_reviewed: int = 0
     lines_added: int = 0
@@ -246,21 +198,12 @@ class ReviewReport:
     session_id: str = ""
     folder_name: str = ""
     schema_version: str = "2.0"
-    clusters: list[Cluster] = field(default_factory=list)
-    fixed_count: int = 0
-    new_count: int = 0
-    still_present_count: int = 0
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "schema_version": self.schema_version,
-            "verdict": self.verdict.value,
-            "verdict_reason": self.verdict_reason,
-            "executive_summary": self.executive_summary,
-            "narrative_summary": self.narrative_summary,
-            "merge_blockers": self.merge_blockers,
             "issues": [f.to_dict() for f in self.findings],
-            "clusters": [c.to_dict() for c in self.clusters],
+            "static_issues": [f.to_dict() for f in self.deterministic_findings],
             "architecture_flags": self.architecture_flags.to_dict(),
             "files_reviewed": self.files_reviewed,
             "lines_added": self.lines_added,
@@ -269,16 +212,7 @@ class ReviewReport:
             "time_seconds": self.time_seconds,
             "session_id": self.session_id,
             "folder_name": self.folder_name,
-            "fixed_count": self.fixed_count,
-            "new_count": self.new_count,
-            "still_present_count": self.still_present_count,
         }
-
-    def to_markdown(self) -> str:
-        """Deprecated: use src.codewalk.review.renderers.render_review_report."""
-        from src.codewalk.review.renderers import render_review_report
-
-        return render_review_report(self)
 
 
 @dataclass
@@ -342,7 +276,7 @@ class ReviewContextPackage:
         }
 
     def to_markdown(self) -> str:
-        """Deprecated: use src.codewalk.review.renderers.render_review_context."""
+        """Render as markdown for the MCP host LLM."""
         from src.codewalk.review.renderers import render_review_context
 
         return render_review_context(self)
