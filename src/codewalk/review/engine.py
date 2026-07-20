@@ -1145,6 +1145,7 @@ def run_review(
         )
 
     llm_instance = llm or create_review_llm(temperature=0)
+    # Langfuse tracing is auto-attached by get_llm() via _attach_langfuse()
 
     session = _create_review_session(repo_path, target_branch, commit, staged)
 
@@ -1204,6 +1205,8 @@ def run_review(
             [_finding_to_dict(f) for f in llm_findings],
         )
 
+        push_review_metrics(session.folder_name, llm_findings, total_token_usage)
+
         final_report = ReviewReport(
             findings=llm_findings,
             deterministic_findings=static_findings,
@@ -1261,3 +1264,36 @@ def run_review(
 
     save_session(session)
     return final_report
+
+
+def push_review_metrics(folder_name, findings, total_tokens):
+    """Push quality metrics to Langfuse dashboard."""
+    if not os.getenv("LANGFUSE_SECRET_KEY"):
+        return
+    try:
+        from langfuse import get_client, Langfuse
+
+        langfuse = get_client()
+        trace_id = Langfuse.create_trace_id(seed=folder_name)
+
+        # findings are Finding dataclass objects — use attribute access, not .get()
+        blockers = sum(1 for f in findings if getattr(f, "severity", None) == Severity.BLOCKER)
+
+        langfuse.create_score(
+            trace_id=trace_id, name="blocker_count",
+            value=float(blockers), data_type="NUMERIC",
+        )
+
+        langfuse.create_score(
+            trace_id=trace_id, name="total_tokens",
+            value=float(total_tokens), data_type="NUMERIC",
+        )
+
+        langfuse.create_score(
+            trace_id=trace_id, name="finding_count",
+            value=float(len(findings)), data_type="NUMERIC",
+        )
+
+        langfuse.flush()
+    except Exception:
+        pass  # never crash for metrics
