@@ -3,7 +3,7 @@ import logging
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import StrOutputParser
 
-from src.codewalk.config import settings, get_llm
+from src.codewalk.config import settings, get_llm, push_langfuse_scores
 from src.codewalk.embeddings.vector_store import VectorStore
 from src.codewalk.rag.prompts import SYSTEM_PROMPT, QUESTION_PROMPT
 from src.codewalk.log import log as _log
@@ -218,13 +218,21 @@ def retrieve_corrective(question: str, store, n_results: int = 5,
         use_expansion=True, use_reranker=False,
     )
 
-    return {
+    result = {
         "chunks": results,
         "confidence": confidence,
         "retrieval_good": retrieval_good,
-        "total_retrieved": len(results),  # after dedup but before free grading
+        "total_retrieved": len(results),
         "total_after_filter": len(results),
     }
+
+    push_langfuse_scores({
+        "retrieval_confidence": confidence,
+        "chunks_retrieved": len(results),
+        "retrieval_good": 1 if retrieval_good else 0,
+    }, comment=f"query: {question[:80]}")
+
+    return result
 
 
 def ask_corrective(question: str, store, n_results: int = 5,
@@ -291,6 +299,13 @@ def ask_corrective(question: str, store, n_results: int = 5,
 
         if grade.faithful and grade.relevant:
             _log(f"[corrective] Answer GOOD on attempt {attempt + 1}")
+            push_langfuse_scores({
+                "retrieval_confidence": confidence,
+                "faithful_score": grade.faithful_score,
+                "relevant_score": grade.relevant_score,
+                "retries": attempt,
+                "chunks_used": len(filtered),
+            }, comment=f"query: {question[:80]}")
             return {
                 "answer": answer,
                 "confident": True,
@@ -310,6 +325,11 @@ def ask_corrective(question: str, store, n_results: int = 5,
 
     # ── Exhausted retries ──
     _log("[corrective] Retries exhausted — returning best-effort answer")
+    push_langfuse_scores({
+        "retrieval_confidence": best_confidence,
+        "retries": MAX_RETRIES,
+        "answer_confident": 0,
+    }, comment=f"exhausted: {question[:80]}")
     return {
         "answer": best_answer or "I couldn't find relevant information to answer that question.",
         "confident": False,
