@@ -59,7 +59,7 @@ def scan_directory(directory: str) -> list[dict]:
     files = []
     root_str = str(root)
 
-    for dirpath, dirs, filenames in _os.walk(root):
+    for dirpath, dirs, filenames in _os.walk(root, followlinks=False):
         # Step 1: Prune excluded dirs IN-PLACE — os.walk won't descend into them
         dirs[:] = [d for d in dirs if not should_skip_dir(d)]
 
@@ -73,11 +73,15 @@ def scan_directory(directory: str) -> list[dict]:
                 continue
 
             full_path = _os.path.join(dirpath, fname)
+            try:
+                size = _os.path.getsize(full_path)
+            except OSError:
+                continue  # broken symlink or inaccessible file
             files.append({
                 "file_path": relative,
                 "absolute_path": full_path,
                 "language": detect_language(Path(full_path)),
-                "size_bytes": _os.path.getsize(full_path),
+                "size_bytes": size,
             })
     
     _log(f"[scanner] Scanned {directory} → {len(files)} files")

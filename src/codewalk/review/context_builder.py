@@ -5,6 +5,8 @@ LLM and parses structured findings; the MCP path returns it to the host LLM.
 """
 from __future__ import annotations
 
+import logging
+import subprocess
 import threading
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -18,6 +20,8 @@ from src.codewalk.review.utils import smart_truncate_file_content
 
 if TYPE_CHECKING:
     from src.codewalk.review.static_analysis import StaticAnalysisResult
+
+logger = logging.getLogger(__name__)
 
 
 _UNIFIED_REVIEW_SYSTEM_PROMPT = """# Principal Software Engineer — Code Review
@@ -110,6 +114,23 @@ def _format_rubrics(rubrics: Rubrics) -> str:
     return "\n\n".join(parts)
 
 
+def _git_recent_commits(repo_path: Path, file_path: str, n: int = 3) -> str:
+    """Return last N commit oneline summaries for a file, or empty string on failure."""
+    try:
+        result = subprocess.run(
+            ["git", "log", "--oneline", f"-{n}", "--", file_path],
+            capture_output=True,
+            text=True,
+            cwd=str(repo_path),
+            timeout=5,
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            return result.stdout.strip()
+    except Exception:
+        logger.debug("git log failed for %s", file_path)
+    return ""
+
+
 def build_unified_batch_context(
     repo_path: Path,
     batch: list[DiffFile],
@@ -120,6 +141,7 @@ def build_unified_batch_context(
     user_prompt: str = "",
     previous_findings: list[Finding] | None = None,
     cancel_event: threading.Event | None = None,
+    file_token_cap: int = 10_000,
 ) -> str:
     """Build a single review context string shared by API and MCP paths.
 
@@ -150,6 +172,7 @@ def build_unified_batch_context(
         parts.append(f"## Team-specific instructions\n\n{user_prompt}")
 
     # Neighborhood context.
+    deep_mode = len(batch) == 1 and file_token_cap > 10_000
     graph_runtime, owns_runtime = _load_graph_runtime(repo_path)
     graph_store = graph_runtime.store if graph_runtime and hasattr(graph_runtime, "store") else None
     try:
@@ -157,7 +180,8 @@ def build_unified_batch_context(
             repo_path,
             batch,
             graph_store=graph_store,
-            max_tokens=30_000,
+            max_tokens=60_000 if deep_mode else 30_000,
+            deep=deep_mode,
         )
     finally:
         if owns_runtime and graph_runtime is not None and hasattr(graph_runtime, "store"):
@@ -184,7 +208,7 @@ def build_unified_batch_context(
 
         content = _read_file_content(repo_path, df.file_path)
         if content:
-            truncated = smart_truncate_file_content(content, df.hunks, max_tokens=10_000)
+            truncated = smart_truncate_file_content(content, df.hunks, max_tokens=file_token_cap)
             parts.append("```")
             parts.append(truncated)
             parts.append("```")
@@ -195,6 +219,14 @@ def build_unified_batch_context(
         parts.append("```diff")
         parts.append(_format_hunks(df))
         parts.append("```")
+
+        # In single-file mode, add recent commit history for extra context
+        if deep_mode:
+            git_log = _git_recent_commits(repo_path, df.file_path)
+            if git_log:
+                parts.append("\n**Recent commits:**")
+                parts.append(f"```\n{git_log}\n```")
+
         parts.append("")
 
     if neighborhood and neighborhood.snippets:

@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import threading
 import time
 from dataclasses import dataclass
@@ -21,6 +22,7 @@ from typing import Any
 from src.codewalk.review.progress import ReviewProgressReporter
 
 logger = logging.getLogger("codewalk")
+
 
 from langchain_core.language_models.chat_models import BaseChatModel
 
@@ -420,6 +422,96 @@ def _build_static_findings(static_result: StaticAnalysisResult) -> list[Finding]
 _build_layer0_findings = _build_static_findings
 
 
+# ─── Security keyword heuristic (deterministic, pre-LLM) ─────────────
+
+_SECURITY_KEYWORDS = {
+    # OAuth / OIDC / PKCE
+    "codeVerifier", "code_verifier", "codeChallenge", "code_challenge",
+    "authorizationCode", "authorization_code", "accessToken", "access_token",
+    "refreshToken", "refresh_token", "idToken", "id_token",
+    "clientSecret", "client_secret", "pkce", "nonce",
+    # Authentication / Session
+    "password", "credential", "credentials", "sessionToken", "session_token",
+    "authToken", "auth_token", "bearer", "jwt", "jwtSecret", "jwt_secret",
+    "signingKey", "signing_key", "privateKey", "private_key",
+    # API Keys / Secrets
+    "apiKey", "api_key", "apiSecret", "api_secret", "secret", "secretKey",
+    "secret_key", "masterKey", "master_key", "encryptionKey", "encryption_key",
+    # Authorization / Validation
+    "authorization", "authenticate", "isAuthenticated", "is_authenticated",
+    "requireAuth", "require_auth", "validateToken", "validate_token",
+    "verifyToken", "verify_token", "checkPermission", "check_permission",
+    # Encryption
+    "encrypt", "decrypt", "hmac", "cipher", "salt",
+    # Security controls
+    "csrf", "csrfToken", "csrf_token", "rateLmit", "rate_limit",
+    # Certificates
+    "certificate", "cert", "ssl", "tls", "pinning",
+    # Storage
+    "keychain", "keystore", "secureStorage", "secure_storage",
+}
+
+# Comment prefixes across languages
+_COMMENT_PREFIXES = ("//", "#", "/*", "*", "<!--", "--")
+
+
+def _detect_commented_security_code(diff_files: list[DiffFile]) -> list[Finding]:
+    """Flag added lines that are comments containing security keywords.
+
+    Catches cases like:
+      + // let codeVerifier = ...
+      + # token = decrypt(...)
+      + // await validateToken(...)
+
+    These may indicate security mechanisms being disabled without replacement.
+    """
+    findings: list[Finding] = []
+    seen: set[tuple[str, str]] = set()  # (file_path, keyword) — dedupe per file
+
+    for df in diff_files:
+        for hunk in df.hunks:
+            for line in hunk.lines:
+                if line.change_type != "added":
+                    continue
+
+                stripped = line.content.strip()
+
+                # Is it a comment?
+                if not any(stripped.startswith(prefix) for prefix in _COMMENT_PREFIXES):
+                    continue
+
+                # Does it contain a security keyword?
+                stripped_lower = stripped.lower()
+                for keyword in _SECURITY_KEYWORDS:
+                    if keyword.lower() in stripped_lower:
+                        dedup_key = (df.file_path, keyword)
+                        if dedup_key in seen:
+                            break
+                        seen.add(dedup_key)
+
+                        findings.append(
+                            Finding(
+                                severity=Severity.ERROR,
+                                category=Category.SECURITY,
+                                file_path=df.file_path,
+                                line_number=line.line_number,
+                                title=f"Commented-out security code: {keyword}",
+                                explanation=(
+                                    f"A new commented-out line contains the security keyword `{keyword}`. "
+                                    "If this code was previously active, commenting it out may disable "
+                                    "a security mechanism (authentication, encryption, token validation). "
+                                    "Verify this is intentional and not a debugging leftover."
+                                ),
+                                blocking=False,
+                                confidence=Confidence.MEDIUM,
+                                source=Source.DETERMINISTIC,
+                            )
+                        )
+                        break  # one finding per line
+
+    return findings
+
+
 def _build_graph_only(repo_path: Path) -> None:
     """Build dependency graph + DuckDB for a repo that has no .codewalk/ index.
 
@@ -525,10 +617,13 @@ def _build_common_context(
         )
 
         diff_files = static_result.diff_files
+        # Single-file mode: when only one file is under review, expand context deeply
+        single_file_mode = len(diff_files) == 1
         # Pass graph_store to neighborhood so it works in MCP mode too
         graph_store = graph_runtime.store if graph_runtime and hasattr(graph_runtime, "store") else None
-        neighborhood = expand_neighborhood(repo_path, diff_files, graph_store=graph_store)
+        neighborhood = expand_neighborhood(repo_path, diff_files, graph_store=graph_store, deep=single_file_mode)
         static_findings = _build_static_findings(static_result)
+        static_findings.extend(_detect_commented_security_code(diff_files))
         file_tree = get_full_file_tree(repo_path)
 
         relevant_files = {df.file_path for df in diff_files}
@@ -702,7 +797,7 @@ def _run_review_in_batches(
     relevant_files = {df.file_path for df in diff_files}
 
     if neighborhood is None:
-        neighborhood = expand_neighborhood(repo_path, diff_files)
+        neighborhood = expand_neighborhood(repo_path, diff_files, deep=len(diff_files) == 1)
 
     # Stack detection: only run if rubrics not pre-provided (avoids duplicate LLM call)
     stack_header = ""
@@ -762,6 +857,8 @@ def _run_review_in_batches(
     def _review_batch(batch: list[DiffFile]) -> tuple[list[Finding], int]:
         if cancel_event is not None and cancel_event.is_set():
             raise ReviewCancelledError(getattr(cancel_event, "_review_id", "unknown"))
+        # Single-file mode: raise per-file token cap from 10K to 25K
+        _file_cap = 25_000 if len(diff_files) == 1 else 10_000
         batch_context = build_unified_batch_context(
             repo_path=repo_path,
             batch=batch,
@@ -772,6 +869,7 @@ def _run_review_in_batches(
             user_prompt=user_prompt,
             previous_findings=previous_findings or [],
             cancel_event=cancel_event,
+            file_token_cap=_file_cap,
         )
         try:
             return run_structured_review(

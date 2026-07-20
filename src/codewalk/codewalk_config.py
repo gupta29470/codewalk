@@ -179,7 +179,7 @@ def codewalk_scan_directory(directory: str, config: CodewalkConfig) -> list[dict
     files = []
     root_str = str(root)
 
-    for dirpath, dirs, filenames in _os.walk(root):
+    for dirpath, dirs, filenames in _os.walk(root, followlinks=False):
         rel_dir = _os.path.relpath(dirpath, root_str)
 
         # Step 1: Prune excluded dirs IN-PLACE.
@@ -196,11 +196,15 @@ def codewalk_scan_directory(directory: str, config: CodewalkConfig) -> list[dict
                 continue
 
             full_path = _os.path.join(dirpath, fname)
+            try:
+                size = _os.path.getsize(full_path)
+            except OSError:
+                continue  # broken symlink or inaccessible file
             files.append({
                 "file_path": relative,
                 "absolute_path": full_path,
                 "language": detect_language(Path(full_path)),
-                "size_bytes": _os.path.getsize(full_path),
+                "size_bytes": size,
             })
 
     return files

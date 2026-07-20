@@ -198,12 +198,13 @@ def get_diff(
     result = subprocess.run(
         cmd,
         capture_output=True,
-        text=True,
         timeout=60,
         cwd=repo_path,
     )
 
-    diff_output = result.stdout
+    # Decode with errors="replace" so binary file content in diffs doesn't crash.
+    # Git may include raw bytes when diffing deleted binary files.
+    diff_output = result.stdout.decode("utf-8", errors="replace")
 
     if append_untracked:
         diff_output += _synthetic_untracked_diff(repo_path)
@@ -211,7 +212,11 @@ def get_diff(
     return diff_output
 
 def get_parsed_diff(diff_text: str) -> list[DiffFile]:
-    """Parse raw unified diff text into structured DiffFile objects."""
+    """Parse raw unified diff text into structured DiffFile objects.
+
+    Skips files whose diff content contains replacement characters (binary
+    content that survived UTF-8 decode with errors='replace').
+    """
     from unidiff import PatchSet
 
     if not diff_text.strip():
@@ -219,8 +224,27 @@ def get_parsed_diff(diff_text: str) -> list[DiffFile]:
     
     patch = PatchSet(diff_text)
     diff_files = []
+    skipped: list[str] = []
 
     for patched_file in patch:
+        # Skip binary files — their content will have replacement chars from decode
+        if patched_file.is_binary_file:
+            skipped.append(patched_file.path)
+            continue
+
+        # Also skip if any hunk line contains the replacement character (binary leaked through)
+        is_binary_content = False
+        for hunk in patched_file:
+            for line in hunk:
+                if "\ufffd" in line.value:
+                    is_binary_content = True
+                    break
+            if is_binary_content:
+                break
+        if is_binary_content:
+            skipped.append(patched_file.path)
+            continue
+
         hunks = []
         for hunk in patched_file:
             lines = []
@@ -258,5 +282,9 @@ def get_parsed_diff(diff_text: str) -> list[DiffFile]:
             added_lines=patched_file.added,
             removed_lines=patched_file.removed,
         ))
+
+    if skipped:
+        from src.codewalk.log import log as _log
+        _log(f"[diff_parser] Skipped {len(skipped)} binary/non-UTF-8 file(s): {skipped}")
 
     return diff_files

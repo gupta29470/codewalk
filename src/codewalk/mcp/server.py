@@ -1678,11 +1678,16 @@ def _build_batch_context_for_host(
     static_result,
     stack_header: str,
     rubrics,
+    deep: bool = False,
 ) -> str:
     """Build review context markdown for a batch of files."""
     from src.codewalk.review.neighborhood import expand_neighborhood
     from src.codewalk.review.utils import smart_truncate_file_content
     from src.codewalk.review.engine import _load_graph_runtime
+    from src.codewalk.review.context_builder import _git_recent_commits
+
+    # Single-file deep mode: only when caller explicitly requests it
+    deep_mode = deep
 
     parts: list[str] = []
 
@@ -1707,7 +1712,11 @@ def _build_batch_context_for_host(
     graph_runtime, owns = _load_graph_runtime(repo_path)
     graph_store = graph_runtime.store if graph_runtime and hasattr(graph_runtime, "store") else None
     try:
-        neighborhood = expand_neighborhood(repo_path, batch, graph_store=graph_store, max_tokens=15_000)
+        neighborhood = expand_neighborhood(
+            repo_path, batch, graph_store=graph_store,
+            max_tokens=60_000 if deep_mode else 15_000,
+            deep=deep_mode,
+        )
     finally:
         if owns and graph_runtime and hasattr(graph_runtime, "store"):
             try:
@@ -1716,6 +1725,7 @@ def _build_batch_context_for_host(
                 pass
 
     # Per-file context
+    file_token_cap = 25_000 if deep_mode else 10_000
     for df in batch:
         ra = static_result.risk_annotations.get(df.file_path)
         parts.append(f"### {df.file_path} (+{df.added_lines}/-{df.removed_lines})")
@@ -1732,7 +1742,7 @@ def _build_batch_context_for_host(
             except Exception:
                 pass
         if content:
-            truncated = smart_truncate_file_content(content, df.hunks, max_tokens=4000)
+            truncated = smart_truncate_file_content(content, df.hunks, max_tokens=file_token_cap)
             parts.append("```")
             parts.append(truncated)
             parts.append("```")
@@ -1748,6 +1758,13 @@ def _build_batch_context_for_host(
                 prefix = {"added": "+", "removed": "-", "context": " "}.get(line.change_type, " ")
                 parts.append(f"{prefix}{line.content}")
             parts.append("```")
+
+        # In single-file mode, add recent commit history
+        if deep_mode:
+            git_log = _git_recent_commits(repo_path, df.file_path)
+            if git_log:
+                parts.append("\n**Recent commits:**")
+                parts.append(f"```\n{git_log}\n```")
         parts.append("")
 
     # Neighborhood context
@@ -2193,6 +2210,7 @@ def codewalk_review_file(
         # Build context using the same helper as batched review
         batch_context = _build_batch_context_for_host(
             repo, target_diff_files, static_result, stack_header, rubrics,
+            deep=True,
         )
 
         lines = [f"# Single File Review: `{file_path}`\n"]

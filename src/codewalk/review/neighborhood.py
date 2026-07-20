@@ -97,8 +97,12 @@ def _get_graph_store(graph_store=None):
         return None
 
 
-def _find_callers(repo_path: Path, diff_file: DiffFile, graph_store=None) -> list[NeighborhoodSnippet]:
-    """Find top callers of changed symbols in a file."""
+def _find_callers(repo_path: Path, diff_file: DiffFile, graph_store=None, deep: bool = False) -> list[NeighborhoodSnippet]:
+    """Find top callers of changed symbols in a file.
+
+    When deep=True (single-file review), use a wider caller window (−10/+50)
+    and allow more callers per symbol.
+    """
     snippets: list[NeighborhoodSnippet] = []
     store = _get_graph_store(graph_store)
     if not store:
@@ -108,6 +112,10 @@ def _find_callers(repo_path: Path, diff_file: DiffFile, graph_store=None) -> lis
         symbols = store.get_symbols_in_file(str(repo_path / diff_file.file_path))
     except Exception:
         return snippets
+
+    max_callers_per_symbol = 10 if deep else 5
+    caller_before = 10 if deep else 5
+    caller_after = 50 if deep else 25
 
     seen_files: set[str] = set()
     for sym in symbols:
@@ -119,7 +127,7 @@ def _find_callers(repo_path: Path, diff_file: DiffFile, graph_store=None) -> lis
         except Exception:
             continue
 
-        for caller in callers[:5]:
+        for caller in callers[:max_callers_per_symbol]:
             caller_file = caller.get("file_path") or caller.get("path")
             if not caller_file or caller_file in seen_files:
                 continue
@@ -127,8 +135,8 @@ def _find_callers(repo_path: Path, diff_file: DiffFile, graph_store=None) -> lis
             caller_path = repo_path / caller_file
             # Use line_number from graph to read around the actual call site
             caller_line = caller.get("line_number") or caller.get("line", 1)
-            start = max(1, caller_line - 5)
-            end = caller_line + 25
+            start = max(1, caller_line - caller_before)
+            end = caller_line + caller_after
             content = _read_lines(caller_path, start, end)
             if content:
                 snippets.append(
@@ -268,6 +276,7 @@ def expand_neighborhood(
     max_snippets: int = 20,
     max_tokens: int = 30_000,
     graph_store=None,
+    deep: bool = False,
 ) -> NeighborhoodResult:
     """Expand neighborhood context for changed files.
 
@@ -280,7 +289,12 @@ def expand_neighborhood(
         max_tokens: Hard token budget for total neighborhood context (default 30K).
         graph_store: Optional graph store instance. If provided, used instead of
             the api.state singleton (important for MCP mode).
+        deep: When True (single-file mode), widens caller window and raises budget.
     """
+    if deep:
+        max_snippets = max(max_snippets, 30)
+        max_tokens = max(max_tokens, 60_000)
+
     if relevant_files is None:
         relevant_files = {df.file_path for df in diff_files}
 
@@ -288,7 +302,7 @@ def expand_neighborhood(
     seen: set[tuple[str, str]] = set()
 
     for df in diff_files:
-        for snippet in _find_callers(repo_path, df, graph_store=graph_store):
+        for snippet in _find_callers(repo_path, df, graph_store=graph_store, deep=deep):
             key = (snippet.file_path, snippet.source)
             if key not in seen:
                 seen.add(key)

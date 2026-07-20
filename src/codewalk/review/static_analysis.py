@@ -224,6 +224,17 @@ def run_static_analysis(
         if not df.file_path.startswith(".codewalk/")
     ]
 
+    # Apply codewalk.yaml exclude patterns to diff files
+    try:
+        from src.codewalk.codewalk_config import load_codewalk_yaml, is_excluded_file
+        config = load_codewalk_yaml(str(repo_path))
+        diff_files = [
+            df for df in diff_files
+            if not is_excluded_file(df.file_path, df.file_path, config, repo_path=str(repo_path))
+        ]
+    except Exception:
+        pass  # proceed without filtering if config loading fails
+
     total_added = 0
     total_removed = 0
 

@@ -8,10 +8,15 @@ Find concrete, actionable issues introduced or worsened by the changes. Do not p
 1. **Type safety** — verify types are used consistently across declarations and implementations; flag unsafe casts, non-null assertions, and mismatched contracts.
 2. **Runtime safety** — ensure external data, null values, empty collections, concurrency, and async boundaries are handled safely; flag resource leaks and race conditions.
 3. **Error handling** — check that failures are propagated or handled explicitly; flag swallowed errors, empty catch blocks, ignored return values, and missing failure paths.
-4. **Security** — verify secrets stay out of code, inputs are sanitized or parameterized, and authentication, authorization, and rate-limiting controls remain intact.
+4. **Security** — verify secrets stay out of code, inputs are sanitized or parameterized (including GraphQL mutations, gRPC calls, and template strings — not just SQL), and authentication, authorization, and rate-limiting controls remain intact.
 5. **Architecture** — ensure files live in the correct layer; flag illegal imports, deep cross-package dependencies, leaked concerns, and inconsistent naming.
 6. **Test coverage** — new business logic should be tested with meaningful assertions; flag tests that merely exercise code or hide real failures behind excessive mocking.
 7. **DRY and idioms** — flag duplicated literals, values, or logic that should be centralized; ensure code follows the language and project idioms without redundant branches or expressions.
+8. **Cross-file contract integrity** — when a function signature changes (parameters added, removed, or retyped), verify that callers visible in the neighborhood context still match. Flag removed parameters that callers still pass, added required parameters without caller updates, and return-type changes that break consumers.
+9. **Commented-out security code** — flag commented-out authentication, authorization, encryption, token-validation, or PKCE code. Treat it as a blocker if the code was previously active and the diff removes or disables it without a replacement.
+10. **Config consistency** — when the diff touches config files (JSON, YAML, XML, plist, properties), verify that values are consistent across environments (dev/staging/prod) and platforms (iOS/Android/web). Flag scheme, host, or credential mismatches between platform configs.
+11. **Deprecation awareness** — flag usage of APIs deprecated in the current or next major platform version when the diff introduces or touches the call site. Prefer the documented replacement API.
+12. **Silent failure coercion** — flag patterns like `?? ""`, `?? []`, `|| ""`, or `catch { return null }` on security-critical or auth values (tokens, codes, secrets, credentials). These convert failures into silent empty-success, masking bugs that should propagate as errors.
 
 ## Severity
 - **critical**: security vulnerability, crash, data loss, race condition, breaking API change, PII exposure

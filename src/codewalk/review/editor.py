@@ -23,7 +23,6 @@ from typing import Any
 
 from src.codewalk.log import log as _log
 
-
 @dataclass
 class SearchReplaceBlock:
     """One SEARCH/REPLACE edit block parsed from an LLM response."""
@@ -409,7 +408,9 @@ def _apply_llm_edit(
             prompt += f"\n\nPrevious attempt failed: {last_error}\nCorrect the edit above."
 
         try:
-            response = llm.invoke([("human", prompt)])
+            response = llm.invoke(
+                [("human", prompt)],
+            )
             response_text = response.content if hasattr(response, "content") else str(response)
         except Exception as e:
             _log(f"[editor] LLM call failed on attempt {attempt}: {e}")
