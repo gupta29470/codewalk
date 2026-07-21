@@ -1817,6 +1817,16 @@ def codewalk_review_next_batch(session_id: str) -> str:
         return f"❌ No batch state found for session `{session_id}`. Was it started with codewalk_run_review?"
 
     batch_state = _json.loads(batch_state_path.read_text(encoding="utf-8"))
+
+    # Gate: require submission for the current batch before advancing
+    current_submitted_idx = batch_state["current_batch_index"]
+    outcomes = batch_state.get("batch_outcomes", {})
+    if str(current_submitted_idx + 1) not in outcomes:
+        return (
+            f"⚠️ Submit findings for batch {current_submitted_idx + 1} before advancing "
+            f"(use `notes` if batch is clean)."
+        )
+
     current_idx = batch_state["current_batch_index"] + 1
     total = batch_state["total_batches"]
 
@@ -1886,12 +1896,19 @@ def codewalk_review_next_batch(session_id: str) -> str:
         lines.append(f"2. Call `codewalk_get_review_summary('{session_id}')` to produce the final verdict")
         lines.append("**This is the last batch.**")
 
+    # Context independence reminder
+    lines.append("")
+    lines.append("───")
+    lines.append("This batch is standalone. After submitting findings, you may")
+    lines.append("clear all prior batch context from this conversation.")
+    lines.append("───")
+
     return "\n".join(lines)
 
 
 # ─── TOOL 11h [REVIEW · AI]: codewalk_submit_batch_findings ─────────
 @mcp.tool()
-def codewalk_submit_batch_findings(session_id: str, findings: list[dict]) -> str:
+def codewalk_submit_batch_findings(session_id: str, findings: list[dict], notes: str = "") -> str:
     """Save findings from the current batch to persistent storage.
 
     Call this after reviewing each batch. Findings are appended to llm_findings.json
@@ -1911,6 +1928,8 @@ def codewalk_submit_batch_findings(session_id: str, findings: list[dict]) -> str
     Args:
         session_id: Session ID from codewalk_run_review.
         findings: List of finding dicts from this batch.
+        notes: Justification when findings is empty (required for clean batches).
+            Example: 'boilerplate constants, no logic changed'
 
     Returns:
         Confirmation with running total.
@@ -1933,6 +1952,14 @@ def codewalk_submit_batch_findings(session_id: str, findings: list[dict]) -> str
 
     if not llm_findings_path.exists():
         return f"❌ No llm_findings.json found. Was this session started with codewalk_run_review?"
+
+    # Gate: empty submissions require a justification
+    if not findings and not notes.strip():
+        return (
+            "⚠️ Empty findings need a justification — call again with "
+            "notes='<why this batch is clean>' "
+            "(e.g. 'boilerplate constants, no logic changed')"
+        )
 
     # Load existing findings
     existing = _json.loads(llm_findings_path.read_text(encoding="utf-8"))
@@ -1969,6 +1996,19 @@ def codewalk_submit_batch_findings(session_id: str, findings: list[dict]) -> str
         ),
         encoding="utf-8",
     )
+
+    # Record batch outcome in batch_state.json
+    if batch_state_path.exists():
+        bs = _json.loads(batch_state_path.read_text(encoding="utf-8"))
+        outcomes = bs.setdefault("batch_outcomes", {})
+        outcome_entry = {
+            "outcome": "findings" if findings else "clean",
+            "count": len(findings),
+        }
+        if notes.strip():
+            outcome_entry["notes"] = notes.strip()
+        outcomes[str(batch_num)] = outcome_entry
+        batch_state_path.write_text(_json.dumps(bs, indent=2), encoding="utf-8")
 
     return (
         f"✅ Saved {len(findings)} findings from batch {batch_num}. "
@@ -2040,6 +2080,40 @@ def codewalk_get_review_summary(session_id: str) -> str:
 
     if batch_state:
         parts.append(f"- **{batch_state['total_files']} files** reviewed in **{batch_state['total_batches']} batches**")
+
+    # Coverage stats from batch outcomes
+    batch_outcomes = batch_state.get("batch_outcomes", {}) if batch_state else {}
+    total_batches = batch_state.get("total_batches", 0) if batch_state else 0
+    if total_batches:
+        with_findings = sum(1 for o in batch_outcomes.values() if o.get("outcome") == "findings")
+        clean_justified = sum(1 for o in batch_outcomes.values() if o.get("outcome") == "clean")
+        tracked = with_findings + clean_justified
+        not_reviewed = total_batches - tracked
+        # Legacy sessions won't have batch_outcomes at all
+        if batch_outcomes:
+            parts.append("")
+            parts.append("### Review Coverage")
+            parts.append(f"- Batches with findings: **{with_findings}**")
+            parts.append(f"- Batches clean (justified): **{clean_justified}**")
+            if not_reviewed > 0:
+                parts.append(f"- Not reviewed (abandoned): **{not_reviewed}** ⚠️")
+            # Show clean-batch notes for transparency
+            clean_notes = [
+                (k, o.get("notes", ""))
+                for k, o in sorted(batch_outcomes.items(), key=lambda x: int(x[0]))
+                if o.get("outcome") == "clean" and o.get("notes")
+            ]
+            if clean_notes:
+                parts.append("")
+                parts.append("**Clean batch justifications:**")
+                for batch_num, note in clean_notes[:20]:  # cap display at 20
+                    parts.append(f"- Batch {batch_num}: {note}")
+                if len(clean_notes) > 20:
+                    parts.append(f"- ... and {len(clean_notes) - 20} more")
+        parts.append("")
+        parts.append("_Context: every batch gets fresh full context (rubrics, diffs, neighborhood). "
+                     "Prior batch findings/reasoning are not carried forward by design._")
+        parts.append("")
 
     # Stats
     total = len(static_findings) + len(llm_findings)
