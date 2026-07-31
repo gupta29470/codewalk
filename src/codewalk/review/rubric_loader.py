@@ -106,7 +106,6 @@ def build_rubrics(
                 languages.add(name)
 
     core = _load_rubric("core", repo_path) or ""
-    fallback = _load_rubric("fallback", repo_path) or ""
 
     language_rubrics: dict[str, str] = {}
     for lang in sorted(languages):
@@ -131,6 +130,13 @@ def build_rubrics(
             framework_parts.append(detected_framework)
 
     framework = "\n\n".join(framework_parts)
+
+    # fallback.md substantially duplicates core.md's principles (naming,
+    # layer placement, error handling, DRY) and its remaining UI/lifecycle
+    # guidance is meaningless for framework-less code -- only load it when
+    # neither a language nor a framework rubric was resolved at all (a
+    # truly unrecognized file extension with no framework signal).
+    fallback = "" if (language_rubrics or framework) else (_load_rubric("fallback", repo_path) or "")
 
     return Rubrics(
         core=core,

@@ -186,6 +186,196 @@ def _detect_with_llm(
         return None
 
 
+# Content-based framework detection: some ecosystems have no single manifest
+# file that reliably distinguishes their frameworks (a Podfile/Package.swift/
+# *.xcodeproj can exist for SwiftUI or UIKit; a build.gradle can declare
+# Android and/or Spring dependencies in too many shapes to parse reliably),
+# and others benefit from reinforcing the manifest check for monorepo diffs
+# whose in-scope package.json/requirements.txt doesn't list the dependency
+# directly. These scan the *content* of changed files for framework-specific
+# imports/patterns instead. Both frameworks may be detected for apps mixing
+# two of them (e.g. UIKit + SwiftUI), same as any other rubric combination.
+_SWIFTUI_PATTERNS = (
+    "import SwiftUI",
+    "@State ",
+    "@Binding ",
+    "@ObservedObject ",
+    "@EnvironmentObject ",
+    "@StateObject ",
+    ": View {",
+    ": View,",
+)
+_UIKIT_PATTERNS = ("import UIKit", "UIViewController", "UIView")
+
+_KOTLIN_ANDROID_PATTERNS = (
+    "import android.",
+    "androidx.",
+    "@Composable",
+    "AppCompatActivity",
+    ": Activity",
+    ": Fragment",
+    "ViewModel(",
+)
+_KOTLIN_SPRING_PATTERNS = (
+    "org.springframework",
+    "@RestController",
+    "@SpringBootApplication",
+    "@Service",
+    "@Autowired",
+    "@Repository",
+)
+
+_NEXTJS_PATTERNS = (
+    "from 'next/",
+    'from "next/',
+    "getServerSideProps",
+    "getStaticProps",
+    '"use client"',
+    "'use client'",
+    '"use server"',
+    "'use server'",
+)
+_REACT_PATTERNS = (
+    "from 'react'",
+    'from "react"',
+    "import React",
+    "useState(",
+    "useEffect(",
+    "React.FC",
+)
+_TS_JS_EXTENSIONS = {".ts", ".tsx", ".js", ".jsx"}
+
+_FASTAPI_PATTERNS = ("from fastapi", "import fastapi", "FastAPI(")
+_DJANGO_PATTERNS = ("from django", "import django", "models.Model", "django.db", "django.urls")
+_FLASK_PATTERNS = ("from flask", "import flask", "Flask(__name__)")
+
+
+def _detect_swift_frameworks(repo_path: Path, changed_files: list[str]) -> list[str]:
+    """Content-based detection for Swift UI frameworks (SwiftUI vs. UIKit)."""
+    found: set[str] = set()
+    for fp in changed_files:
+        if not fp.endswith(".swift"):
+            continue
+        try:
+            content = (repo_path / fp).read_text(encoding="utf-8")
+        except Exception:
+            continue
+        if any(p in content for p in _SWIFTUI_PATTERNS):
+            found.add("swift_swiftui")
+        if any(p in content for p in _UIKIT_PATTERNS):
+            found.add("swift_ios")
+    return sorted(found)
+
+
+def _detect_kotlin_frameworks(repo_path: Path, changed_files: list[str]) -> list[str]:
+    """Content-based detection for Kotlin frameworks (Android vs. Spring)."""
+    found: set[str] = set()
+    for fp in changed_files:
+        if not fp.endswith(".kt"):
+            continue
+        try:
+            content = (repo_path / fp).read_text(encoding="utf-8")
+        except Exception:
+            continue
+        if any(p in content for p in _KOTLIN_ANDROID_PATTERNS):
+            found.add("kotlin_android")
+        if any(p in content for p in _KOTLIN_SPRING_PATTERNS):
+            found.add("kotlin_spring")
+    return sorted(found)
+
+
+def _detect_typescript_frameworks(repo_path: Path, changed_files: list[str]) -> list[str]:
+    """Content-based detection for React vs. Next.js, reinforcing the
+    package.json check above for monorepo diffs with no in-scope manifest."""
+    found: set[str] = set()
+    for fp in changed_files:
+        if Path(fp).suffix.lower() not in _TS_JS_EXTENSIONS:
+            continue
+        try:
+            content = (repo_path / fp).read_text(encoding="utf-8")
+        except Exception:
+            continue
+        if any(p in content for p in _NEXTJS_PATTERNS):
+            found.add("typescript_nextjs")
+        elif any(p in content for p in _REACT_PATTERNS):
+            found.add("typescript_react")
+    return sorted(found)
+
+
+def _detect_python_frameworks_by_content(repo_path: Path, changed_files: list[str]) -> list[str]:
+    """Content-based detection for Python web frameworks, for the same
+    monorepo/missing-manifest reasons as TypeScript above."""
+    found: set[str] = set()
+    for fp in changed_files:
+        if not fp.endswith(".py"):
+            continue
+        try:
+            content = (repo_path / fp).read_text(encoding="utf-8")
+        except Exception:
+            continue
+        if any(p in content for p in _FASTAPI_PATTERNS):
+            found.add("python_fastapi")
+        if any(p in content for p in _DJANGO_PATTERNS):
+            found.add("python_django")
+        if any(p in content for p in _FLASK_PATTERNS):
+            found.add("python_flask")
+    return sorted(found)
+
+
+def _detect_php_framework(repo_path: Path) -> str | None:
+    composer_json = repo_path / "composer.json"
+    if not composer_json.exists():
+        return None
+    try:
+        composer = json.loads(composer_json.read_text(encoding="utf-8"))
+        all_deps = {**composer.get("require", {}), **composer.get("require-dev", {})}
+        return "php_laravel" if "laravel/framework" in all_deps else None
+    except Exception:
+        return None
+
+
+def _detect_dotnet_framework(repo_path: Path, changed_files: list[str]) -> str | None:
+    has_dotnet_project = (
+        list(repo_path.glob("*.csproj"))
+        or list(repo_path.glob("*.sln"))
+        or (repo_path / "Program.cs").exists()
+    )
+    if not has_dotnet_project:
+        return None
+    is_aspnet = any("asp" in fp.lower() or "controller" in fp.lower() for fp in changed_files)
+    return "csharp_aspnet" if is_aspnet else "dotnet"
+
+
+def _detect_jvm_framework(repo_path: Path, changed_files: list[str]) -> str | None:
+    """Java/Kotlin Android vs. Spring, from build.gradle(.kts) content.
+
+    This is the only Android/Spring signal for plain Java (no .kt files at
+    all), and complements _detect_kotlin_frameworks above for Kotlin-only
+    content signals.
+    """
+    build_gradle = repo_path / "build.gradle"
+    build_gradle_kts = repo_path / "build.gradle.kts"
+    settings_gradle = repo_path / "settings.gradle"
+    if not (build_gradle.exists() or build_gradle_kts.exists() or settings_gradle.exists()):
+        return None
+
+    gradle_content = ""
+    for gf in (build_gradle, build_gradle_kts):
+        if gf.exists():
+            try:
+                gradle_content = gf.read_text(encoding="utf-8").lower()
+            except Exception:
+                gradle_content = ""
+            break
+
+    is_kotlin = any(fp.endswith((".kt", ".kts")) for fp in changed_files)
+    if "com.android" in gradle_content or "android {" in gradle_content:
+        return "kotlin_android" if is_kotlin else "java_android"
+    if "spring" in gradle_content or "org.springframework" in gradle_content:
+        return "kotlin_spring" if is_kotlin else "java_spring"
+    return None
+
+
 def _fallback_detect(repo_path: Path, changed_files: list[str]) -> dict[str, Any]:
     """Deterministic fallback when LLM is unavailable."""
     from collections import Counter
@@ -236,6 +426,35 @@ def _fallback_detect(repo_path: Path, changed_files: list[str]) -> dict[str, Any
                 frameworks.append("ruby_rails")
         except Exception:
             pass
+
+    # ── PHP Laravel ──
+    php_fw = _detect_php_framework(repo_path)
+    if php_fw:
+        frameworks.append(php_fw)
+
+    # ── C# / .NET / ASP.NET ──
+    dotnet_fw = _detect_dotnet_framework(repo_path, changed_files)
+    if dotnet_fw:
+        frameworks.append(dotnet_fw)
+
+    # ── Java/Kotlin (Android / Spring), from build.gradle content ──
+    jvm_fw = _detect_jvm_framework(repo_path, changed_files)
+    if jvm_fw:
+        frameworks.append(jvm_fw)
+
+    # ── Swift (SwiftUI vs. UIKit), from .swift file content ──
+    frameworks.extend(_detect_swift_frameworks(repo_path, changed_files))
+
+    # ── Kotlin (Android vs. Spring), from .kt file content ──
+    frameworks.extend(_detect_kotlin_frameworks(repo_path, changed_files))
+
+    # ── TypeScript/JS (React vs. Next.js), reinforcing the package.json check ──
+    frameworks.extend(_detect_typescript_frameworks(repo_path, changed_files))
+
+    # ── Python web frameworks, reinforcing the manifest check above ──
+    frameworks.extend(_detect_python_frameworks_by_content(repo_path, changed_files))
+
+    frameworks = list(dict.fromkeys(frameworks))  # dedupe, preserve order
 
     return {
         "languages": languages,
