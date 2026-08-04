@@ -1,0 +1,540 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Codewalk Review — Architecture &amp; End-to-End Flow</title>
+    <script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+    <style>
+        :root {
+            --bg: #0d1117;
+            --surface: #161b22;
+            --surface2: #21262d;
+            --border: #30363d;
+            --text: #e6edf3;
+            --text-muted: #8b949e;
+            --blue: #58a6ff;
+            --green: #3fb950;
+            --purple: #bc8cff;
+            --orange: #f78166;
+            --yellow: #e3b341;
+            --cyan: #39d2f5;
+            --pink: #f778ba;
+            --red: #f85149;
+        }
+
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            background: var(--bg);
+            color: var(--text);
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif;
+        }
+
+        #header {
+            position: sticky;
+            top: 0;
+            background: var(--surface);
+            border-bottom: 1px solid var(--border);
+            padding: 16px 24px;
+            z-index: 100;
+        }
+
+        #header h1 {
+            font-size: 18px;
+            font-weight: 600;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        #header h1 span {
+            color: var(--blue);
+        }
+
+        #header p {
+            color: var(--text-muted);
+            font-size: 13px;
+            margin-top: 4px;
+        }
+
+        #tabs {
+            display: flex;
+            gap: 6px;
+            margin-top: 14px;
+            flex-wrap: wrap;
+        }
+
+        #tabs button {
+            background: var(--surface2);
+            border: 1px solid var(--border);
+            color: var(--text-muted);
+            padding: 7px 14px;
+            border-radius: 6px;
+            font-size: 12.5px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.15s;
+        }
+
+        #tabs button:hover {
+            background: var(--border);
+            color: var(--text);
+        }
+
+        #tabs button.active {
+            background: var(--blue);
+            color: var(--bg);
+            border-color: var(--blue);
+        }
+
+        main {
+            max-width: 1180px;
+            margin: 0 auto;
+            padding: 28px 24px 80px;
+        }
+
+        .panel {
+            display: none;
+        }
+
+        .panel.active {
+            display: block;
+            animation: fadein 0.2s ease;
+        }
+
+        @keyframes fadein {
+            from {
+                opacity: 0;
+                transform: translateY(4px);
+            }
+
+            to {
+                opacity: 1;
+                transform: translateY(0);
+            }
+        }
+
+        .panel h2 {
+            font-size: 16px;
+            color: var(--cyan);
+            margin-bottom: 6px;
+        }
+
+        .panel .lede {
+            color: var(--text-muted);
+            font-size: 13.5px;
+            margin-bottom: 18px;
+            max-width: 820px;
+            line-height: 1.6;
+        }
+
+        .diagram-card {
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: 10px;
+            padding: 20px;
+            overflow-x: auto;
+            margin-bottom: 22px;
+        }
+
+        .diagram-card .mermaid {
+            display: flex;
+            justify-content: center;
+        }
+
+        .notes {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+            gap: 14px;
+        }
+
+        .note-card {
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-left: 3px solid var(--blue);
+            border-radius: 8px;
+            padding: 14px 16px;
+        }
+
+        .note-card h4 {
+            font-size: 12.5px;
+            color: var(--text);
+            margin-bottom: 6px;
+            display: flex;
+            align-items: center;
+            gap: 6px;
+        }
+
+        .note-card p {
+            font-size: 12px;
+            color: var(--text-muted);
+            line-height: 1.6;
+        }
+
+        .note-card code {
+            font-family: 'SF Mono', Consolas, monospace;
+            background: var(--surface2);
+            padding: 1px 5px;
+            border-radius: 3px;
+            color: var(--cyan);
+            font-size: 11px;
+        }
+
+        .note-card.blocker {
+            border-left-color: var(--red);
+        }
+
+        .note-card.error {
+            border-left-color: var(--orange);
+        }
+
+        .note-card.suggestion {
+            border-left-color: var(--green);
+        }
+
+        .note-card.mcp {
+            border-left-color: var(--purple);
+        }
+
+        .note-card.api {
+            border-left-color: var(--cyan);
+        }
+
+        .note-card.ui {
+            border-left-color: var(--pink);
+        }
+
+        .legend {
+            display: flex;
+            gap: 18px;
+            flex-wrap: wrap;
+            font-size: 11.5px;
+            color: var(--text-muted);
+            margin-bottom: 18px;
+        }
+
+        .legend span {
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+        }
+
+        .legend i {
+            width: 10px;
+            height: 10px;
+            border-radius: 3px;
+            display: inline-block;
+        }
+    </style>
+</head>
+
+<body>
+    <div id="header">
+        <h1>🔬 Codewalk <span>Review</span> — Architecture &amp; End-to-End Flow</h1>
+        <p>One review engine, three fronts: MCP (host-LLM driven), API (hosted/headless), Frontend (Code Review
+            sidebar). This page is a static reference — open it directly in a browser, no build step.</p>
+        <div id="tabs">
+            <button data-tab="arch" class="active">Architecture</button>
+            <button data-tab="mcp">MCP Flow</button>
+            <button data-tab="api">API Flow</button>
+            <button data-tab="ui">Frontend Flow</button>
+            <button data-tab="fix">Fix &amp; Apply</button>
+        </div>
+    </div>
+
+    <main>
+        <!-- ══════════════════════ ARCHITECTURE ══════════════════════ -->
+        <section class="panel active" id="panel-arch">
+            <h2>Component Architecture</h2>
+            <p class="lede">
+                Review is built on top of the same codebase-intelligence layer as everything else in Codewalk:
+                a git diff is enriched with graph-derived risk (blast radius, PageRank, cycles, bottlenecks) and
+                stack-aware rubrics before any LLM ever sees it, then batched so the reviewer (human or model)
+                never loses context on a large diff.
+            </p>
+            <div class="diagram-card">
+                <div class="mermaid">
+                    %%{init: {'theme': 'base', 'themeVariables': {'primaryColor': '#0d1117', 'primaryTextColor':
+                    '#f0f6fc', 'primaryBorderColor': '#58a6ff', 'lineColor': '#58a6ff', 'secondaryColor': '#161b22',
+                    'tertiaryColor': '#21262d', 'fontSize': '13px', 'fontFamily': 'monospace', 'edgeLabelBackground':
+                    '#0d1117'}}}%%
+                    graph TD
+                    REPO["📁 Git repo<br />working tree"]
+                    REPO --> DIFF["🔀 Diff Parser<br />staged + unstaged + untracked<br />or target_branch / commit"]
+
+                    DIFF --> GRAPH["🕸️ Static Analysis<br />tree-sitter → DuckDB → igraph<br />blast radius · PageRank
+                    · cycles · bottlenecks"]
+                    DIFF --> STACK["🧭 Stack Detect + Rubrics<br />language/framework detection<br />core + language +
+                    framework rubrics"]
+
+                    GRAPH --> BATCH
+                    STACK --> BATCH["📦 Batch Builder<br />3-5 files/batch, grouped by feature<br />risk-sorted,
+                    token-bounded"]
+
+                    BATCH --> MCP["🧩 MCP Server<br />host LLM reviews each batch<br />no LLM call on our side"]
+                    BATCH --> API["📡 API Server<br />parallel server-side LLM review"]
+                    API --> UI["🖥️ Frontend · Code Review sidebar<br />calls the API, adds diff/accept UI"]
+
+                    MCP --> STORE["🗄️ Findings Store<br />JSON + Markdown per session"]
+                    API --> STORE
+                    UI --> STORE
+
+                    STORE --> VERDICT["✅❌ Accept / Reject<br />per finding"]
+                    VERDICT --> APPLY["🛠️ Fix Apply<br />preview → apply → verify<br />rollback on failure"]
+                    APPLY --> VERIFY["🧪 Verify<br />static analysis + tests"]
+                </div>
+            </div>
+            <div class="legend">
+                <span><i style="background:var(--purple)"></i> MCP-only path</span>
+                <span><i style="background:var(--cyan)"></i> API-only path</span>
+                <span><i style="background:var(--pink)"></i> Frontend (wraps API)</span>
+            </div>
+            <div class="notes">
+                <div class="note-card mcp">
+                    <h4>🧩 MCP: no LLM call on our side</h4>
+                    <p>The host you're already talking to (Claude/Copilot/Cursor) does the actual reviewing.
+                        <code>codewalk_run_review</code> only supplies diff + risk + rubric context per batch.
+                    </p>
+                </div>
+                <div class="note-card api">
+                    <h4>📡 API: server-side, parallel</h4>
+                    <p><code>POST /review</code> runs the batched review with parallel LLM calls server-side and
+                        returns raw findings — good for CI hooks or anything outside an IDE session.</p>
+                </div>
+                <div class="note-card ui">
+                    <h4>🖥️ Frontend: same API, zero curl</h4>
+                    <p>The "Code Review" sidebar tab is a UI on top of the exact same API endpoints — diff view,
+                        accept/reject per finding, preview diffs, apply with rollback, all clickable.</p>
+                </div>
+                <div class="note-card">
+                    <h4>🕸️ Graph builds on demand</h4>
+                    <p>No indexing step required first — the dependency graph builds on-the-fly (~5s) on first
+                        review and is cached in <code>.codewalk/graph.duckdb</code> for every mode after that.</p>
+                </div>
+            </div>
+        </section>
+
+        <!-- ══════════════════════ MCP FLOW ══════════════════════ -->
+        <section class="panel" id="panel-mcp">
+            <h2>MCP Flow — host-LLM driven</h2>
+            <p class="lede">
+                Runs inside the AI agent you're already using. Codewalk never calls an LLM itself in this mode —
+                it hands the host model diff + risk + rubric context per batch, and the host reviews and calls
+                tools back to persist findings.
+            </p>
+            <div class="diagram-card">
+                <div class="mermaid">
+                    %%{init: {'theme': 'base', 'themeVariables': {'primaryColor': '#0d1117', 'primaryTextColor':
+                    '#f0f6fc', 'primaryBorderColor': '#bc8cff', 'lineColor': '#bc8cff', 'secondaryColor': '#161b22',
+                    'tertiaryColor': '#21262d', 'fontSize': '13px', 'fontFamily': 'monospace', 'edgeLabelBackground':
+                    '#0d1117'}}}%%
+                    sequenceDiagram
+                    participant Dev as Developer
+                    participant Agent as Host LLM (Copilot/Claude/Cursor)
+                    participant MCP as Codewalk MCP Server
+
+                    Dev->>Agent: "review my changes"
+                    Agent->>MCP: codewalk_run_review()
+                    MCP-->>Agent: session_id + batch 1 (diff + risk + rubric)
+                    Agent->>Agent: reviews batch 1 itself
+                    Agent->>MCP: codewalk_submit_batch_findings(session_id, findings)
+                    Agent->>MCP: codewalk_review_next_batch(session_id)
+                    MCP-->>Agent: batch 2
+                    Note over Agent,MCP: repeat until all batches done
+                    Agent->>MCP: codewalk_get_review_summary(session_id)
+                    MCP-->>Agent: findings + verdict guidance
+                    Agent-->>Dev: shows findings
+                    Dev->>Dev: edits llm_findings.json<br />user_verdict: accepted/rejected
+                    Agent->>MCP: codewalk_accept_and_verify_fix(session_id)
+                    MCP-->>Agent: accepted findings only
+                    Agent->>Agent: applies fixes with own editing tools
+                    Agent->>MCP: codewalk_run_static_analysis / codewalk_run_tests
+                    Agent->>MCP: codewalk_re_review() (optional, hides rejected)
+                </div>
+            </div>
+            <div class="notes">
+                <div class="note-card mcp">
+                    <h4>Why no LLM call here</h4>
+                    <p>The calling model already has full reasoning capability — duplicating that inside the
+                        server would mean a second API key, a second bill, and a worse review (less context than
+                        the model already has from the conversation).</p>
+                </div>
+                <div class="note-card">
+                    <h4>Findings persist to disk</h4>
+                    <p>Each <code>submit_batch_findings</code> call writes JSON + a hand-readable Markdown
+                        companion into the session folder — context window stays clean between batches.</p>
+                </div>
+            </div>
+        </section>
+
+        <!-- ══════════════════════ API FLOW ══════════════════════ -->
+        <section class="panel" id="panel-api">
+            <h2>API Flow — hosted, headless</h2>
+            <p class="lede">
+                Review as a service: one call runs static analysis + a batched, parallel LLM review server-side
+                and returns structured findings you can act on from any client — CI, a script, or the frontend.
+            </p>
+            <div class="diagram-card">
+                <div class="mermaid">
+                    %%{init: {'theme': 'base', 'themeVariables': {'primaryColor': '#0d1117', 'primaryTextColor':
+                    '#f0f6fc', 'primaryBorderColor': '#39d2f5', 'lineColor': '#39d2f5', 'secondaryColor': '#161b22',
+                    'tertiaryColor': '#21262d', 'fontSize': '13px', 'fontFamily': 'monospace', 'edgeLabelBackground':
+                    '#0d1117'}}}%%
+                    sequenceDiagram
+                    participant Client as Client (curl / CI / script)
+                    participant API as Codewalk API
+                    participant Graph as Static Analysis (DuckDB/igraph)
+                    participant LLM as LLM (parallel, server-side)
+
+                    Client->>API: POST /review {}
+                    API->>Graph: risk annotations for changed files
+                    Graph-->>API: blast radius, PageRank, cycles
+                    API->>API: batch files (3-5, risk-sorted)
+                    par batch 1
+                    API->>LLM: review batch 1 (diff + risk + rubric)
+                    and batch 2
+                    API->>LLM: review batch 2
+                    and batch N
+                    API->>LLM: review batch N
+                    end
+                    LLM-->>API: findings per batch
+                    API-->>Client: { issues, static_issues, session_id }
+                </div>
+            </div>
+            <div class="notes">
+                <div class="note-card api">
+                    <h4>Parallel by batch</h4>
+                    <p>Unlike MCP mode's one-batch-at-a-time host loop, the API reviews all batches concurrently
+                        server-side since there's no shared conversation context to manage.</p>
+                </div>
+                <div class="note-card">
+                    <h4>Stateless-ish per call</h4>
+                    <p>Returns a <code>session_id</code> alongside findings so the same session can be reused for
+                        the fix-apply flow (<code>preview-edits</code> / <code>apply-edits</code>) without
+                        re-running the review.</p>
+                </div>
+            </div>
+        </section>
+
+        <!-- ══════════════════════ FRONTEND FLOW ══════════════════════ -->
+        <section class="panel" id="panel-ui">
+            <h2>Frontend Flow — Code Review sidebar</h2>
+            <p class="lede">
+                The web dashboard's left sidebar has a dedicated "Code Review" tab. It's a UI on top of the exact
+                same API — no curl, no agent — with a diff viewer, per-finding accept/reject, a proposed-diff
+                preview, and one-click apply.
+            </p>
+            <div class="diagram-card">
+                <div class="mermaid">
+                    %%{init: {'theme': 'base', 'themeVariables': {'primaryColor': '#0d1117', 'primaryTextColor':
+                    '#f0f6fc', 'primaryBorderColor': '#f778ba', 'lineColor': '#f778ba', 'secondaryColor': '#161b22',
+                    'tertiaryColor': '#21262d', 'fontSize': '13px', 'fontFamily': 'monospace', 'edgeLabelBackground':
+                    '#0d1117'}}}%%
+                    sequenceDiagram
+                    participant User as Developer (browser)
+                    participant UI as Code Review sidebar (Next.js)
+                    participant API as Codewalk API
+
+                    User->>UI: open "Code Review" tab
+                    User->>UI: pick staged / branch / commit
+                    UI->>API: api.reviewDiff(staged, targetBranch)
+                    API-->>UI: issues + static_issues + session_id
+                    UI-->>User: diff view with inline findings, severity badges
+                    User->>UI: mark each finding accepted / rejected
+                    User->>UI: click "Preview fixes"
+                    UI->>API: api.previewEdits(session_id, verdicts)
+                    API-->>UI: proposed diff per accepted finding (dry run)
+                    UI-->>User: side-by-side diff view
+                    User->>UI: approve selected edits
+                    UI->>API: api.applyEdits(session_id, edits)
+                    API->>API: verify with static analysis + tests
+                    API-->>UI: written / rolled back per file
+                    UI-->>User: apply results shown inline
+                </div>
+            </div>
+            <div class="notes">
+                <div class="note-card ui">
+                    <h4>Also does single-file review</h4>
+                    <p>The same page exposes <code>api.reviewFile(filePath)</code> for reviewing one file in
+                        isolation, and <code>api.loadGuidelines(path)</code> to load team guidelines into the
+                        rubric context.</p>
+                </div>
+                <div class="note-card">
+                    <h4>requiresIndex: false</h4>
+                    <p>The Code Review nav entry doesn't require the full index to be built first — same
+                        zero-setup, graph-builds-on-demand behavior as MCP and API mode.</p>
+                </div>
+            </div>
+        </section>
+
+        <!-- ══════════════════════ FIX & APPLY ══════════════════════ -->
+        <section class="panel" id="panel-fix">
+            <h2>Fix &amp; Apply — safety model</h2>
+            <p class="lede">
+                Every mode ends the same way: nothing gets written to disk until a human accepts it, and nothing
+                gets written silently — a preview/dry-run step always comes first, and writes are verified and
+                rolled back on failure.
+            </p>
+            <div class="diagram-card">
+                <div class="mermaid">
+                    %%{init: {'theme': 'base', 'themeVariables': {'primaryColor': '#0d1117', 'primaryTextColor':
+                    '#f0f6fc', 'primaryBorderColor': '#3fb950', 'lineColor': '#3fb950', 'secondaryColor': '#161b22',
+                    'tertiaryColor': '#21262d', 'fontSize': '13px', 'fontFamily': 'monospace', 'edgeLabelBackground':
+                    '#0d1117'}}}%%
+                    graph LR
+                    F["📋 Findings<br />blocker · error · suggestion"] --> V{"Accept or<br />reject?"}
+                    V -- rejected --> DROP["🗑️ dropped<br />hidden on re-review"]
+                    V -- accepted --> PREVIEW["👀 Preview edit<br />dry run, no writes"]
+                    PREVIEW --> CHECK{"File changed<br />since preview?"}
+                    CHECK -- yes --> REFUSE["🚫 write refused"]
+                    CHECK -- no --> WRITE["✍️ write file"]
+                    WRITE --> TEST["🧪 static analysis + tests"]
+                    TEST -- pass --> DONE["✅ applied"]
+                    TEST -- fail --> ROLLBACK["↩️ rollback"]
+                </div>
+            </div>
+            <div class="notes">
+                <div class="note-card blocker">
+                    <h4>blocker</h4>
+                    <p>Must fix before merge — blocks the PR / verdict is <code>request_changes</code>.</p>
+                </div>
+                <div class="note-card error">
+                    <h4>error</h4>
+                    <p>Should fix — real bugs, logic errors, security risks.</p>
+                </div>
+                <div class="note-card suggestion">
+                    <h4>suggestion</h4>
+                    <p>Nice to have — style, naming, minor improvements. Never blocks.</p>
+                </div>
+                <div class="note-card">
+                    <h4>No silent clobbers</h4>
+                    <p>A write is refused outright if the target file changed since the preview was generated —
+                        stale diffs never get applied on top of newer edits.</p>
+                </div>
+            </div>
+        </section>
+    </main>
+
+    <script>
+        mermaid.initialize({ startOnLoad: true, securityLevel: 'loose' });
+
+        const buttons = document.querySelectorAll('#tabs button');
+        const panels = document.querySelectorAll('.panel');
+        buttons.forEach((btn) => {
+            btn.addEventListener('click', () => {
+                buttons.forEach((b) => b.classList.remove('active'));
+                panels.forEach((p) => p.classList.remove('active'));
+                btn.classList.add('active');
+                document.getElementById('panel-' + btn.dataset.tab).classList.add('active');
+            });
+        });
+    </script>
+</body>
+
+</html>

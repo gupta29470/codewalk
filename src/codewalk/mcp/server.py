@@ -30,10 +30,14 @@ Review architecture (batched, no external LLM calls):
   via get_review_summary and accept_and_verify_fix.
 
   Diff coverage: by default, get_diff() returns ALL changes (staged + unstaged
-  + untracked files). The only narrow mode is staged=True. target_branch uses
-  three-dot diff (target_branch...HEAD) — only changes introduced by the current
-  branch since it diverged, matching GitHub's PR "Files changed" view. No
-  untracked files are included when target_branch is set.
+  + untracked files). The only narrow mode is staged=True. target_branch diffs
+  from the merge-base of the base and HEAD through the working tree — commits
+  on the current branch since it diverged, plus uncommitted changes, with
+  untracked files appended. Pass target_branch="current" for local changes on
+  this branch only. codewalk_run_review / codewalk_re_review require an
+  explicit target (target_branch, staged, or commit): when none is given they
+  return a clarification prompt asking the user which branch to review
+  against, instead of silently assuming main/master.
 
   Graph-on-the-fly: if no .codewalk/graph.duckdb exists when a review starts,
   _load_graph_runtime() automatically builds the dependency graph (~3-7s) and
@@ -212,15 +216,18 @@ mcp = FastMCP(
         "          3. Call `codewalk_save_stack_context(your_json)` to persist it\n"
         "          4. Re-call the tool that blocked — it will now proceed\n"
         "        This happens ONCE per repo — the file persists across all commits.\n"
-        "        To refresh: `codewalk_run_review(refresh_stack=True)` or call\n"
+        "        To refresh: `codewalk_run_review(target_branch='current', refresh_stack=True)` or call\n"
         "        `codewalk_get_stack_info()` + `codewalk_save_stack_context()` again.\n"
         "        NOTE: codewalk_analyze_codebase also prompts you to do this after\n"
         "        indexing completes successfully — so if you follow that prompt, you're already set.\n"
         "\n"
-        "Step 1: START — call codewalk_run_review() once.\n"
-        "        No setup required — the dependency graph is built automatically on first\n"
+        "Step 1: START — call codewalk_run_review(target_branch) once.\n"
+        "        An explicit target is required: target_branch='current' for this branch's\n"
+        "        local work, or target_branch='<base>' to review against that base. If the\n"
+        "        user hasn't said which, ASK them first — never assume main/master.\n"
+        "        No other setup required — the dependency graph is built automatically on first\n"
         "        review (~5s) and cached for subsequent calls.\n"
-        "        By default, reviews ALL changes: staged, unstaged, AND new untracked files.\n"
+        "        Reviews ALL matching changes: staged, unstaged, AND new untracked files.\n"
         "        Returns: session_id + first batch of 3-5 files with full context.\n"
         "        Layer 0 (deterministic) findings are saved to disk automatically.\n"
         "\n"
@@ -240,9 +247,10 @@ mcp = FastMCP(
         "        setting user_verdict to 'accepted' or 'rejected' for each finding.\n"
         "        The file is initialized with user_verdict: null for every finding.\n"
         "\n"
-        "Step 5 (optional): RE-REVIEW — codewalk_re_review().\n"
-        "        Starts a fresh review (staged + unstaged + untracked) and hides any finding the user rejected in the\n"
-        "        previous session. Pass target_branch='...' only when diffing against a branch. Use this after\n"
+        "Step 5 (optional): RE-REVIEW — codewalk_re_review(target_branch).\n"
+        "        Starts a fresh review and hides any finding the user rejected in the\n"
+        "        previous session. Same target rules as run_review: pass target_branch='current'\n"
+        "        or a base branch explicitly. Use this after\n"
         "        the user has addressed feedback and wants to verify the remaining issues.\n"
         "\n"
         "Step 6: APPLY + VERIFY — call codewalk_accept_and_verify_fix(session_id).\n"
@@ -587,7 +595,7 @@ def _require_stack(tool_name: str = "") -> str | None:
         f"3. Call `codewalk_save_stack_context(your_json)` to save it\n"
         f"4. {resume_hint}\n\n"
         f"This only happens **once per repo** — the file persists across all commits.\n"
-        f"To refresh later: `codewalk_run_review(refresh_stack=True)` or call "
+        f"To refresh later: `codewalk_run_review(target_branch='current', refresh_stack=True)` or call "
         f"`codewalk_get_stack_info()` + `codewalk_save_stack_context()` again."
     )
 
@@ -1263,6 +1271,17 @@ class _StackRequiredError(Exception):
         self.commit = commit
 
 
+def _require_review_target(
+    repo: Path, target_branch: str | None, staged: bool, commit: str | None
+) -> str | None:
+    """Return an ask-the-user prompt when the review base is unclear; else None."""
+    from src.codewalk.review.target import format_ask_for_review_target, needs_review_target
+
+    if needs_review_target(target_branch, staged=staged, commit=commit):
+        return format_ask_for_review_target(repo)
+    return None
+
+
 def _start_batched_review(
     repo: Path,
     target_branch: str | None,
@@ -1424,13 +1443,16 @@ def codewalk_run_review(
     After reviewing the first batch, call codewalk_review_next_batch(session_id)
     repeatedly to get the remaining batches until all files are reviewed.
 
-    By default, reviews ALL local changes: staged, unstaged, AND new untracked
-    files. No flags needed — "review my changes" means everything.
+    Requires an explicit review target: pass target_branch="current" for this
+    branch's local work (staged + unstaged + untracked), target_branch="<base>"
+    to compare against that base, staged=True for staged-only, or commit= for a
+    historical snapshot. If none is given, returns a clarification prompt —
+    never assume main/master on the user's behalf.
 
     Args:
-        target_branch: Diff working tree against this branch (e.g. "main").
-            Shows committed + staged + unstaged + untracked changes.
-            If None, reviews local changes since the last commit.
+        target_branch: Diff against this base (e.g. "main") from the merge-base
+            through the working tree: committed + staged + unstaged + untracked
+            changes. Pass "current" for this branch's local changes only.
         staged: If True, review ONLY staged changes (narrow mode). No untracked
             files. This is the only escape hatch for a narrower diff.
         commit: Review a specific commit by SHA or ref. Historical snapshot —
@@ -1445,6 +1467,10 @@ def codewalk_run_review(
     repo_path = state.get_repo_path()
     if not repo_path:
         return "❌ No repository path available. Run codewalk_analyze_codebase first."
+
+    ask = _require_review_target(Path(repo_path), target_branch, staged, commit)
+    if ask is not None:
+        return ask
 
     index_ready = False
     try:
@@ -1544,9 +1570,9 @@ def codewalk_re_review(
     still-present issues will be reported normally.
 
     Args:
-        target_branch: Diff working tree against this branch (e.g. "main").
-            Shows committed + staged + unstaged + untracked changes.
-            If None, reviews local changes since the last commit.
+        target_branch: Diff against this base (e.g. "main") from the merge-base
+            through the working tree: committed + staged + unstaged + untracked
+            changes. Pass "current" for this branch's local changes only.
         staged: If True, review ONLY staged changes (narrow mode).
         commit: Review a specific commit by SHA or ref.
         refresh_stack: If True, ignore the existing .codewalk/stack_context.json
@@ -1559,6 +1585,10 @@ def codewalk_re_review(
     repo_path = state.get_repo_path()
     if not repo_path:
         return "❌ No repository path available. Run codewalk_analyze_codebase first."
+
+    ask = _require_review_target(Path(repo_path), target_branch, staged, commit)
+    if ask is not None:
+        return ask
 
     index_ready = False
     try:
@@ -2464,8 +2494,8 @@ def codewalk_save_stack_context(stack_json: str) -> str:
     .codewalk/stack_context.json — a persistent file that survives across commits.
     All future reviews use it automatically until explicitly refreshed.
 
-    To refresh: call codewalk_run_review(refresh_stack=True) or call this tool
-    again with updated JSON.
+    To refresh: call codewalk_run_review(target_branch='current', refresh_stack=True)
+    or call this tool again with updated JSON.
 
     Args:
         stack_json: JSON string with the detected stack. Must include:
@@ -2807,7 +2837,7 @@ def codewalk_voice_ask() -> str:
         f"   - User asks about risk or what breaks → `codewalk_get_blast_radius_map(target)`\n"
         f"   - User asks about dependencies or execution flow → `codewalk_get_execution_flow()`\n"
         f"   - User asks where to start reading → `codewalk_get_reading_order()`\n"
-        f"   - User asks to review changes → call codewalk_run_review() (pass target_branch='...' only if comparing to a branch) and review the returned raw context with the host LLM\n"
+        f"   - User asks to review changes → call codewalk_run_review(target_branch='current') for local work (or a base branch the user names — never assume one) and review the returned raw context with the host LLM\n"
         f"   - User says 'apply that fix' / 'make that change' → apply it with your own editing tools, then verify with `codewalk_run_tests`\n"
         f"   - User asks about docs/guides/runbooks → `codewalk_ask_docs(question)`\n"
         f"   - User asks to index/load documents → `codewalk_index_docs(path)`\n"

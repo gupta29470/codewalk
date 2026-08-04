@@ -807,6 +807,17 @@ def incremental_reindex_endpoint():
         raise HTTPException(status_code=500, detail=str(e))
 
 # ─── POST /review ────────────────────────────────────────────────────
+def _require_api_review_target(repo_path: str, target_branch, staged, commit) -> None:
+    """Raise 400 when the review base is unclear instead of assuming main/master."""
+    from src.codewalk.review.target import format_ask_for_review_target, needs_review_target
+
+    if needs_review_target(target_branch, staged=staged, commit=commit):
+        raise HTTPException(
+            status_code=400,
+            detail=format_ask_for_review_target(Path(repo_path)),
+        )
+
+
 @app.post("/review", response_model=ReviewResponse)
 async def review_endpoint(request: ReviewRequest):
     """Review current git diff for bugs, security issues, and style.
@@ -821,6 +832,8 @@ async def review_endpoint(request: ReviewRequest):
         repo_path = _resolve_repo_path(request.repo_path)
         if not repo_path:
             raise HTTPException(status_code=400, detail="Repository path not available")
+
+        _require_api_review_target(repo_path, request.target_branch, request.staged, request.commit)
 
         review_id = secrets.token_urlsafe(12)
         llm = get_llm(temperature=0)
@@ -877,7 +890,7 @@ async def review_file_endpoint(request: ReviewFileRequest):
         report = await asyncio.to_thread(
             run_review,
             repo_path=Path(repo_path),
-            target_branch=None,
+            target_branch="current",
             commit=None,
             staged=False,
             llm=llm,
@@ -923,6 +936,8 @@ async def re_review_endpoint(request: ReReviewRequest):
         repo_path = _resolve_repo_path(request.repo_path)
         if not repo_path:
             raise HTTPException(status_code=400, detail="Repository path not available")
+
+        _require_api_review_target(repo_path, request.target_branch, request.staged, request.commit)
 
         session = load_session(Path(repo_path), request.session_id)
         if session is None:
@@ -1005,6 +1020,8 @@ async def review_stream_endpoint(request: ReviewStreamRequest):
     repo_path = _resolve_repo_path(request.repo_path)
     if not repo_path:
         raise HTTPException(status_code=400, detail="Repository path not available")
+
+    _require_api_review_target(repo_path, request.target_branch, request.staged, request.commit)
 
     review_id = secrets.token_urlsafe(12)
     reporter = ReviewProgressReporter(review_id)

@@ -65,8 +65,12 @@ class BlastRadiusResponse(BaseModel):
 class ReviewRequest(BaseModel):
     """POST /review — request body.
 
-    By default reviews ALL changes: staged, unstaged, AND new untracked files.
-    Use ``staged=True`` for narrow staged-only mode.
+    An explicit review target is required: ``target_branch="current"`` for this
+    branch's local work, ``target_branch="<base>"`` to compare against that base
+    (committed + uncommitted changes, from the merge-base through the working
+    tree), ``staged=True`` for narrow staged-only mode, or ``commit`` for a
+    historical snapshot. Requests without any target are rejected with 400 —
+    the base is never assumed.
     """
     staged: bool = False
     target_branch: str | None = None
@@ -75,7 +79,11 @@ class ReviewRequest(BaseModel):
 
 
 class ReReviewRequest(BaseModel):
-    """POST /review/re-review — re-run a review using a previous session's findings as context."""
+    """POST /review/re-review — re-run a review using a previous session's findings as context.
+
+    Same target rules as POST /review: an explicit ``target_branch``
+    (``"current"`` or a base branch), ``staged=True``, or ``commit`` is required.
+    """
     session_id: str
     repo_path: str | None = None
     staged: bool = False
@@ -112,8 +120,9 @@ class ReviewFileResponse(BaseModel):
 class ReviewStreamRequest(BaseModel):
     """POST /review/stream — request body.
 
-    By default reviews ALL changes: staged, unstaged, AND new untracked files.
-    Use ``staged=True`` for narrow staged-only mode.
+    Same target rules as POST /review: an explicit ``target_branch``
+    (``"current"`` or a base branch), ``staged=True``, or ``commit`` is
+    required; requests without any target are rejected with 400.
     """
     staged: bool = False
     target_branch: str | None = None

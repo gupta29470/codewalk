@@ -5,6 +5,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from src.codewalk.ingestion.scanner import detect_language
+from src.codewalk.review.target import resolve_diff_target_branch
 
 # Untracked file limits
 _MAX_UNTRACKED_FILE_SIZE = 1024 * 1024  # 1MB
@@ -55,6 +56,19 @@ def _has_head(repo_path: str | None) -> bool:
         capture_output=True,
         timeout=10,
     ).returncode == 0
+
+
+def _merge_base(repo_path: str | None, target: str) -> str | None:
+    """Return the merge-base of HEAD and target, or None if unavailable."""
+    result = subprocess.run(
+        ["git", "merge-base", target, "HEAD"],
+        cwd=repo_path,
+        capture_output=True,
+        timeout=10,
+    )
+    if result.returncode != 0:
+        return None
+    return result.stdout.decode("utf-8", errors="replace").strip() or None
 
 
 def _synthetic_untracked_diff(repo_path: str | None) -> str:
@@ -148,18 +162,20 @@ def get_diff(
 
     Args:
         staged: If True, diff only staged changes (--staged). No untracked files.
-        target_branch: Diff current branch against this branch using three-dot
-            (``target_branch...HEAD``). Shows only changes introduced by the
-            current branch since it diverged — matches GitHub's PR "Files changed"
-            view. No untracked files.
+        target_branch: Diff from the merge-base of this base and HEAD through
+            the working tree — commits on the current branch since it diverged,
+            plus uncommitted changes, with untracked files appended. Pass
+            ``"current"`` (or an alias) for local changes on this branch only
+            (same as omitting ``target_branch``).
         commit: Show diff for a specific commit (SHA or ref). No untracked files.
         since_commit: Diff from ``since_commit`` to working tree + untracked.
         repo_path: Working directory for git command.
 
-    Priority: commit > since_commit > target_branch > staged > default.
+    Priority: commit > since_commit > staged > target_branch > default.
     """
     cmd = ["git", "diff", "--unified=5"]
     append_untracked = True
+    resolved_target = resolve_diff_target_branch(target_branch)
 
     if commit:
         # Historical snapshot — no untracked files.
@@ -181,12 +197,13 @@ def get_diff(
         # Explicit narrow mode — staged only, no untracked.
         append_untracked = False
         cmd.append("--staged")
-    elif target_branch:
-        # Three-dot: only changes introduced by the current branch since it
-        # diverged from target_branch. This matches GitHub's "Files changed"
-        # view for a PR. No untracked files — they aren't part of the PR.
-        append_untracked = False
-        cmd.extend([f"{target_branch}...HEAD"])
+    elif resolved_target:
+        # Diff from the merge-base through the working tree: commits on the
+        # current branch since it diverged from the base, plus uncommitted
+        # edits, without picking up newer commits on the base itself.
+        # Untracked files are appended below.
+        base = _merge_base(repo_path, resolved_target) or resolved_target
+        cmd.append(base)
     else:
         # Default: all local changes (staged + unstaged) vs last commit.
         if _has_head(repo_path):
