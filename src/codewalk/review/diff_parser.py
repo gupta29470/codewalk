@@ -4,12 +4,20 @@ import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from src.codewalk.errors import CodewalkError
 from src.codewalk.ingestion.scanner import detect_language
 from src.codewalk.review.target import resolve_diff_target_branch
 
 # Untracked file limits
 _MAX_UNTRACKED_FILE_SIZE = 1024 * 1024  # 1MB
 _BINARY_CHECK_BYTES = 8192              # first 8KB
+
+
+class InvalidDiffError(CodewalkError):
+    """Raised when a diff cannot be produced (unknown target, failed git call)."""
+
+    def __init__(self, user_message: str, detail: str = ""):
+        super().__init__(user_message, detail)
 
 
 @dataclass
@@ -56,6 +64,24 @@ def _has_head(repo_path: str | None) -> bool:
         capture_output=True,
         timeout=10,
     ).returncode == 0
+
+
+def _resolve_existing_ref(repo_path: str | None, target: str) -> str | None:
+    """Resolve a user-named branch to a ref that actually exists.
+
+    Tries the name as given, then ``origin/<name>`` (the common case of a
+    branch that only exists on the remote). Returns None when neither exists.
+    """
+    for candidate in (target, f"origin/{target}"):
+        result = subprocess.run(
+            ["git", "rev-parse", "--verify", "--quiet", candidate],
+            cwd=repo_path,
+            capture_output=True,
+            timeout=10,
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            return candidate
+    return None
 
 
 def _merge_base(repo_path: str | None, target: str) -> str | None:
@@ -202,7 +228,13 @@ def get_diff(
         # current branch since it diverged from the base, plus uncommitted
         # edits, without picking up newer commits on the base itself.
         # Untracked files are appended below.
-        base = _merge_base(repo_path, resolved_target) or resolved_target
+        ref = _resolve_existing_ref(repo_path, resolved_target)
+        if ref is None:
+            raise InvalidDiffError(
+                f"Unknown review target: '{resolved_target}' was not found locally "
+                f"or as a remote-tracking ref (origin/{resolved_target})."
+            )
+        base = _merge_base(repo_path, ref) or ref
         cmd.append(base)
     else:
         # Default: all local changes (staged + unstaged) vs last commit.
@@ -218,6 +250,9 @@ def get_diff(
         timeout=60,
         cwd=repo_path,
     )
+    if result.returncode != 0:
+        stderr = result.stderr.decode("utf-8", errors="replace").strip()
+        raise InvalidDiffError(f"git {' '.join(cmd[1:])} failed: {stderr[:300]}")
 
     # Decode with errors="replace" so binary file content in diffs doesn't crash.
     # Git may include raw bytes when diffing deleted binary files.

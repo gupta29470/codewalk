@@ -15,6 +15,10 @@ class SessionStatus(str, Enum):
     ACTIVE = "active"
     COMPLETED = "completed"
     ERROR = "error"
+    # Superseded by a newer review before it finished: never completed, never
+    # errored — just stale. A new review abandons older active ones so every
+    # review starts from a clean slate.
+    ABANDONED = "abandoned"
 
 
 @dataclass

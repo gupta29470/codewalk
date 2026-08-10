@@ -274,6 +274,79 @@ def _suffix_match(as_path: str, extensions: list[str], all_files: list[str]) -> 
                 return candidate
     return ""
 
+def _resolve_dart_package_path(name: str, path: str, all_files: list[str]) -> str:
+    """Map ``package:<name>/<path>`` onto a scanned ``lib/`` layout.
+
+    Single-package repos put the target at ``lib/<path>``. Monorepos nest it
+    under the owning package (``packages/<name>/lib/<path>``), so fall back to
+    a suffix match and prefer the candidate carrying the package name.
+    """
+    candidates = [f"lib/{path}"]
+    if not path.endswith(".dart"):
+        candidates.append(f"lib/{path}.dart")
+
+    for candidate in candidates:
+        if candidate in all_files:
+            return candidate
+
+    matches: list[str] = []
+    for candidate in candidates:
+        suffix = f"/{candidate}"
+        matches.extend(f for f in all_files if f.endswith(suffix))
+    if not matches:
+        return f"package:{name}/{path}"
+
+    named = [f for f in matches if f"/{name}/" in f"/{f}"]
+    if len(named) == 1:
+        return named[0]
+    if len(matches) == 1:
+        return matches[0]
+    if named:
+        return sorted(named)[0]
+    return sorted(matches)[0]
+
+
+def _resolve_dart(
+    raw_import: str, all_files: list[str], source_file: str, dart_package: str
+) -> str:
+    """Resolve a Dart URI to a repo file.
+
+    - ``dart:...`` stays unresolved (SDK).
+    - ``package:<name>/<path>`` resolves through the package's ``lib/`` root.
+    - Relative URIs resolve against the importing file's directory.
+    """
+    import posixpath
+
+    if raw_import.startswith("dart:"):
+        return raw_import
+
+    if raw_import.startswith("package:"):
+        rest = raw_import[len("package:"):]
+        name, sep, path = rest.partition("/")
+        if not sep or not path:
+            return raw_import
+        # Self-referencing import in a single-package repo: the pubspec name
+        # maps straight onto the repo's own lib/ directory.
+        if dart_package and name == dart_package:
+            candidate = f"lib/{path}"
+            if candidate in all_files:
+                return candidate
+        return _resolve_dart_package_path(name, path, all_files)
+
+    if not source_file:
+        return raw_import
+
+    source_dir = posixpath.dirname(source_file)
+    resolved = posixpath.normpath(posixpath.join(source_dir, raw_import))
+    if resolved in all_files:
+        return resolved
+    if not resolved.endswith(".dart"):
+        with_ext = f"{resolved}.dart"
+        if with_ext in all_files:
+            return with_ext
+    return raw_import
+
+
 def resolve_import_to_file(raw_import: str,language: str, all_files: list[str], source_file: str = "", dart_package: str = "") -> str:
     """Try to resolve a raw import string to an actual file in the repo.
 
@@ -355,25 +428,9 @@ def resolve_import_to_file(raw_import: str,language: str, all_files: list[str], 
                         return candidate
                 
     elif language == "dart":
-        if raw_import.startswith("dart:"):
-            return raw_import
-        # Self-referencing package import: package:<name>/x.dart → lib/x.dart
-        if raw_import.startswith("package:") and dart_package:
-            prefix = f"package:{dart_package}/"
-            if raw_import.startswith(prefix):
-                candidate = "lib/" + raw_import[len(prefix):]
-                if candidate in all_files:
-                    return candidate
-            return raw_import
-        if raw_import.startswith("package:"):
-            return raw_import
-        # Relative import — resolve relative to the source file's directory
-        import posixpath
-        source_dir = posixpath.dirname(source_file)
-        candidate = posixpath.normpath(posixpath.join(source_dir, raw_import))
-        if candidate in all_files:
-            return candidate
-            
+        return _resolve_dart(raw_import, all_files, source_file, dart_package)
+
+
     elif language == "java":
         return _resolve_java(raw_import, all_files)
             

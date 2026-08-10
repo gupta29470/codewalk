@@ -88,6 +88,7 @@ import sys
 import json
 import shutil
 import subprocess
+import threading
 from pathlib import Path
 import requests
 
@@ -228,14 +229,23 @@ mcp = FastMCP(
         "        No other setup required — the dependency graph is built automatically on first\n"
         "        review (~5s) and cached for subsequent calls.\n"
         "        Reviews ALL matching changes: staged, unstaged, AND new untracked files.\n"
-        "        Returns: session_id + first batch of 3-5 files with full context.\n"
+        "        Returns: session_id + first batch of related files with full context\n"
+        "        (instructions, guidelines, rubrics, diffs). Batches are semantic\n"
+        "        (source+test) and token-budgeted (~200k, same as API) so context\n"
+        "        stays usable. New files omit the diff block (content only); edits\n"
+        "        keep a capped diff with all removals preserved.\n"
         "        Layer 0 (deterministic) findings are saved to disk automatically.\n"
         "\n"
         "Step 2: REVIEW LOOP — for each batch:\n"
         "   a) Review the files: identify bugs, security issues, logic errors, style.\n"
+        "      Each batch includes REVIEW_INSTRUCTIONS, stack context, code guidelines\n"
+        "      (from codewalk.yaml), rubrics, diffs, and neighborhood context.\n"
         "   b) Call codewalk_submit_batch_findings(session_id, findings=[...]) to save.\n"
-        "      Each finding: {file_path, line_number, severity, title, explanation,\n"
-        "                      current_code, recommended_code, blocking}\n"
+        "      Each finding MUST include: file_path, line_number, severity, category,\n"
+        "      title, explanation, current_code, recommended_code, blocking.\n"
+        "      category: bug|security|type_safety|architecture|error_handling|test|\n"
+        "      blast_radius|style|design|naming|complexity|logging|privacy|hygiene\n"
+        "      file_path must be from the current batch; empty findings need notes=.\n"
         "   c) Call codewalk_review_next_batch(session_id) to get next batch.\n"
         "   Repeat until 'All batches reviewed'.\n"
         "\n"
@@ -1282,6 +1292,21 @@ def _require_review_target(
     return None
 
 
+_REVIEW_START_LOCKS: dict[str, "threading.Lock"] = {}
+_REVIEW_START_LOCKS_META = threading.Lock()
+
+
+def _review_start_lock(repo: Path) -> "threading.Lock":
+    """Per-repo lock held across session creation, first batch, and abandonment."""
+    key = str(Path(repo).resolve())
+    with _REVIEW_START_LOCKS_META:
+        lock = _REVIEW_START_LOCKS.get(key)
+        if lock is None:
+            lock = threading.Lock()
+            _REVIEW_START_LOCKS[key] = lock
+        return lock
+
+
 def _start_batched_review(
     repo: Path,
     target_branch: str | None,
@@ -1292,11 +1317,13 @@ def _start_batched_review(
     """Shared setup for a batched review session.
 
     Returns a dict with session, session_dir, batch_state, static_result,
-    batches, rubrics, stack_header, stack, diff_files, and auto_f.
+    batches, rubrics, stack_header, stack, diff_files, auto_f, and the
+    rendered first_batch_context.
     """
     from src.codewalk.review.engine import (
         _build_common_context,
         _build_static_findings,
+        _load_code_guidelines_for_repo,
         group_files_for_review,
     )
     from src.codewalk.review.rubric_loader import build_rubrics
@@ -1306,9 +1333,19 @@ def _start_batched_review(
         get_rubric_names_from_stack,
     )
     from src.codewalk.review.session import ReviewSession, SessionStatus
-    from src.codewalk.review.session_store import save_session, _session_dir
+    from src.codewalk.review.session_store import (
+        _session_dir,
+        abandon_other_active_sessions,
+        save_session,
+        set_session_status,
+    )
     from src.codewalk.review.utils import build_session_folder_name, get_current_branch
     from src.codewalk.review.renderers.markdown import render_findings_markdown
+    from src.codewalk.review.context_builder import (
+        REVIEW_INSTRUCTIONS,
+        estimate_shared_context_tokens,
+        _format_rubrics,
+    )
     from src.codewalk.codewalk_config import load_codewalk_yaml
     from datetime import datetime, timezone
     import json as _json
@@ -1335,12 +1372,24 @@ def _start_batched_review(
     stack_header = format_stack_context_header(stack)
     rubric_names = get_rubric_names_from_stack(stack)
     rubrics = build_rubrics(repo, {df.file_path for df in diff_files}, detected_rubric_names=rubric_names)
+    guidelines = _load_code_guidelines_for_repo(repo)
+    user_prompt_path = repo / ".codewalk" / "review_prompt.md"
+    user_prompt = user_prompt_path.read_text(encoding="utf-8") if user_prompt_path.exists() else ""
 
-    # Group files into batches
+    # Hybrid batching: semantic groups (source+test, dir siblings) then token split
+    base_tokens = estimate_shared_context_tokens(
+        REVIEW_INSTRUCTIONS,
+        stack_header,
+        guidelines,
+        user_prompt,
+        _format_rubrics(rubrics),
+    )
     batches = group_files_for_review(
         diff_files,
         risk_annotations=static_result.risk_annotations,
         max_per_batch=5,
+        max_tokens_per_batch=200_000,
+        base_tokens=base_tokens,
     )
 
     # Create session with batch queue
@@ -1352,65 +1401,84 @@ def _start_batched_review(
     # Store batch queue in session
     batch_queue = [[df.file_path for df in batch] for batch in batches]
 
-    session = ReviewSession(
-        session_id=session_id,
-        repo_path=str(repo),
-        target_branch=target_branch,
-        commit=commit,
-        staged=staged,
-        status=SessionStatus.ACTIVE,
-        folder_name=folder_name,
-        current_branch=current_branch,
-        created_at=created_at.isoformat(),
-        updated_at=created_at.isoformat(),
-    )
-    save_session(session)
+    # Hold the per-repo lock across create → first batch → abandon so a failed
+    # first batch never orphans a prior ACTIVE session, and two concurrent
+    # starts cannot mark each other ABANDONED.
+    with _review_start_lock(repo):
+        session = ReviewSession(
+            session_id=session_id,
+            repo_path=str(repo),
+            target_branch=target_branch,
+            commit=commit,
+            staged=staged,
+            status=SessionStatus.ACTIVE,
+            folder_name=folder_name,
+            current_branch=current_branch,
+            created_at=created_at.isoformat(),
+            updated_at=created_at.isoformat(),
+        )
+        save_session(session)
 
-    # Save batch queue to session folder
-    session_dir = _session_dir(repo, folder_name)
-    session_dir.mkdir(parents=True, exist_ok=True)
+        # Save batch queue to session folder
+        session_dir = _session_dir(repo, folder_name)
+        session_dir.mkdir(parents=True, exist_ok=True)
 
-    batch_state = {
-        "session_id": session_id,
-        "total_files": len(diff_files),
-        "total_batches": len(batches),
-        "current_batch_index": 0,
-        "batch_queue": batch_queue,
-        "target_branch": target_branch,
-        "commit": commit,
-        "staged": staged,
-        "stack_header": stack_header,
-        "rubric_core": rubrics.core,
-        "rubric_language": rubrics.language,
-        "rubric_framework": rubrics.framework,
-        "rubric_fallback": rubrics.fallback,
-    }
-    (session_dir / "batch_state.json").write_text(
-        _json.dumps(batch_state, indent=2), encoding="utf-8"
-    )
+        batch_state = {
+            "session_id": session_id,
+            "total_files": len(diff_files),
+            "total_batches": len(batches),
+            "current_batch_index": 0,
+            "batch_queue": batch_queue,
+            "target_branch": target_branch,
+            "commit": commit,
+            "staged": staged,
+            "stack_header": stack_header,
+            "guidelines": guidelines,
+            "user_prompt": user_prompt,
+            "rubric_core": rubrics.core,
+            "rubric_language": rubrics.language,
+            "rubric_framework": rubrics.framework,
+            "rubric_fallback": rubrics.fallback,
+        }
+        (session_dir / "batch_state.json").write_text(
+            _json.dumps(batch_state, indent=2), encoding="utf-8"
+        )
 
-    # Write static_findings.json — deterministic findings persisted once
-    auto_f = _build_static_findings(static_result)
-    static_findings_data = [f.to_dict() for f in auto_f]
-    (session_dir / "static_findings.json").write_text(
-        _json.dumps(static_findings_data, indent=2),
-        encoding="utf-8",
-    )
-    (session_dir / "static_findings.md").write_text(
-        render_findings_markdown(
-            static_findings_data,
-            title="Static Findings",
-            source_label="deterministic static analysis",
-        ),
-        encoding="utf-8",
-    )
+        # Write static_findings.json — deterministic findings persisted once
+        auto_f = _build_static_findings(static_result)
+        static_findings_data = [f.to_dict() for f in auto_f]
+        (session_dir / "static_findings.json").write_text(
+            _json.dumps(static_findings_data, indent=2),
+            encoding="utf-8",
+        )
+        (session_dir / "static_findings.md").write_text(
+            render_findings_markdown(
+                static_findings_data,
+                title="Static Findings",
+                source_label="deterministic static analysis",
+            ),
+            encoding="utf-8",
+        )
 
-    # Initialize empty llm_findings.json for host LLM to append to
-    (session_dir / "llm_findings.json").write_text("[]", encoding="utf-8")
-    (session_dir / "llm_findings.md").write_text(
-        render_findings_markdown([], title="LLM Findings", source_label="review LLM"),
-        encoding="utf-8",
-    )
+        # Initialize empty llm_findings.json for host LLM to append to
+        (session_dir / "llm_findings.json").write_text("[]", encoding="utf-8")
+        (session_dir / "llm_findings.md").write_text(
+            render_findings_markdown([], title="LLM Findings", source_label="review LLM"),
+            encoding="utf-8",
+        )
+
+        try:
+            first_batch_context = _build_batch_context_for_host(
+                repo, batches[0], static_result, stack_header, rubrics,
+                guidelines=guidelines,
+                user_prompt=user_prompt,
+            )
+        except Exception as exc:
+            set_session_status(session, SessionStatus.ERROR, error=str(exc))
+            raise
+
+        # Only now is this review usable — supersede older unfinished ones.
+        abandon_other_active_sessions(repo, session_id)
 
     return {
         "session": session,
@@ -1423,6 +1491,7 @@ def _start_batched_review(
         "stack": stack,
         "diff_files": diff_files,
         "auto_f": auto_f,
+        "first_batch_context": first_batch_context,
     }
 
 
@@ -1522,17 +1591,10 @@ def codewalk_run_review(
 
     session = result["session"]
     batches = result["batches"]
-    static_result = result["static_result"]
-    stack_header = result["stack_header"]
-    rubrics = result["rubrics"]
     stack = result["stack"]
     diff_files = result["diff_files"]
     auto_f = result["auto_f"]
-
-    # Build first batch context
-    first_batch_context = _build_batch_context_for_host(
-        repo, batches[0], static_result, stack_header, rubrics,
-    )
+    first_batch_context = result["first_batch_context"]
 
     lines = [warning]
     lines.append(f"# Review Session: `{session.session_id}`\n")
@@ -1661,9 +1723,6 @@ def codewalk_re_review(
     session_dir = result["session_dir"]
     batch_state = result["batch_state"]
     batches = result["batches"]
-    static_result = result["static_result"]
-    stack_header = result["stack_header"]
-    rubrics = result["rubrics"]
     stack = result["stack"]
     diff_files = result["diff_files"]
     auto_f = result["auto_f"]
@@ -1675,10 +1734,7 @@ def codewalk_re_review(
         json.dumps(batch_state, indent=2), encoding="utf-8"
     )
 
-    # Build first batch context
-    first_batch_context = _build_batch_context_for_host(
-        repo, batches[0], static_result, stack_header, rubrics,
-    )
+    first_batch_context = result["first_batch_context"]
 
     lines = [warning]
     lines.append(f"# Re-Review Session: `{session.session_id}`\n")
@@ -1709,105 +1765,31 @@ def _build_batch_context_for_host(
     stack_header: str,
     rubrics,
     deep: bool = False,
+    guidelines: str = "",
+    user_prompt: str = "",
 ) -> str:
-    """Build review context markdown for a batch of files."""
-    from src.codewalk.review.neighborhood import expand_neighborhood
-    from src.codewalk.review.utils import smart_truncate_file_content
-    from src.codewalk.review.engine import _load_graph_runtime
-    from src.codewalk.review.context_builder import _git_recent_commits
+    """Build review context markdown for a batch of files (MCP host path).
 
-    # Single-file deep mode: only when caller explicitly requests it
-    deep_mode = deep
+    Delegates to ``build_unified_batch_context`` so MCP and API share the same
+    stack/guidelines/rubric/neighborhood assembly. Host-facing
+    ``REVIEW_INSTRUCTIONS`` are included so severity/category/submit guidance
+    appears inside every batch.
+    """
+    from src.codewalk.review.context_builder import build_unified_batch_context
 
-    parts: list[str] = []
-
-    # Stack context (same for all batches — host caches this)
-    if stack_header:
-        parts.append(stack_header)
-
-    # Rubric (once per batch)
-    parts.append("## Review Rubric\n")
-    if rubrics.core:
-        parts.append(rubrics.core)
-    lang_parts = [r for _, r in sorted(rubrics.language.items())]
-    if lang_parts:
-        parts.append("\n".join(lang_parts))
-    if rubrics.framework:
-        parts.append(rubrics.framework)
-    if rubrics.fallback:
-        parts.append(rubrics.fallback)
-    parts.append("")
-
-    # Neighborhood for this batch
-    graph_runtime, owns = _load_graph_runtime(repo_path)
-    graph_store = graph_runtime.store if graph_runtime and hasattr(graph_runtime, "store") else None
-    try:
-        neighborhood = expand_neighborhood(
-            repo_path, batch, graph_store=graph_store,
-            max_tokens=60_000 if deep_mode else 15_000,
-            deep=deep_mode,
-        )
-    finally:
-        if owns and graph_runtime and hasattr(graph_runtime, "store"):
-            try:
-                graph_runtime.store.close()
-            except Exception:
-                pass
-
-    # Per-file context
-    file_token_cap = 25_000 if deep_mode else 10_000
-    for df in batch:
-        ra = static_result.risk_annotations.get(df.file_path)
-        parts.append(f"### {df.file_path} (+{df.added_lines}/-{df.removed_lines})")
-        if ra and ra.to_prompt_text():
-            parts.append(f"> {ra.to_prompt_text()}")
-        parts.append("")
-
-        # File content (smart truncated)
-        full_path = repo_path / df.file_path
-        content = ""
-        if full_path.exists():
-            try:
-                content = full_path.read_text(encoding="utf-8")
-            except Exception:
-                pass
-        if content:
-            truncated = smart_truncate_file_content(content, df.hunks, max_tokens=file_token_cap)
-            parts.append("```")
-            parts.append(truncated)
-            parts.append("```")
-        else:
-            parts.append("*(file deleted or not found)*")
-
-        # Diff hunks
-        parts.append("\n**Diff:**")
-        for hunk in df.hunks:
-            parts.append(f"```diff")
-            parts.append(f"@@ -{hunk.source_start},{hunk.source_length} +{hunk.start_line},{len(hunk.lines)} @@")
-            for line in hunk.lines:
-                prefix = {"added": "+", "removed": "-", "context": " "}.get(line.change_type, " ")
-                parts.append(f"{prefix}{line.content}")
-            parts.append("```")
-
-        # In single-file mode, add recent commit history
-        if deep_mode:
-            git_log = _git_recent_commits(repo_path, df.file_path)
-            if git_log:
-                parts.append("\n**Recent commits:**")
-                parts.append(f"```\n{git_log}\n```")
-        parts.append("")
-
-    # Neighborhood context
-    if neighborhood and neighborhood.snippets:
-        parts.append("## Neighborhood Context (callers, tests)\n")
-        for snippet in neighborhood.snippets[:10]:
-            parts.append(f"**{snippet.source}:** `{snippet.file_path}`")
-            parts.append("```")
-            parts.append(snippet.content)
-            parts.append("```")
-            parts.append("")
-
-    return "\n".join(parts)
+    return build_unified_batch_context(
+        repo_path=repo_path,
+        batch=batch,
+        static_result=static_result,
+        stack_header=stack_header,
+        rubrics=rubrics,
+        guidelines=guidelines,
+        user_prompt=user_prompt,
+        file_token_cap=40_000,
+        diff_token_cap=20_000,
+        include_host_instructions=True,
+        deep=deep,
+    )
 
 
 # ─── TOOL 11g [REVIEW · AI]: codewalk_review_next_batch ─────────────
@@ -1838,6 +1820,14 @@ def codewalk_review_next_batch(session_id: str) -> str:
     session = load_session(Path(repo_path), session_id)
     if session is None:
         return f"❌ Session `{session_id}` not found."
+
+    from src.codewalk.review.session import SessionStatus
+
+    if session.status in (SessionStatus.ABANDONED, SessionStatus.ERROR):
+        return (
+            f"❌ Review session `{session_id}` is {session.status.value} "
+            f"(superseded by a newer review or failed). Start a new review."
+        )
 
     folder = session.folder_name or session.session_id
     session_dir = _session_dir(Path(repo_path), folder)
@@ -1900,10 +1890,14 @@ def codewalk_review_next_batch(session_id: str) -> str:
     )
 
     stack_header = batch_state.get("stack_header", "")
+    guidelines = batch_state.get("guidelines", "")
+    user_prompt = batch_state.get("user_prompt", "")
 
     # Build context for this batch
     batch_context = _build_batch_context_for_host(
         repo, batch_diff_files, static_result, stack_header, rubrics,
+        guidelines=guidelines,
+        user_prompt=user_prompt,
     )
 
     # Update batch index
@@ -1946,9 +1940,12 @@ def codewalk_submit_batch_findings(session_id: str, findings: list[dict], notes:
     llm_findings.md companion is regenerated at the same time.
 
     Each finding should be a dict with:
-      - file_path: str (required)
+      - file_path: str (required) — must be a file from the current batch
       - line_number: int | null
       - severity: "blocker" | "error" | "suggestion"
+      - category: "bug" | "security" | "type_safety" | "architecture" |
+        "error_handling" | "test" | "blast_radius" | "style" | "design" |
+        "naming" | "complexity" | "logging" | "privacy" | "hygiene"
       - title: str (short description)
       - explanation: str (why this is an issue)
       - current_code: str | null (the problematic code)
@@ -1976,6 +1973,14 @@ def codewalk_submit_batch_findings(session_id: str, findings: list[dict], notes:
     if session is None:
         return f"❌ Session `{session_id}` not found."
 
+    from src.codewalk.review.session import SessionStatus
+
+    if session.status != SessionStatus.ACTIVE:
+        return (
+            f"❌ Review session `{session_id}` is {session.status.value}; "
+            f"it no longer accepts findings. Start a new review."
+        )
+
     folder = session.folder_name or session.session_id
     session_dir = _session_dir(Path(repo_path), folder)
     llm_findings_path = session_dir / "llm_findings.json"
@@ -1997,17 +2002,30 @@ def codewalk_submit_batch_findings(session_id: str, findings: list[dict], notes:
     # Tag each finding with batch number
     batch_state_path = session_dir / "batch_state.json"
     batch_num = 0
+    allowed_paths: set[str] = set()
     if batch_state_path.exists():
         bs = _json.loads(batch_state_path.read_text(encoding="utf-8"))
         batch_num = bs.get("current_batch_index", 0) + 1
+        queue = bs.get("batch_queue") or []
+        idx = bs.get("current_batch_index", 0)
+        if 0 <= idx < len(queue):
+            allowed_paths = set(queue[idx])
 
-    for f in findings:
+    from src.codewalk.review.engine import validate_submitted_findings
+
+    validated, error = validate_submitted_findings(
+        findings, allowed_paths, repo_root=Path(repo_path)
+    )
+    if error:
+        return f"⚠️ Invalid findings — fix and resubmit: {error}"
+
+    for f in validated:
         f["batch"] = batch_num
         f.setdefault("source", "llm")
         f.setdefault("id", _finding_id_from_dict(f))
         f.setdefault("user_verdict", None)
 
-    existing.extend(findings)
+    existing.extend(validated)
 
     # Write back
     llm_findings_path.write_text(
@@ -2032,16 +2050,24 @@ def codewalk_submit_batch_findings(session_id: str, findings: list[dict], notes:
         bs = _json.loads(batch_state_path.read_text(encoding="utf-8"))
         outcomes = bs.setdefault("batch_outcomes", {})
         outcome_entry = {
-            "outcome": "findings" if findings else "clean",
-            "count": len(findings),
+            "outcome": "findings" if validated else "clean",
+            "count": len(validated),
         }
         if notes.strip():
             outcome_entry["notes"] = notes.strip()
         outcomes[str(batch_num)] = outcome_entry
         batch_state_path.write_text(_json.dumps(bs, indent=2), encoding="utf-8")
 
+        # Every batch has an outcome — the session is done and should no
+        # longer be treated as an unfinished review.
+        total_batches = bs.get("total_batches", 0)
+        if total_batches and len(outcomes) >= total_batches:
+            from src.codewalk.review.session_store import set_session_status
+
+            set_session_status(session, SessionStatus.COMPLETED)
+
     return (
-        f"✅ Saved {len(findings)} findings from batch {batch_num}. "
+        f"✅ Saved {len(validated)} findings from batch {batch_num}. "
         f"Running total: {len(existing)} LLM findings."
     )
 
@@ -2264,7 +2290,10 @@ def codewalk_review_file(
         pass
 
     try:
-        from src.codewalk.review.engine import _build_common_context
+        from src.codewalk.review.engine import (
+            _build_common_context,
+            _load_code_guidelines_for_repo,
+        )
         from src.codewalk.review.rubric_loader import build_rubrics
         from src.codewalk.review.stack_detect import (
             _load_cached,
@@ -2288,6 +2317,7 @@ def codewalk_review_file(
         stack_header = format_stack_context_header(stack)
         rubric_names = get_rubric_names_from_stack(stack)
         rubrics = build_rubrics(repo, {file_path}, detected_rubric_names=rubric_names)
+        guidelines = _load_code_guidelines_for_repo(repo)
 
         # Filter to the requested file
         target_diff_files = [df for df in diff_files if df.file_path == file_path]
@@ -2304,6 +2334,8 @@ def codewalk_review_file(
             parts.append("No diff found for this file — reviewing current content.\n")
             if stack_header:
                 parts.append(stack_header)
+            if guidelines:
+                parts.append(f"## Code guidelines\n\n{guidelines}\n")
             parts.append("## Review Rubric\n")
             if rubrics.core:
                 parts.append(rubrics.core)
@@ -2315,6 +2347,7 @@ def codewalk_review_file(
         batch_context = _build_batch_context_for_host(
             repo, target_diff_files, static_result, stack_header, rubrics,
             deep=True,
+            guidelines=guidelines,
         )
 
         lines = [f"# Single File Review: `{file_path}`\n"]
@@ -2327,7 +2360,10 @@ def codewalk_review_file(
         lines.append(batch_context)
         lines.append("\n---")
         lines.append("**Review this file for bugs, security issues, logic errors, and style.**")
-        lines.append("Report findings with: file_path, line_number, severity (blocker/error/suggestion), title, explanation, current_code, recommended_code.")
+        lines.append(
+            "Report findings with: file_path, line_number, severity, category, title, "
+            "explanation, current_code, recommended_code, blocking."
+        )
 
         return "\n".join(lines)
 

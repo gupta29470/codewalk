@@ -416,6 +416,35 @@ def list_sessions(repo_path: Path) -> list[str]:
     return [folder.name for folder in _session_folders(repo_path)]
 
 
+def set_session_status(
+    session: ReviewSession, status: SessionStatus, error: str = ""
+) -> None:
+    """Transition a session to a new status and persist it."""
+    from datetime import datetime, timezone
+
+    session.status = status
+    session.error = error or None
+    session.updated_at = datetime.now(timezone.utc).isoformat()
+    save_session(session)
+
+
+def abandon_other_active_sessions(repo_path: Path, keep_session_id: str) -> None:
+    """Mark every other ACTIVE session in this repo ABANDONED.
+
+    A new review supersedes any unfinished earlier one: those sessions can no
+    longer produce a meaningful summary (the working tree has moved on), so
+    they must not linger as active forever.
+    """
+    for folder_name in list_sessions(repo_path):
+        other = load_session_by_folder(repo_path, folder_name)
+        if (
+            other is not None
+            and other.session_id != keep_session_id
+            and other.status == SessionStatus.ACTIVE
+        ):
+            set_session_status(other, SessionStatus.ABANDONED)
+
+
 def delete_session(repo_path: Path, session_id: str) -> bool:
     """Delete a persisted session by session_id."""
     session = load_session(repo_path, session_id)

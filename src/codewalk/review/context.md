@@ -17,7 +17,7 @@ This package performs LLM-based code review on diffs and single files, optionall
 | `stack_detect.py` | Detect the project's tech stack (languages, frameworks, architecture, state management, data layer, testing, API style) from the file tree, with LLM-first detection and deterministic fallback. Persists results to `.codewalk/stack_context.json`. |
 | `utils.py` | Shared utilities: git HEAD SHA, token counting, import-block extraction, smart file truncation around hunks. |
 | `rubric_loader.py` | `build_rubrics()` — loads YAML rubric definitions into `Rubrics`. |
-| `context_builder.py` | `build_unified_batch_context()` — builds a single review prompt shared by the API and MCP paths. |
+| `context_builder.py` | `build_unified_batch_context()` — shared review prompt for API and MCP. MCP sets `include_host_instructions=True` to prepend `REVIEW_INSTRUCTIONS`; API uses `_UNIFIED_REVIEW_SYSTEM_PROMPT` as the LLM system message instead. Also exports `estimate_shared_context_tokens()`. |
 | `cancellation.py` | Per-session cancellation tokens: `start_review`, `check_cancelled`, `end_review`, `ReviewCancelledError`. |
 | `progress.py` | Progress callbacks and reporting helpers. |
 | `eval.py` | Evaluation helpers for comparing review output against expected issues. |
@@ -41,9 +41,10 @@ static_analysis.py → deterministic auto-findings (+ review_cache lookup/save)
     ↓
 engine.py assembles ReviewInputs (guidelines, architecture flags, file tree, rubrics)
     ↓
-engine.py creates token-bounded batches and context_builder.py builds one unified prompt per batch
+engine.py creates hybrid batches (semantic source+test grouping, then token-budget split) and context_builder.py builds one unified prompt per batch
     ↓
-reviewers.run_structured_review() runs a single LLM pass per batch using the unified rubric prompt
+API: reviewers.run_structured_review() with `_UNIFIED_REVIEW_SYSTEM_PROMPT`
+MCP: returns the same batch context (plus host REVIEW_INSTRUCTIONS) to the IDE agent
     ↓
 session_store.py persists active/review sessions under .codewalk/review_session/<folder_name>/.
     Session folders contain `session.json`, `static_findings.json`, `llm_findings.json`, and Markdown companions
@@ -67,7 +68,10 @@ renderers/ format output for API JSON / Markdown
 
 - The older monolithic `reviewer.py` has been split into `engine.py` + `context_builder.py` + `reviewers/` + `renderers/`.
 - `run_review()` is the single entry point used by the API `/review` endpoint and the MCP `codewalk_review_file` tool. Re-reviews load previous findings via `session_store.py` and pass them as `previous_findings` to `run_review()`.
-- Both API and MCP paths share the same batch context (`context_builder.build_unified_batch_context()`). The API path returns raw findings; the MCP path returns the context to the host LLM.
+- Both API and MCP paths share `context_builder.build_unified_batch_context()`. MCP prepends `REVIEW_INSTRUCTIONS` and injects `codewalk.yaml` guidelines; API keeps instructions in the system prompt and also injects guidelines.
+- MCP `group_files_for_review()` uses hybrid batching: semantic groups (max 5 files, source+test pairing, risk-sorted) then splits oversized groups to a **200k** token budget (aligned with the API path) that accounts for shared instructions/stack/rubrics/guidelines. Per-file content cap is 40k; modified-file diffs are capped at 20k with all removals retained. New files skip the diff block to avoid duplicating content.
+- Both paths size batches with the same estimator, `engine.estimate_file_prompt_tokens()`: the API's `_estimate_file_tokens()` is a caching wrapper around it. Keeping one function means API grouping reflects the caps `build_unified_batch_context()` actually applies instead of over-splitting on full hunk tokens.
+- MCP `codewalk_submit_batch_findings` validates required fields including `category`, rejects out-of-batch `file_path`, and rejects wildly out-of-range `line_number`. Empty batches still require `notes`.
 - Team guidelines: set `code_guidelines` in `codewalk.yaml` to an explicit file path, or place `code_guidelines.md` (or `.txt`/`.rst`) inside `docs_path`; it is loaded automatically by `review/utils.py.load_code_guidelines_text()`.
 - Rubrics: team overrides go in `.codewalk/rubrics/<name>.md` (e.g. `core.md`, `python.md`, `python_fastapi.md`, `typescript_nextjs.md`). Built-in rubrics live in `src/codewalk/review/rubrics/`.
 - API review responses contain `issues` (LLM findings), `static_issues` (deterministic/static findings), `files_reviewed`, `lines_added`, `lines_removed`, `session_id`, and `architecture_flags`. There is no server-side `verdict`, `summary`, `clusters`, or `merge_blockers`.

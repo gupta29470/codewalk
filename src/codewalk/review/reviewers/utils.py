@@ -45,6 +45,69 @@ def _format_hunks(diff_file: DiffFile) -> str:
     return "\n".join(lines)
 
 
+_DEFAULT_DIFF_TOKEN_CAP = 20_000
+_CHARS_PER_TOKEN = 3
+
+
+def format_capped_diff(
+    diff_file: DiffFile,
+    max_tokens: int = _DEFAULT_DIFF_TOKEN_CAP,
+) -> str:
+    """Format a unified diff, capping size while preserving every removal.
+
+    Removals (``-`` lines) are never dropped — that's where many bugs hide.
+    When over budget, context and addition lines are truncated first.
+    """
+    full = _format_hunks(diff_file)
+    if not full:
+        return ""
+    if len(full) // _CHARS_PER_TOKEN <= max_tokens:
+        return full
+
+    # Rebuild: always keep headers + removals; budget remaining for +/context.
+    kept: list[str] = []
+    used_chars = 0
+    budget_chars = max_tokens * _CHARS_PER_TOKEN
+    skipped_additions = 0
+    skipped_context = 0
+
+    for hunk in diff_file.hunks:
+        header = (
+            f"@@ -{hunk.source_start},{hunk.source_length} "
+            f"+{hunk.start_line},{len(hunk.lines)} @@"
+        )
+        kept.append(header)
+        used_chars += len(header) + 1
+
+        for line in hunk.lines:
+            prefix = {"added": "+", "removed": "-", "context": " "}.get(line.change_type, " ")
+            rendered = f"{prefix}{line.content}"
+            if line.change_type == "removed":
+                kept.append(rendered)
+                used_chars += len(rendered) + 1
+                continue
+            if used_chars + len(rendered) + 1 > budget_chars:
+                if line.change_type == "added":
+                    skipped_additions += 1
+                else:
+                    skipped_context += 1
+                continue
+            kept.append(rendered)
+            used_chars += len(rendered) + 1
+
+    note_parts: list[str] = []
+    if skipped_additions:
+        note_parts.append(f"{skipped_additions} addition line(s)")
+    if skipped_context:
+        note_parts.append(f"{skipped_context} context line(s)")
+    if note_parts:
+        kept.append(
+            f"# … truncated for token budget: omitted {' and '.join(note_parts)}; "
+            "all removals retained"
+        )
+    return "\n".join(kept)
+
+
 class ReviewIssueSchema(BaseModel):
     """JSON schema for one issue returned by a reviewer."""
     severity: str = Field(..., pattern=r"^(blocker|error|suggestion)$")

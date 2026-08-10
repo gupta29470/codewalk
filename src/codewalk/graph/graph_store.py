@@ -1,6 +1,7 @@
 """DuckDB-backed graph store: schema, file/symbol/import tables, and graph queries."""
 import logging
 import hashlib
+import threading
 import time
 import os
 import re
@@ -29,6 +30,24 @@ def _stable_id(*parts: str) -> str:
     return hashlib.sha256("|".join(parts).encode()).hexdigest()
 
 
+# In-process writer serialization, keyed by database path. Readers never take
+# this lock: they run on their own cursor over the same DuckDB instance, so a
+# process-wide lock around every operation would needlessly block them.
+_WRITER_LOCKS: dict[str, threading.Lock] = {}
+_WRITER_LOCKS_META = threading.Lock()
+
+
+def _writer_lock(db_path: str) -> threading.Lock:
+    """Return the process-wide writer lock for a database path."""
+    key = str(Path(db_path).resolve())
+    with _WRITER_LOCKS_META:
+        lock = _WRITER_LOCKS.get(key)
+        if lock is None:
+            lock = threading.Lock()
+            _WRITER_LOCKS[key] = lock
+        return lock
+
+
 class GraphStore:
     """Persistent graph storage backed by DuckDB.
 
@@ -45,7 +64,11 @@ class GraphStore:
         self.db_path = db_path
         Path(db_path).parent.mkdir(parents=True, exist_ok=True)
         self.conn = self._connect_with_retry(retries, retry_delay)
-        self._create_tables()
+        # Schema bootstrap is a write — serialize it against other writers in
+        # this process so two stores opening the same DB can't race the
+        # migration DROPs against each other.
+        with _writer_lock(self.db_path):
+            self._create_tables()
 
     def _connect_with_retry(self, retries: int, retry_delay: float) -> duckdb.DuckDBPyConnection:
         """Connect to DuckDB with retry logic for lock conflicts.
@@ -229,32 +252,36 @@ class GraphStore:
             deps: From build_dependency_graph() — {"graph": {"a.py": ["b.py"]}}
             module_results: From detect_modules() — {"modules": {...}, "module_graph": {...}}
         """
-        # Clear in reverse FK order: children before parents.
-        # Always delete ALL chunks first. During incremental reindex, files removed
-        # from disk are no longer in embedded_chunks, but their old chunks in
-        # DuckDB would still reference files.file_id and break the FK constraint
-        # when we clear the files table below.
-        self.conn.execute("DELETE FROM chunks")
-        self.conn.execute("DELETE FROM symbol_calls")
-        self.conn.execute("DELETE FROM class_members")
-        self.conn.execute("DELETE FROM class_hierarchy")
-        self.conn.execute("DELETE FROM symbol_metadata")
-        self.conn.execute("DELETE FROM symbols")
-        self.conn.execute("DELETE FROM imports")
-        self.conn.execute("DELETE FROM module_deps")
-        self.conn.execute("DELETE FROM modules")
-        self.conn.execute("DELETE FROM files")
+        # Sole full-rebuild writer: serialized in-process so a second rebuild
+        # can't interleave its DELETEs with this one's INSERTs.
+        with _writer_lock(self.db_path):
+            # Clear in reverse FK order: children before parents.
+            # Always delete ALL chunks first. During incremental reindex, files removed
+            # from disk are no longer in embedded_chunks, but their old chunks in
+            # DuckDB would still reference files.file_id and break the FK constraint
+            # when we clear the files table below.
+            self.conn.execute("DELETE FROM chunks")
+            self.conn.execute("DELETE FROM symbol_calls")
+            self.conn.execute("DELETE FROM class_members")
+            self.conn.execute("DELETE FROM class_hierarchy")
+            self.conn.execute("DELETE FROM symbol_metadata")
+            self.conn.execute("DELETE FROM symbols")
+            self.conn.execute("DELETE FROM imports")
+            self.conn.execute("DELETE FROM module_deps")
+            self.conn.execute("DELETE FROM modules")
+            self.conn.execute("DELETE FROM files")
 
-        self._populate_files(files, module_results)
-        self._populate_imports(deps)
-        metadata_rows, hierarchy_rows, member_rows = self._populate_symbols(files)
-        self._populate_symbol_metadata(metadata_rows)
-        self._populate_class_hierarchy(hierarchy_rows)
-        self._populate_class_members(member_rows)
-        self._populate_symbol_calls(files)
-        self._populate_modules(module_results)
-        if embedded_chunks:
-            self._populate_chunks(embedded_chunks)
+            self._populate_files(files, module_results)
+            self._populate_imports(deps)
+            metadata_rows, hierarchy_rows, member_rows = self._populate_symbols(files)
+            self._populate_symbol_metadata(metadata_rows)
+            self._populate_class_hierarchy(hierarchy_rows)
+            self._populate_class_members(member_rows)
+            self._populate_symbol_calls(files)
+            self._populate_modules(module_results)
+            if embedded_chunks:
+                self._populate_chunks(embedded_chunks)
+
         stats = self._get_stats()
 
         logger.info(
@@ -593,6 +620,15 @@ class GraphStore:
                 deps_row
             )
 
+    def _read(self):
+        """An independent cursor over the same DuckDB instance.
+
+        Queries run off their own cursor so an in-flight result set can't be
+        clobbered by a write on the shared connection, and two readers don't
+        serialize behind each other.
+        """
+        return self.conn.cursor()
+
     def get_import_edges(self) -> list[tuple[str, str]]:
         """All file-level import edges as (source_path, target_path) tuples.
 
@@ -600,7 +636,7 @@ class GraphStore:
             edges = store.get_import_edges()
             g = igraph.Graph.TupleList(edges, directed=True)
         """
-        return self.conn.execute(
+        return self._read().execute(
             """
             SELECT sf.path,
             tf.path FROM imports i 
@@ -611,14 +647,14 @@ class GraphStore:
     
     def get_module_dep_edges(self) -> list[tuple[str, str]]:
         """All module-level dependency edges as (source, target) tuples."""
-        return self.conn.execute(
+        return self._read().execute(
             "SELECT source, target FROM module_deps"
         ).fetchall()
     
     def get_module_file(self, file_path: str) -> str | None:
         """Which module does this file belong to?"""
         file_id = _stable_id(file_path)
-        result = self.conn.execute(
+        result = self._read().execute(
             "SELECT module FROM files where file_id = ?", [file_id]
         ).fetchone()
         return result[0] if result else None
@@ -626,7 +662,7 @@ class GraphStore:
     def get_files_in_module(self, module_name: str) -> list[str]:
         """All file paths in a given module."""
         return [
-            row[0] for row in self.conn.execute(
+            row[0] for row in self._read().execute(
                 "SELECT path FROM files WHERE module = ?", [module_name]
             ).fetchall()
         ]
@@ -634,7 +670,7 @@ class GraphStore:
     def get_symbols_in_file(self, file_path: str) -> list[dict]:
         """All symbols (functions/classes) in a file, ordered by line number."""
         file_id = _stable_id(file_path)
-        rows = self.conn.execute(
+        rows = self._read().execute(
             "SELECT symbol_id, name, qualified_name, symbol_type, start_line, end_line "
             "FROM symbols WHERE file_id = ? ORDER BY start_line", [file_id]
         ).fetchall()
@@ -653,14 +689,14 @@ class GraphStore:
     def get_all_files(self) -> list[str]:
         """All file paths in the graph."""
         return [
-            row[0] for row in self.conn.execute("SELECT path FROM files").fetchall()
+            row[0] for row in self._read().execute("SELECT path FROM files").fetchall()
         ]
     
     def get_importers(self, file_path: str) -> list[str]:
         """Which files import this file? (reverse lookup)"""
         file_id = _stable_id(file_path)
         return [
-            row[0] for row in self.conn.execute(
+            row[0] for row in self._read().execute(
                 "SELECT f.path FROM imports i "
                 "JOIN files f ON i.source_file_id = f.file_id "
                 "WHERE i.target_file_id = ?", [file_id]
@@ -671,7 +707,7 @@ class GraphStore:
         """Which files does this file import? (forward lookup)"""
         file_id = _stable_id(file_path)
         return [
-            row[0] for row in self.conn.execute(
+            row[0] for row in self._read().execute(
                 "SELECT f.path FROM imports i "
                 "JOIN files f ON i.target_file_id = f.file_id "
                 "WHERE i.source_file_id = ?", [file_id]
@@ -680,14 +716,25 @@ class GraphStore:
     
     def _get_stats(self) -> dict:
         """Summary stats for all tables."""
+        cursor = self._read()
         return {
-            "files": self.conn.execute("SELECT COUNT(*) FROM files").fetchone()[0],
-            "imports": self.conn.execute("SELECT COUNT(*) FROM imports").fetchone()[0],
-            "symbols": self.conn.execute("SELECT COUNT(*) FROM symbols").fetchone()[0],
-            "symbol_calls": self.conn.execute("SELECT COUNT(*) FROM symbol_calls").fetchone()[0],
-            "chunks": self.conn.execute("SELECT COUNT(*) FROM chunks").fetchone()[0],
-            "modules": self.conn.execute("SELECT COUNT(*) FROM modules").fetchone()[0],
+            "files": cursor.execute("SELECT COUNT(*) FROM files").fetchone()[0],
+            "imports": cursor.execute("SELECT COUNT(*) FROM imports").fetchone()[0],
+            "symbols": cursor.execute("SELECT COUNT(*) FROM symbols").fetchone()[0],
+            "symbol_calls": cursor.execute("SELECT COUNT(*) FROM symbol_calls").fetchone()[0],
+            "chunks": cursor.execute("SELECT COUNT(*) FROM chunks").fetchone()[0],
+            "modules": cursor.execute("SELECT COUNT(*) FROM modules").fetchone()[0],
         }
+
+    def get_language_counts(self) -> dict[str, int]:
+        """File count per language, largest first. Empty when nothing indexed."""
+        try:
+            rows = self._read().execute(
+                "SELECT language, COUNT(*) FROM files GROUP BY language ORDER BY 2 DESC"
+            ).fetchall()
+        except Exception:
+            return {}
+        return {row[0] or "unknown": row[1] for row in rows}
     
     def get_callers_of_symbol(self, qualified_name: str) -> list[dict]:
         """Who calls this symbol? Returns caller name, file, and call site line.
@@ -695,14 +742,15 @@ class GraphStore:
         Args:
             qualified_name: e.g. "color.go:Fprint" or "config.py:Settings"
         """
-        result = self.conn.execute(
+        cursor = self._read()
+        result = cursor.execute(
             "SELECT symbol_id FROM symbols WHERE qualified_name = ?",
             [qualified_name]
         ).fetchone()
         if not result:
             return []
         callee_id = result[0]
-        rows = self.conn.execute(
+        rows = cursor.execute(
             "SELECT s.name, s.qualified_name, f.path, sc.line "
             "FROM symbol_calls sc "
             "JOIN symbols s ON sc.caller_symbol_id = s.symbol_id "
@@ -724,14 +772,15 @@ class GraphStore:
     
     def get_callees_of_symbol(self, qualified_name: str) -> list[dict]:
         """What does this symbol call? Returns callee name, file, and line."""
-        result = self.conn.execute(
+        cursor = self._read()
+        result = cursor.execute(
             "SELECT symbol_id FROM symbols WHERE qualified_name = ?",
             [qualified_name]
         ).fetchone()
         if not result:
             return []
         caller_id = result[0]
-        rows = self.conn.execute(
+        rows = cursor.execute(
             "SELECT s.name, s.qualified_name, f.path, sc.line "
             "FROM symbol_calls sc "
             "JOIN symbols s ON sc.callee_symbol_id = s.symbol_id "
@@ -824,13 +873,13 @@ class GraphStore:
             return 0
 
         # Check if chunks table already has data
-        existing = self.conn.execute("SELECT COUNT(*) FROM chunks").fetchone()[0]
+        existing = self._read().execute("SELECT COUNT(*) FROM chunks").fetchone()[0]
         if existing > 0:
             return existing
 
         # Build symbol lookup: (file_path, symbol_name) → symbol_id
         symbol_lookup = {}
-        for row in self.conn.execute(
+        for row in self._read().execute(
             "SELECT s.symbol_id, s.name, f.path "
             "FROM symbols s JOIN files f ON s.file_id = f.file_id"
         ).fetchall():
@@ -867,13 +916,14 @@ class GraphStore:
             ))
 
         if rows:
-            self.conn.execute("DELETE FROM chunks")
-            self.conn.executemany(
-                "INSERT OR IGNORE INTO chunks "
-                "(chunk_id, file_id, symbol_id, start_line, end_line, content_hash, embedding_id) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?)",
-                rows
-            )
+            with _writer_lock(self.db_path):
+                self.conn.execute("DELETE FROM chunks")
+                self.conn.executemany(
+                    "INSERT OR IGNORE INTO chunks "
+                    "(chunk_id, file_id, symbol_id, start_line, end_line, content_hash, embedding_id) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    rows
+                )
             logger.info(f"[GraphStore] Backfilled {len(rows)} chunks from ChromaDB")
 
         return len(rows)

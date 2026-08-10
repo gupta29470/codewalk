@@ -96,6 +96,8 @@ def group_files_for_review(
     diff_files: list[DiffFile],
     risk_annotations: dict[str, Any] | None = None,
     max_per_batch: int = 5,
+    max_tokens_per_batch: int | None = 200_000,
+    base_tokens: int = 0,
 ) -> list[list[DiffFile]]:
     """Group related diff files into review batches.
 
@@ -103,11 +105,18 @@ def group_files_for_review(
       1. Pair source files with their test files
       2. Group same-directory siblings
       3. Sort batches by max risk score (highest first)
+      4. Split any semantic batch that exceeds ``max_tokens_per_batch``
+         (shared context cost is passed as ``base_tokens``)
 
     Args:
         diff_files: All changed files to review.
         risk_annotations: Optional risk annotations dict for priority sorting.
-        max_per_batch: Maximum files per batch (default 5).
+        max_per_batch: Maximum files per semantic batch (default 5).
+        max_tokens_per_batch: Soft token budget after semantic grouping
+            (default 200k — same as the API review path).
+            ``None`` disables token splitting (file-count only).
+        base_tokens: Estimated tokens for shared per-batch context
+            (instructions, stack header, rubrics, guidelines).
 
     Returns:
         List of batches, each batch is a list of DiffFiles.
@@ -207,12 +216,169 @@ def group_files_for_review(
         )
 
     batches.sort(key=_batch_risk, reverse=True)
-    return batches
+
+    if max_tokens_per_batch is None:
+        return batches
+    return _split_batches_by_tokens(batches, max_tokens_per_batch, base_tokens)
+
+
+_DEFAULT_BATCH_TOKEN_BUDGET = 200_000
+_DEFAULT_FILE_TOKEN_CAP = 40_000
+_DEFAULT_DIFF_TOKEN_CAP = 20_000
+_FIXED_OVERHEAD_TOKENS = 50
+_CHARS_PER_TOKEN = 3
+
+
+def estimate_file_prompt_tokens(
+    diff_file: DiffFile,
+    file_token_cap: int = _DEFAULT_FILE_TOKEN_CAP,
+    diff_token_cap: int = _DEFAULT_DIFF_TOKEN_CAP,
+) -> int:
+    """Estimate prompt tokens one file contributes to a review batch.
+
+    Mirrors what ``build_unified_batch_context`` actually emits, so MCP and API
+    batch grouping both estimate the same prompt:
+      - new files: content only (the diff block is omitted, no duplication)
+      - modified/deleted: truncated content + a diff capped at ``diff_token_cap``
+    """
+    file_tokens = min(
+        file_token_cap,
+        (diff_file.added_lines + diff_file.removed_lines + 200) * 5,
+    )
+    if diff_file.is_new_file:
+        return file_tokens + _FIXED_OVERHEAD_TOKENS
+
+    hunk_chars = sum(len(line.content) for hunk in diff_file.hunks for line in hunk.lines)
+    hunk_tokens = min(diff_token_cap, hunk_chars // _CHARS_PER_TOKEN)
+    return file_tokens + hunk_tokens + _FIXED_OVERHEAD_TOKENS
+
+
+def _split_batches_by_tokens(
+    batches: list[list[DiffFile]],
+    max_tokens_per_batch: int,
+    base_tokens: int,
+) -> list[list[DiffFile]]:
+    """Re-pack semantic batches so each fits the shared + per-file token budget.
+
+    A single file that alone exceeds the budget still gets its own (over-budget)
+    batch rather than being dropped or split mid-file.
+    """
+    result: list[list[DiffFile]] = []
+    for batch in batches:
+        current: list[DiffFile] = []
+        for df in batch:
+            trial = current + [df]
+            tokens = base_tokens + sum(estimate_file_prompt_tokens(f) for f in trial)
+            if current and tokens > max_tokens_per_batch:
+                result.append(current)
+                current = [df]
+            else:
+                current = trial
+        if current:
+            result.append(current)
+    return result
 
 
 class _NullAnnotation:
     """Stub for missing risk annotations."""
     risk_score: float = 0.0
+
+
+_LINE_NUMBER_SLACK = 200
+_VALID_CATEGORIES = {c.value for c in Category}
+_VALID_SEVERITIES = {s.value for s in Severity}
+
+
+def validate_submitted_findings(
+    findings: list[dict[str, Any]],
+    allowed_file_paths: set[str],
+    repo_root: Path | None = None,
+) -> tuple[list[dict[str, Any]], str | None]:
+    """Validate host-submitted finding dicts for an MCP batch.
+
+    Returns ``(validated_findings, error_message)``. On failure the list is
+    empty and ``error_message`` explains what to fix. Checks:
+      - required fields (file_path, severity, category, title, explanation)
+      - severity / category enum values
+      - file_path belongs to the current batch
+      - line_number is not wildly past EOF (when the file exists)
+    """
+    validated: list[dict[str, Any]] = []
+    for index, raw in enumerate(findings):
+        if not isinstance(raw, dict):
+            return [], f"finding[{index}] must be an object, got {type(raw).__name__}"
+
+        file_path = raw.get("file_path")
+        if not file_path or not isinstance(file_path, str):
+            return [], f"finding[{index}] is missing required field `file_path`"
+
+        for field in ("severity", "category", "title", "explanation"):
+            if not raw.get(field):
+                return [], (
+                    f"finding[{index}] for `{file_path}` is missing required field "
+                    f"`{field}`"
+                )
+
+        severity = str(raw["severity"]).lower()
+        category = str(raw["category"]).lower()
+        if severity not in _VALID_SEVERITIES:
+            return [], (
+                f"finding[{index}] for `{file_path}` has invalid severity "
+                f"`{raw['severity']}`; expected one of {sorted(_VALID_SEVERITIES)}"
+            )
+        if category not in _VALID_CATEGORIES:
+            return [], (
+                f"finding[{index}] for `{file_path}` has invalid category "
+                f"`{raw['category']}`; expected one of {sorted(_VALID_CATEGORIES)}"
+            )
+
+        if allowed_file_paths and file_path not in allowed_file_paths:
+            return [], (
+                f"finding[{index}] references `{file_path}`, which is not part of "
+                f"the batch that was just reviewed"
+            )
+
+        line_number = raw.get("line_number")
+        if line_number is not None and repo_root is not None:
+            try:
+                line_int = int(line_number)
+            except (TypeError, ValueError):
+                return [], (
+                    f"finding[{index}] for `{file_path}` has non-integer "
+                    f"line_number `{line_number}`"
+                )
+            full_path = repo_root / file_path
+            if full_path.exists():
+                try:
+                    line_count = full_path.read_text(encoding="utf-8").count("\n") + 1
+                except (OSError, UnicodeDecodeError):
+                    line_count = None
+                if line_count is not None and line_int > line_count + _LINE_NUMBER_SLACK:
+                    return [], (
+                        f"finding[{index}] for `{file_path}` references line "
+                        f"{line_int}, but the file only has {line_count} lines"
+                    )
+            raw = {**raw, "line_number": line_int}
+
+        cleaned = {
+            **raw,
+            "severity": severity,
+            "category": category,
+            "file_path": file_path,
+        }
+        validated.append(cleaned)
+
+    # Dedupe by id when present
+    seen: set[str] = set()
+    deduped: list[dict[str, Any]] = []
+    for item in validated:
+        fid = item.get("id")
+        if fid and fid in seen:
+            continue
+        if fid:
+            seen.add(fid)
+        deduped.append(item)
+    return deduped, None
 
 
 def _prepare_review_inputs(
@@ -676,28 +842,18 @@ def _finding_from_dict(item: dict[str, Any]) -> Finding:
     return finding
 
 
-# Per-file token cap used by build_unified_batch_context's smart_truncate_file_content.
-_FILE_TOKEN_CAP = 10000
-
-
 def _estimate_file_tokens(df: DiffFile) -> int:
     """Estimate tokens for a single file in the batch prompt.
 
-    Accounts for the truncation cap applied by build_unified_batch_context and caches
-    the result on the DiffFile object for O(1) repeated access.
+    Delegates to the shared ``estimate_file_prompt_tokens`` so API batch
+    grouping matches the prompt ``build_unified_batch_context`` actually
+    builds, and caches the result on the DiffFile for O(1) repeated access.
     """
     cached = getattr(df, "_cached_prompt_tokens", None)
     if cached is not None:
         return cached
 
-    # Diff hunks are always sent in full
-    hunk_chars = sum(len(line.content) for hunk in df.hunks for line in hunk.lines)
-    hunk_tokens = hunk_chars // 3  # code averages ~3 chars/token
-
-    # File content is truncated to _FILE_TOKEN_CAP by smart_truncate
-    file_tokens = min(_FILE_TOKEN_CAP, (df.added_lines + df.removed_lines + 200) * 5)
-
-    total = file_tokens + hunk_tokens + 50  # 50 for headers/formatting
+    total = estimate_file_prompt_tokens(df)
     df._cached_prompt_tokens = total  # type: ignore[attr-defined]
     return total
 
@@ -710,8 +866,8 @@ def _estimate_batch_prompt_tokens(
 ) -> int:
     """Estimate total tokens for a batch prompt.
 
-    Uses cached per-file estimates and accounts for the 10000-token truncation
-    cap that build_unified_batch_context applies. No disk I/O.
+    Uses the shared per-file estimator (content cap + capped diff, new files
+    content-only), cached per DiffFile. No disk I/O.
     """
     from src.codewalk.review.utils import count_tokens
 
@@ -857,8 +1013,7 @@ def _run_review_in_batches(
     def _review_batch(batch: list[DiffFile]) -> tuple[list[Finding], int]:
         if cancel_event is not None and cancel_event.is_set():
             raise ReviewCancelledError(getattr(cancel_event, "_review_id", "unknown"))
-        # Single-file mode: raise per-file token cap from 10K to 25K
-        _file_cap = 25_000 if len(diff_files) == 1 else 10_000
+        _file_cap = 40_000
         batch_context = build_unified_batch_context(
             repo_path=repo_path,
             batch=batch,
@@ -870,6 +1025,8 @@ def _run_review_in_batches(
             previous_findings=previous_findings or [],
             cancel_event=cancel_event,
             file_token_cap=_file_cap,
+            diff_token_cap=20_000,
+            deep=len(batch) == 1,
         )
         try:
             return run_structured_review(

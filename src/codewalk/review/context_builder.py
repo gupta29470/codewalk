@@ -15,13 +15,55 @@ from src.codewalk.review.diff_parser import DiffFile
 from src.codewalk.review.neighborhood import expand_neighborhood
 from src.codewalk.review.report import Finding
 from src.codewalk.review.rubric_loader import Rubrics
-from src.codewalk.review.reviewers.utils import _format_hunks, _read_file_content
+from src.codewalk.review.reviewers.utils import (
+    _read_file_content,
+    format_capped_diff,
+)
 from src.codewalk.review.utils import smart_truncate_file_content
 
 if TYPE_CHECKING:
     from src.codewalk.review.static_analysis import StaticAnalysisResult
 
 logger = logging.getLogger(__name__)
+
+
+# Host-LLM instructions prepended to every MCP batch. The API path uses
+# `_UNIFIED_REVIEW_SYSTEM_PROMPT` instead (structured JSON output contract).
+REVIEW_INSTRUCTIONS = """# Code Review
+
+Use the repository context, rubrics, and risk annotations below to find
+concrete, actionable issues introduced or worsened by this diff.
+
+Do not praise. Do not flag style nits unless they indicate a real bug. Only
+flag issues caused or worsened by the current diff. Provide a concrete fix
+for every issue you report.
+
+## Severity
+- **blocker**: security vulnerability, crash, data loss, race condition, breaking API
+  change, PII exposure
+- **error**: logic error, missing edge case, unsafe pattern, type issue, untested
+  new business logic
+- **suggestion**: readability, naming, minor consistency
+
+## Finding fields (required on submit)
+Each finding must include:
+- `file_path`, `line_number`, `severity`, `category`, `title`, `explanation`
+- `current_code`, `recommended_code`, `blocking`
+- `category`: one of bug | security | type_safety | architecture | error_handling |
+  test | blast_radius | style | design | naming | complexity | logging | privacy | hygiene
+
+Call `codewalk_submit_batch_findings` with your findings for this batch."""
+
+
+_CHARS_PER_TOKEN = 3
+_DEFAULT_FILE_TOKEN_CAP = 40_000
+_DEFAULT_DIFF_TOKEN_CAP = 20_000
+
+
+def estimate_shared_context_tokens(*text_blocks: str) -> int:
+    """Estimate tokens for content repeated in every batch (instructions, stack, rubrics, guidelines)."""
+    total_chars = sum(len(block) for block in text_blocks if block)
+    return total_chars // _CHARS_PER_TOKEN
 
 
 _UNIFIED_REVIEW_SYSTEM_PROMPT = """# Principal Software Engineer — Code Review
@@ -141,18 +183,33 @@ def build_unified_batch_context(
     user_prompt: str = "",
     previous_findings: list[Finding] | None = None,
     cancel_event: threading.Event | None = None,
-    file_token_cap: int = 10_000,
+    file_token_cap: int = _DEFAULT_FILE_TOKEN_CAP,
+    diff_token_cap: int = _DEFAULT_DIFF_TOKEN_CAP,
+    include_host_instructions: bool = False,
+    deep: bool = False,
 ) -> str:
     """Build a single review context string shared by API and MCP paths.
 
     The returned markdown string contains stack context, rubrics, guidelines,
     previous findings, per-file content + diffs + risk annotations, and
     neighborhood context.
+
+    Diff policy (avoids content+diff duplication on large new files):
+      - new files: file content only (smart truncated)
+      - modified/deleted: truncated content + capped diff (all ``-`` lines kept)
+
+    When ``include_host_instructions`` is True (MCP batched review), prepends
+    ``REVIEW_INSTRUCTIONS`` so the host LLM gets severity/category/submit
+    guidance inside every batch. The API path leaves this False and uses
+    ``_UNIFIED_REVIEW_SYSTEM_PROMPT`` as the LLM system message instead.
     """
     # Lazy import to avoid circular dependency with engine.py.
     from src.codewalk.review.engine import _load_graph_runtime
 
     parts: list[str] = []
+
+    if include_host_instructions:
+        parts.append(REVIEW_INSTRUCTIONS)
 
     if stack_header:
         parts.append(stack_header)
@@ -172,7 +229,7 @@ def build_unified_batch_context(
         parts.append(f"## Team-specific instructions\n\n{user_prompt}")
 
     # Neighborhood context.
-    deep_mode = len(batch) == 1 and file_token_cap > 10_000
+    deep_mode = deep or (len(batch) == 1 and file_token_cap > _DEFAULT_FILE_TOKEN_CAP)
     graph_runtime, owns_runtime = _load_graph_runtime(repo_path)
     graph_store = graph_runtime.store if graph_runtime and hasattr(graph_runtime, "store") else None
     try:
@@ -212,13 +269,22 @@ def build_unified_batch_context(
             parts.append("```")
             parts.append(truncated)
             parts.append("```")
+        elif df.is_deleted:
+            parts.append("*(file deleted)*")
         else:
             parts.append("*(file deleted or not found)*")
 
-        parts.append("\n**Diff:**")
-        parts.append("```diff")
-        parts.append(_format_hunks(df))
-        parts.append("```")
+        # New files: content-only (diff would duplicate the whole file).
+        # Modified/deleted: include a capped diff so removals stay visible.
+        if not df.is_new_file:
+            capped = format_capped_diff(df, max_tokens=diff_token_cap)
+            if capped:
+                parts.append("\n**Diff:**")
+                parts.append("```diff")
+                parts.append(capped)
+                parts.append("```")
+        else:
+            parts.append("\n*(new file — content shown above; diff omitted to avoid duplication)*")
 
         # In single-file mode, add recent commit history for extra context
         if deep_mode:
