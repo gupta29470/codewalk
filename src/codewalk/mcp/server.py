@@ -127,6 +127,7 @@ from src.codewalk.query import (
     reading_order_text, execution_flow_text,
 )
 from src.codewalk.doc_knowledge.prompts import DOC_ASK_PROMPT
+from src.codewalk.mcp.upgrade import perform_upgrade
 from src.codewalk.review.report import ReviewContextPackage
 from src.codewalk.review.session_store import load_session
 
@@ -198,6 +199,9 @@ mcp = FastMCP(
         "## MAINTENANCE (after code changes or interrupted indexing)\n"
         "- codewalk_incremental_reindex — re-embed changed files, resume partial indexes, and remove chunks for deleted files (hash-based)\n"
         "- codewalk_refresh_analysis — rebuild deps/modules without re-embedding\n"
+        "- codewalk_upgrade() — pulls the latest codewalk main branch for this MCP "
+        "install and reports the new version. Restart the MCP server afterward to "
+        "load the updated code.\n"
         "\n"
         "## CODE REVIEW — FULL FLOW (agent-driven via MCP)\n"
         "\n"
@@ -2744,6 +2748,25 @@ def codewalk_run_tests(file_paths: list[str] | None = None) -> str:
         lines.extend(["", f"**Error:** {result.error}"])
 
     return "\n".join(lines)
+
+
+# ─── TOOL 13d [MAINT · user+AI]: codewalk_upgrade ─────────────────────
+@mcp.tool()
+def codewalk_upgrade(repo_path: str | None = None) -> str:
+    """Upgrade the codewalk MCP install itself to the latest main branch.
+
+    Locates the codewalk install from the project's mcp.json (or the running
+    process), checks out main, pulls origin/main with --ff-only, and reports
+    the new version. Restart the MCP server afterward to load the updated code.
+
+    Args:
+        repo_path: Optional repo directory to look for .cursor/mcp.json or
+            .vscode/mcp.json. Defaults to the current working directory.
+    """
+    project_root = Path(repo_path).resolve() if repo_path else Path.cwd()
+    if not project_root.is_dir():
+        return f"❌ codewalk_upgrade failed: `{repo_path}` is not a directory."
+    return perform_upgrade(project_root)
 
 
 # ══════════════════════════════════════════════════════════════════════
